@@ -69,6 +69,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         # remain valid between polls that contain only RealTimeData records.
         self._last_battery: Optional[float] = None
         self._last_accumulated_dose: Optional[float] = None
+        self._last_temperature: Optional[float] = None
 
     async def _async_update_data(self) -> RadiaCodeData:
         """Fetch data_buf from device, reconnecting only when needed.
@@ -94,6 +95,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
             self._last_battery = data.battery
         if data.accumulated_dose is not None:
             self._last_accumulated_dose = data.accumulated_dose
+        if data.temperature is not None:
+            self._last_temperature = data.temperature
 
         # Return a fully-populated RadiaCodeData using cached values where
         # the device didn't send fresh RareData this cycle.
@@ -102,6 +105,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
             count_rate=data.count_rate,
             accumulated_dose=self._last_accumulated_dose,
             battery=self._last_battery,
+            temperature=self._last_temperature,
         )
 
     async def _poll_with_retry(

@@ -90,6 +90,7 @@ class RadiaCodeData:
     count_rate: Optional[float]        # CPS      (from RealTimeData)
     accumulated_dose: Optional[float]  # µSv      (from RareData)
     battery: Optional[float]           # percent  (from RareData)
+    temperature: Optional[float]       # °C       (from RareData)
 
 
 # ── Command builder ───────────────────────────────────────────────────────────
@@ -296,6 +297,7 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     count_rate: Optional[float] = None
     accumulated_dose: Optional[float] = None
     battery: Optional[float] = None
+    temperature: Optional[float] = None
 
     for r in records:
         if isinstance(r, RealTimeData):
@@ -304,12 +306,14 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
         elif isinstance(r, RareData):
             accumulated_dose = r.dose
             battery = r.charge_level * 100   # convert fraction → percent
+            temperature = r.temperature      # °C, already converted in decoder
 
     return RadiaCodeData(
         dose_rate=dose_rate,
         count_rate=count_rate,
         accumulated_dose=accumulated_dose,
         battery=battery,
+        temperature=temperature,
     )
 
 

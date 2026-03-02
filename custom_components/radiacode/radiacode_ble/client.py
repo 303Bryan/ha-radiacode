@@ -238,11 +238,12 @@ class RadiaCodeBLEClient:
         result = extract_sensor_values(records)
         _LOGGER.debug(
             "get_data → dose_rate=%.4f µSv/h  count_rate=%.1f CPS  "
-            "dose=%.4f µSv  battery=%s%%",
+            "dose=%.4f µSv  battery=%s%%  temp=%s°C",
             result.dose_rate or 0,
             result.count_rate or 0,
             result.accumulated_dose or 0,
             f"{result.battery:.0f}" if result.battery is not None else "—",
+            f"{result.temperature:.1f}" if result.temperature is not None else "—",
         )
         return result
 
