@@ -2,12 +2,17 @@
 
 Poll cycle (every 15 seconds):
   1. Locate the BLE device via HA's Bluetooth manager.
-  2. connect() → runs the device init sequence.
+  2. If not already connected, connect and run the device init sequence.
   3. get_data() → fetches data_buf, decodes records.
-  4. disconnect() — always, even on error.
+  4. On error → disconnect (next poll will reconnect).
   5. Merge results with cached RareData values (battery, accumulated_dose appear
      only ~once per minute in RareData records, so we must cache them across
      poll cycles where no RareData is present).
+
+The BLE connection is kept open between polls to avoid the expensive
+connect + init round-trip (~7-15 s through ESPHome BT proxies). This
+dramatically reduces the data_buf size on each read, making complete
+transfers possible within the proxy's notification buffer limit.
 """
 
 from __future__ import annotations
@@ -49,7 +54,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         self._last_accumulated_dose: Optional[float] = None
 
     async def _async_update_data(self) -> RadiaCodeData:
-        """Connect to device, fetch data_buf, return merged RadiaCodeData."""
+        """Fetch data_buf from device, reconnecting only when needed."""
 
         # Ask HA's Bluetooth stack for the current BLEDevice handle.
         # This works transparently whether the device is on a local adapter
@@ -63,15 +68,19 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
             )
 
         try:
-            await self._client.connect(ble_device)
+            # Reuse existing connection when possible; reconnect if dropped.
+            if not self._client.is_connected:
+                _LOGGER.debug("RadiaCode not connected, establishing connection")
+                await self._client.connect(ble_device)
+
             data = await self._client.get_data()
+
         except Exception as err:
+            # Tear down stale connection so next poll starts fresh.
+            await self._client.disconnect()
             raise UpdateFailed(
                 f"Error communicating with RadiaCode {self._address}: {err}"
             ) from err
-        finally:
-            # Always disconnect — do not hold BLE slots between polls.
-            await self._client.disconnect()
 
         # Update cache when fresh RareData arrived in this batch.
         if data.battery is not None:
