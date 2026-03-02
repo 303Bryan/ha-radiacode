@@ -275,6 +275,18 @@ class RadiaCodeBLEClient:
         try:
             await asyncio.wait_for(self._notify_event.wait(), timeout=_CMD_TIMEOUT)
         except asyncio.TimeoutError as exc:
+            # If we received partial data (common with large DATA_BUF responses
+            # through ESPHome BT proxies whose notification buffer is limited),
+            # return what we have instead of failing. decode_data_buf already
+            # handles truncated records gracefully.
+            if len(self._resp_buf) >= 4:
+                _LOGGER.warning(
+                    "Partial response for cmd %#06x (seq=%d): "
+                    "received %d bytes, still missing %d; using partial data",
+                    cmd, seq, len(self._resp_buf), self._resp_total,
+                )
+                body = bytes(self._resp_buf)
+                return parse_response_body(body, cmd, seq)
             raise TimeoutError(
                 f"No response to RadiaCode command {cmd:#06x} (seq={seq})"
             ) from exc

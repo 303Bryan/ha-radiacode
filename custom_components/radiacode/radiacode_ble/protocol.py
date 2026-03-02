@@ -22,10 +22,13 @@ Wire format (response, arrives via BLE notifications):
 """
 
 import datetime
+import logging
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Optional
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # ── BLE UUIDs ─────────────────────────────────────────────────────────────────
@@ -150,7 +153,14 @@ def parse_vs_response(payload: bytes) -> bytes:
     if len(data) == data_len + 1 and data[-1] == 0x00:
         data = data[:-1]
 
-    if len(data) != data_len:
+    if len(data) < data_len:
+        # Partial data — common when a large response is truncated by a
+        # BT proxy with a limited notification buffer. Return what we have;
+        # decode_data_buf handles truncated records gracefully.
+        _LOGGER.warning(
+            "VS data truncated: received %d of %d bytes", len(data), data_len
+        )
+    elif len(data) > data_len:
         raise ValueError(
             f"VS data length mismatch: got {len(data)} bytes, expected {data_len}"
         )
