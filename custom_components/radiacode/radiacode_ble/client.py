@@ -191,6 +191,14 @@ class RadiaCodeBLEClient:
 
         Sets _notify_event when all expected bytes have arrived.
         """
+        _LOGGER.debug(
+            "_on_notify: %d bytes, resp_total_before=%d, buf_len=%d, data=%s",
+            len(data),
+            self._resp_total,
+            len(self._resp_buf),
+            data[:16].hex(),
+        )
+
         if self._resp_total == 0:
             # First packet — extract the declared body length
             if len(data) < 4:
@@ -203,6 +211,11 @@ class RadiaCodeBLEClient:
             # Total frame = 4-byte header + body
             self._resp_total = 4 + body_len
             self._resp_buf = bytearray(data[4:])
+            _LOGGER.debug(
+                "_on_notify: first packet, body_len=%d, resp_total=%d",
+                body_len,
+                self._resp_total,
+            )
         else:
             # Continuation packet
             self._resp_buf.extend(data)
@@ -216,6 +229,7 @@ class RadiaCodeBLEClient:
             self._resp_total = 0
 
         if self._resp_total == 0:
+            _LOGGER.debug("_on_notify: response complete, setting event")
             self._notify_event.set()
 
     # ── Low-level command execution ───────────────────────────────────────────
@@ -241,10 +255,21 @@ class RadiaCodeBLEClient:
         self._resp_total = 0
         self._notify_event.clear()
 
-        # Write in chunks to respect BLE MTU
+        _LOGGER.debug(
+            "_execute: cmd=%#06x seq=%d packet=%s (%d bytes)",
+            cmd, seq, packet.hex(), len(packet),
+        )
+
+        # Write in chunks to respect BLE MTU.
+        # Use response=True (ATT Write Request) to match cdump/bluepy behaviour;
+        # some devices require the ATT acknowledgement before processing the command.
         for offset in range(0, len(packet), _WRITE_CHUNK):
             chunk = packet[offset: offset + _WRITE_CHUNK]
-            await self._client.write_gatt_char(WRITE_CHAR_UUID, chunk, response=False)
+            _LOGGER.debug("_execute: writing chunk offset=%d len=%d", offset, len(chunk))
+            await self._client.write_gatt_char(WRITE_CHAR_UUID, chunk, response=True)
+            _LOGGER.debug("_execute: chunk write complete")
+
+        _LOGGER.debug("_execute: all chunks written, waiting for notify (timeout=%.1f s)", _CMD_TIMEOUT)
 
         # Wait for the complete response
         try:
