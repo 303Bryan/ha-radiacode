@@ -1,11 +1,13 @@
 """
 RadiaCode BLE client — async I/O layer built on bleak.
 
-Usage pattern (connect → read → disconnect per poll cycle):
+Usage pattern (persistent connection across polls):
 
     client = RadiaCodeBLEClient()
     await client.connect(ble_device)
     data = await client.get_data()   # RadiaCodeData dataclass
+    # ... next poll ...
+    data = await client.get_data()
     await client.disconnect()
 
 The device requires an initialization sequence on every connection
@@ -24,6 +26,15 @@ Command sequencing
 Commands are strictly sequential (one in-flight at a time). The
 seq counter (0–31) is encoded in each command and echoed by the
 device, letting parse_response_body() detect mismatched replies.
+
+Connection resilience
+─────────────────────
+Reconnecting after a dropped BLE link requires careful teardown of
+the old BleakClient:
+  • stop_notify() on the old client prevents ghost _on_notify callbacks
+  • Notification reassembly state (_resp_buf, _resp_total) is reset
+  • _client is set to None *before* the slow disconnect() call so
+    is_connected returns False immediately, avoiding rapid retry loops
 """
 
 import asyncio
@@ -87,11 +98,25 @@ class RadiaCodeBLEClient:
         self._resp_total: int = 0
         self._notify_event: asyncio.Event = asyncio.Event()
 
+        # Guard: _on_notify ignores packets arriving when no command is in-flight.
+        self._expecting_response: bool = False
+
     # ── Connection management ─────────────────────────────────────────────────
+
+    def _reset_notification_state(self) -> None:
+        """Clear all notification reassembly state.  Safe to call at any time."""
+        self._resp_buf = bytearray()
+        self._resp_total = 0
+        self._notify_event.clear()
+        self._expecting_response = False
 
     async def connect(self, ble_device: BLEDevice) -> None:
         """
         Connect to a RadiaCode device and run the required init sequence.
+
+        If a previous BleakClient exists (stale connection), it is torn down
+        first — notifications are stopped and the client disconnected — to
+        prevent ghost _on_notify callbacks from a dead transport.
 
         The init sequence (SET_EXCHANGE → SET_TIME → DEVICE_TIME=0) must be
         completed before the device streams data_buf records.
@@ -99,7 +124,23 @@ class RadiaCodeBLEClient:
         Raises:
             Exception: if bleak_retry_connector cannot establish a connection.
         """
+        # ── Tear down any previous client to prevent double _on_notify ──────
+        old = self._client
+        self._client = None          # is_connected → False immediately
+        if old is not None:
+            try:
+                await old.stop_notify(NOTIFY_CHAR_UUID)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await old.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            _LOGGER.debug("Tore down previous BLE client before reconnect")
+
+        # ── Reset all state for the new connection ──────────────────────────
         self._seq = 0
+        self._reset_notification_state()
 
         self._client = await establish_connection(
             BleakClient,
@@ -139,13 +180,28 @@ class RadiaCodeBLEClient:
         )
 
     async def disconnect(self) -> None:
-        """Disconnect from the device. Safe to call even if not connected."""
-        if self._client and self._client.is_connected:
-            try:
-                await self._client.disconnect()
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Ignored error during disconnect: %s", err)
-        self._client = None
+        """Disconnect from the device.  Safe to call even if not connected.
+
+        Sets _client = None *before* the potentially slow BleakClient.disconnect()
+        so that is_connected returns False immediately, preventing the coordinator
+        from trying to reuse a half-dead connection in a concurrent poll.
+        """
+        client = self._client
+        self._client = None                     # is_connected → False immediately
+        self._reset_notification_state()
+
+        if client is None:
+            return
+
+        try:
+            await client.stop_notify(NOTIFY_CHAR_UUID)
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            await client.disconnect()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Ignored error during disconnect: %s", err)
 
     @property
     def is_connected(self) -> bool:
@@ -196,6 +252,14 @@ class RadiaCodeBLEClient:
 
         Sets _notify_event when all expected bytes have arrived.
         """
+        # Guard: ignore notifications that arrive after the command has been
+        # completed/timed-out, or from a ghost callback of a dead BleakClient.
+        if not self._expecting_response:
+            _LOGGER.debug(
+                "_on_notify: ignoring %d bytes (no command in-flight)", len(data)
+            )
+            return
+
         _LOGGER.debug(
             "_on_notify: %d bytes, resp_total_before=%d, buf_len=%d, data=%s",
             len(data),
@@ -259,6 +323,7 @@ class RadiaCodeBLEClient:
         self._resp_buf = bytearray()
         self._resp_total = 0
         self._notify_event.clear()
+        self._expecting_response = True
 
         _LOGGER.debug(
             "_execute: cmd=%#06x seq=%d packet=%s (%d bytes)",
@@ -306,6 +371,9 @@ class RadiaCodeBLEClient:
                 elif current_len > 0 and (now - last_growth) >= _STALL_TIMEOUT:
                     # Notifications stopped flowing — BT proxy buffer exhausted
                     break
+
+        # Command done — stop accepting notifications for this round.
+        self._expecting_response = False
 
         if self._notify_event.is_set():
             body = bytes(self._resp_buf)

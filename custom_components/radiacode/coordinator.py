@@ -4,7 +4,7 @@ Poll cycle (every 15 seconds):
   1. Locate the BLE device via HA's Bluetooth manager.
   2. If not already connected, connect and run the device init sequence.
   3. get_data() → fetches data_buf, decodes records.
-  4. On error → disconnect (next poll will reconnect).
+  4. On error → disconnect and retry once (same poll cycle) before giving up.
   5. Merge results with cached RareData values (battery, accumulated_dose appear
      only ~once per minute in RareData records, so we must cache them across
      poll cycles where no RareData is present).
@@ -13,6 +13,15 @@ The BLE connection is kept open between polls to avoid the expensive
 connect + init round-trip (~7-15 s through ESPHome BT proxies). This
 dramatically reduces the data_buf size on each read, making complete
 transfers possible within the proxy's notification buffer limit.
+
+Stale connection recovery
+─────────────────────────
+BLE links through ESPHome proxies can drop silently — the local BleakClient
+may still report ``is_connected=True`` while the underlying transport is
+dead.  When a get_data() call fails on a connection we *thought* was live,
+we disconnect immediately and retry with a fresh connection in the same
+poll cycle.  This avoids the 15-second wait-for-next-poll that previously
+made the sensor go unavailable.
 """
 
 from __future__ import annotations
@@ -20,6 +29,8 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 from typing import Optional
+
+from bleak.backends.device import BLEDevice
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
@@ -54,11 +65,14 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         self._last_accumulated_dose: Optional[float] = None
 
     async def _async_update_data(self) -> RadiaCodeData:
-        """Fetch data_buf from device, reconnecting only when needed."""
+        """Fetch data_buf from device, reconnecting only when needed.
 
-        # Ask HA's Bluetooth stack for the current BLEDevice handle.
-        # This works transparently whether the device is on a local adapter
-        # or behind an ESPHome Bluetooth proxy.
+        If the existing connection turns out to be stale (get_data fails),
+        we tear it down and retry once with a fresh connection in the same
+        poll cycle.  This prevents the sensor from going unavailable for
+        an entire poll interval whenever the BLE link drops silently.
+        """
+
         ble_device = bluetooth.async_ble_device_from_address(
             self.hass, self._address, connectable=True
         )
@@ -67,20 +81,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
                 f"RadiaCode {self._address} not found — is the device on and in range?"
             )
 
-        try:
-            # Reuse existing connection when possible; reconnect if dropped.
-            if not self._client.is_connected:
-                _LOGGER.debug("RadiaCode not connected, establishing connection")
-                await self._client.connect(ble_device)
-
-            data = await self._client.get_data()
-
-        except Exception as err:
-            # Tear down stale connection so next poll starts fresh.
-            await self._client.disconnect()
-            raise UpdateFailed(
-                f"Error communicating with RadiaCode {self._address}: {err}"
-            ) from err
+        data = await self._poll_with_retry(ble_device)
 
         # Update cache when fresh RareData arrived in this batch.
         if data.battery is not None:
@@ -96,3 +97,57 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
             accumulated_dose=self._last_accumulated_dose,
             battery=self._last_battery,
         )
+
+    async def _poll_with_retry(
+        self, ble_device: BLEDevice
+    ) -> RadiaCodeData:
+        """Connect (if needed), poll, and retry once on failure.
+
+        On the first failure we disconnect and immediately attempt a fresh
+        connection + poll.  If that also fails, we propagate the error to
+        the DataUpdateCoordinator (which marks the entity unavailable and
+        retries on the next poll interval).
+        """
+        was_connected = self._client.is_connected
+
+        try:
+            if not self._client.is_connected:
+                _LOGGER.debug("RadiaCode not connected, establishing connection")
+                await self._client.connect(ble_device)
+            return await self._client.get_data()
+
+        except Exception as first_err:
+            # If we were already connected, this is likely a stale-connection
+            # failure.  Tear down and retry once with a fresh connection.
+            _LOGGER.debug(
+                "Poll failed (was_connected=%s): %s — disconnecting and retrying",
+                was_connected,
+                first_err,
+            )
+            await self._client.disconnect()
+
+            if not was_connected:
+                # Connection attempt itself failed — no point retrying immediately.
+                raise UpdateFailed(
+                    f"Error connecting to RadiaCode {self._address}: {first_err}"
+                ) from first_err
+
+        # ── Retry: fresh connection ─────────────────────────────────────────
+        # Re-resolve the BLE device in case the proxy handle changed.
+        ble_device = bluetooth.async_ble_device_from_address(
+            self.hass, self._address, connectable=True
+        )
+        if ble_device is None:
+            raise UpdateFailed(
+                f"RadiaCode {self._address} not found on retry — is the device on and in range?"
+            )
+
+        try:
+            _LOGGER.debug("Retry: establishing fresh connection to RadiaCode")
+            await self._client.connect(ble_device)
+            return await self._client.get_data()
+        except Exception as retry_err:
+            await self._client.disconnect()
+            raise UpdateFailed(
+                f"Error communicating with RadiaCode {self._address} (retry also failed): {retry_err}"
+            ) from retry_err
