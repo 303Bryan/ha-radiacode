@@ -56,8 +56,9 @@ _LOGGER = logging.getLogger(__name__)
 # Maximum bytes per write (BLE MTU constraint; both cdump and mkgeiger use 18)
 _WRITE_CHUNK = 18
 
-# Seconds to wait for a complete response notification before giving up
-_CMD_TIMEOUT = 10.0
+# Seconds to wait for a complete response notification before giving up.
+# BT proxy round-trips add latency; 20 s is safe for all observed devices.
+_CMD_TIMEOUT = 20.0
 
 
 class RadiaCodeBLEClient:
@@ -99,7 +100,8 @@ class RadiaCodeBLEClient:
             BleakClient,
             ble_device,
             ble_device.address,
-            timeout=10.0,
+            max_attempts=1,   # fail fast; HA coordinator retry loop handles backoff
+            timeout=30.0,     # generous per-attempt timeout for BT proxy latency
         )
 
         await self._client.start_notify(NOTIFY_CHAR_UUID, self._on_notify)
