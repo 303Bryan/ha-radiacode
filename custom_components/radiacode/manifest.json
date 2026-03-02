@@ -11,6 +11,9 @@
   "bluetooth": [
     {
       "local_name": "RC-*"
+    },
+    {
+      "local_name": "RadiaCode-*"
     }
   ],
   "requirements": ["bleak-retry-connector>=3.0.0"]
