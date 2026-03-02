@@ -26,6 +26,7 @@ made the sensor go unavailable.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Optional
@@ -44,6 +45,11 @@ from .radiacode_ble.protocol import RadiaCodeData
 _LOGGER = logging.getLogger(__name__)
 
 _POLL_INTERVAL = timedelta(seconds=15)
+
+# Seconds to wait after disconnecting before retrying.  The ESPHome BT proxy
+# needs time to release the BLE connection slot; without this delay the retry
+# hits "slots=0/3 free" and spins for the full connection timeout.
+_RETRY_DELAY = 5.0
 
 
 class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
@@ -133,6 +139,14 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
                 ) from first_err
 
         # ── Retry: fresh connection ─────────────────────────────────────────
+        # Give the ESPHome BT proxy time to free the BLE connection slot.
+        # Without this, the retry immediately hits "slots=0/3 free" and
+        # spins for the full connection timeout before failing.
+        _LOGGER.debug(
+            "Waiting %.0fs for BT proxy to release connection slot", _RETRY_DELAY
+        )
+        await asyncio.sleep(_RETRY_DELAY)
+
         # Re-resolve the BLE device in case the proxy handle changed.
         ble_device = bluetooth.async_ble_device_from_address(
             self.hass, self._address, connectable=True

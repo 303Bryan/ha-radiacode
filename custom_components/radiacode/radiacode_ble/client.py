@@ -76,6 +76,16 @@ _CMD_TIMEOUT = 10.0
 # 2 s of silence is a clear stall signal.
 _STALL_TIMEOUT = 2.0
 
+# Maximum time to wait for a single write_gatt_char() call.  Through an
+# ESPHome BT proxy, a Write-With-Response to a dead link can hang for 30+ s
+# waiting for the ATT acknowledgement.  A healthy write completes in <1 s.
+_WRITE_TIMEOUT = 10.0
+
+# establish_connection() timeout per attempt.  15 s is generous for a BT
+# proxy hop; if the ESP32 can't connect in this window the slot is likely
+# stuck and we should fail fast so the coordinator can retry cleanly.
+_CONNECT_TIMEOUT = 15.0
+
 
 class RadiaCodeBLEClient:
     """
@@ -146,8 +156,8 @@ class RadiaCodeBLEClient:
             BleakClient,
             ble_device,
             ble_device.address,
-            max_attempts=1,   # fail fast; HA coordinator retry loop handles backoff
-            timeout=30.0,     # generous per-attempt timeout for BT proxy latency
+            max_attempts=2,   # allow one internal retry; coordinator adds another layer
+            timeout=_CONNECT_TIMEOUT,
         )
 
         await self._client.start_notify(NOTIFY_CHAR_UUID, self._on_notify)
@@ -333,10 +343,21 @@ class RadiaCodeBLEClient:
         # Write in chunks to respect BLE MTU.
         # Use response=True (ATT Write Request) to match cdump/bluepy behaviour;
         # some devices require the ATT acknowledgement before processing the command.
+        # Each write is guarded by _WRITE_TIMEOUT — through an ESPHome proxy a
+        # dead BLE link can block write_gatt_char(response=True) for 30+ seconds.
         for offset in range(0, len(packet), _WRITE_CHUNK):
             chunk = packet[offset: offset + _WRITE_CHUNK]
             _LOGGER.debug("_execute: writing chunk offset=%d len=%d", offset, len(chunk))
-            await self._client.write_gatt_char(WRITE_CHAR_UUID, chunk, response=True)
+            try:
+                await asyncio.wait_for(
+                    self._client.write_gatt_char(WRITE_CHAR_UUID, chunk, response=True),
+                    timeout=_WRITE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    f"BLE write timed out after {_WRITE_TIMEOUT}s for cmd "
+                    f"{cmd:#06x} (seq={seq}, offset={offset})"
+                )
             _LOGGER.debug("_execute: chunk write complete")
 
         _LOGGER.debug("_execute: all chunks written, waiting for notify")
