@@ -56,9 +56,14 @@ _LOGGER = logging.getLogger(__name__)
 # Maximum bytes per write (BLE MTU constraint; both cdump and mkgeiger use 18)
 _WRITE_CHUNK = 18
 
-# Seconds to wait for a complete response notification before giving up.
-# BT proxy round-trips add latency; 20 s is safe for all observed devices.
-_CMD_TIMEOUT = 20.0
+# Hard deadline — no single command should ever exceed this wall-clock time.
+_CMD_TIMEOUT = 10.0
+
+# If no new BLE notification arrives for this many seconds *after* the first
+# packet, assume the BT proxy notification buffer is exhausted and return
+# whatever partial data we have.  Typical inter-packet gaps are <300 ms, so
+# 2 s of silence is a clear stall signal.
+_STALL_TIMEOUT = 2.0
 
 
 class RadiaCodeBLEClient:
@@ -269,30 +274,55 @@ class RadiaCodeBLEClient:
             await self._client.write_gatt_char(WRITE_CHAR_UUID, chunk, response=True)
             _LOGGER.debug("_execute: chunk write complete")
 
-        _LOGGER.debug("_execute: all chunks written, waiting for notify (timeout=%.1f s)", _CMD_TIMEOUT)
+        _LOGGER.debug("_execute: all chunks written, waiting for notify")
 
-        # Wait for the complete response
-        try:
-            await asyncio.wait_for(self._notify_event.wait(), timeout=_CMD_TIMEOUT)
-        except asyncio.TimeoutError as exc:
-            # If we received partial data (common with large DATA_BUF responses
-            # through ESPHome BT proxies whose notification buffer is limited),
-            # return what we have instead of failing. decode_data_buf already
-            # handles truncated records gracefully.
-            if len(self._resp_buf) >= 4:
-                _LOGGER.warning(
-                    "Partial response for cmd %#06x (seq=%d): "
-                    "received %d bytes, still missing %d; using partial data",
-                    cmd, seq, len(self._resp_buf), self._resp_total,
+        # Wait for the complete response with stall detection.
+        # ESPHome BT proxies can only forward ~28 BLE notification packets
+        # before their buffer fills. For large DATA_BUF responses (50+
+        # packets), notifications stop mid-stream. Instead of waiting the
+        # full hard timeout, we detect the stall (no new data for
+        # _STALL_TIMEOUT seconds) and return what we have.
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + _CMD_TIMEOUT
+        last_buf_len = 0
+        last_growth = loop.time()
+
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(
+                    self._notify_event.wait(),
+                    timeout=min(0.5, remaining),
                 )
-                body = bytes(self._resp_buf)
-                return parse_response_body(body, cmd, seq)
-            raise TimeoutError(
-                f"No response to RadiaCode command {cmd:#06x} (seq={seq})"
-            ) from exc
+                break  # Complete response received
+            except asyncio.TimeoutError:
+                now = loop.time()
+                current_len = len(self._resp_buf)
+                if current_len > last_buf_len:
+                    last_buf_len = current_len
+                    last_growth = now
+                elif current_len > 0 and (now - last_growth) >= _STALL_TIMEOUT:
+                    # Notifications stopped flowing — BT proxy buffer exhausted
+                    break
 
-        body = bytes(self._resp_buf)
-        return parse_response_body(body, cmd, seq)
+        if self._notify_event.is_set():
+            body = bytes(self._resp_buf)
+            return parse_response_body(body, cmd, seq)
+
+        if len(self._resp_buf) >= 4:
+            _LOGGER.warning(
+                "Partial response for cmd %#06x (seq=%d): "
+                "received %d bytes, still missing %d; using partial data",
+                cmd, seq, len(self._resp_buf), self._resp_total,
+            )
+            body = bytes(self._resp_buf)
+            return parse_response_body(body, cmd, seq)
+
+        raise TimeoutError(
+            f"No response to RadiaCode command {cmd:#06x} (seq={seq})"
+        )
 
     async def _read_vs(self, vs_id: int) -> bytes:
         """Execute a RD_VIRT_STRING command and return the VS data bytes."""

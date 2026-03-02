@@ -1,6 +1,6 @@
 """DataUpdateCoordinator for the RadiaCode integration.
 
-Poll cycle (every 30 seconds):
+Poll cycle (every 15 seconds):
   1. Locate the BLE device via HA's Bluetooth manager.
   2. connect() → runs the device init sequence.
   3. get_data() → fetches data_buf, decodes records.
@@ -27,7 +27,7 @@ from .radiacode_ble.protocol import RadiaCodeData
 
 _LOGGER = logging.getLogger(__name__)
 
-_POLL_INTERVAL = timedelta(seconds=30)
+_POLL_INTERVAL = timedelta(seconds=15)
 
 
 class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
