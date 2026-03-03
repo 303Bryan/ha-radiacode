@@ -1,6 +1,6 @@
 """DataUpdateCoordinator for the RadiaCode integration.
 
-Poll cycle (every 15 seconds):
+Poll cycle (every 5 seconds):
   1. Locate the BLE device via HA's Bluetooth manager.
   2. If not already connected, connect and run the device init sequence.
   3. get_data() → fetches data_buf, decodes records.
@@ -44,7 +44,7 @@ from .radiacode_ble.protocol import RadiaCodeData
 
 _LOGGER = logging.getLogger(__name__)
 
-_POLL_INTERVAL = timedelta(seconds=15)
+_POLL_INTERVAL = timedelta(seconds=5)
 
 # Seconds to wait after disconnecting before retrying.  The ESPHome BT proxy
 # needs time to release the BLE connection slot; without this delay the retry
@@ -70,6 +70,13 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         self._last_battery: Optional[float] = None
         self._last_accumulated_dose: Optional[float] = None
         self._last_temperature: Optional[float] = None
+
+        # Cache dose_rate/count_rate to smooth over reconnection transitions.
+        # After a reconnect, the first poll often returns dose_rate=0.0 because
+        # the data buffer was just cleared.  We keep the last non-zero values
+        # and use them until the device reports real readings.
+        self._last_dose_rate: Optional[float] = None
+        self._last_count_rate: Optional[float] = None
 
     async def _async_update_data(self) -> RadiaCodeData:
         """Fetch data_buf from device, reconnecting only when needed.
@@ -98,11 +105,30 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         if data.temperature is not None:
             self._last_temperature = data.temperature
 
+        # Update dose_rate/count_rate cache.  After a reconnect, the first
+        # poll yields dose_rate=0.0 because the device's buffer was cleared
+        # by the init sequence.  We keep the last meaningful values until
+        # the device starts streaming real data again.
+        if data.dose_rate is not None and data.dose_rate > 0:
+            self._last_dose_rate = data.dose_rate
+        if data.count_rate is not None and data.count_rate > 0:
+            self._last_count_rate = data.count_rate
+
+        # Determine the best dose_rate/count_rate to expose.  Use fresh
+        # values when available, fall back to cache for the post-reconnect
+        # zero-value transition.
+        dose_rate = data.dose_rate
+        count_rate = data.count_rate
+        if dose_rate is not None and dose_rate == 0 and self._last_dose_rate is not None:
+            dose_rate = self._last_dose_rate
+        if count_rate is not None and count_rate == 0 and self._last_count_rate is not None:
+            count_rate = self._last_count_rate
+
         # Return a fully-populated RadiaCodeData using cached values where
-        # the device didn't send fresh RareData this cycle.
+        # the device didn't send fresh data this cycle.
         return RadiaCodeData(
-            dose_rate=data.dose_rate,
-            count_rate=data.count_rate,
+            dose_rate=dose_rate,
+            count_rate=count_rate,
             accumulated_dose=self._last_accumulated_dose,
             battery=self._last_battery,
             temperature=self._last_temperature,

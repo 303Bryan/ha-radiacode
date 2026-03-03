@@ -139,11 +139,13 @@ class RadiaCodeBLEClient:
         self._client = None          # is_connected → False immediately
         if old is not None:
             try:
-                await old.stop_notify(NOTIFY_CHAR_UUID)
+                await asyncio.wait_for(
+                    old.stop_notify(NOTIFY_CHAR_UUID), timeout=5.0
+                )
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await old.disconnect()
+                await asyncio.wait_for(old.disconnect(), timeout=5.0)
             except Exception:  # noqa: BLE001
                 pass
             _LOGGER.debug("Tore down previous BLE client before reconnect")
@@ -204,12 +206,16 @@ class RadiaCodeBLEClient:
             return
 
         try:
-            await client.stop_notify(NOTIFY_CHAR_UUID)
+            await asyncio.wait_for(
+                client.stop_notify(NOTIFY_CHAR_UUID), timeout=5.0
+            )
         except Exception:  # noqa: BLE001
             pass
 
         try:
-            await client.disconnect()
+            await asyncio.wait_for(client.disconnect(), timeout=5.0)
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Disconnect timed out after 5s — forcing cleanup")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Ignored error during disconnect: %s", err)
 

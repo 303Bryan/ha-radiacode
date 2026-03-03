@@ -13,7 +13,7 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 
 ## Features
 
-- **Real-time radiation monitoring** — dose rate (µSv/h) and count rate (CPS) updated every 15 seconds
+- **Real-time radiation monitoring** — dose rate (µSv/h) and count rate (CPS) updated every 5 seconds
 - **Accumulated dose tracking** — total dose since the device was last reset
 - **Device diagnostics** — battery level and internal temperature
 - **Auto-discovery** — HA automatically detects RadiaCode devices over Bluetooth
@@ -32,7 +32,7 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 | Battery | % | Device battery level *(diagnostic)* |
 | Temperature | °C | Device internal temperature *(diagnostic)* |
 
-> **Note:** Dose Rate and Count Rate update every ~15 s. Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates.
+> **Note:** Dose Rate and Count Rate update every ~5 s. Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates.
 
 ---
 

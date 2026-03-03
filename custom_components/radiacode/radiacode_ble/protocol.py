@@ -79,7 +79,7 @@ class RareData:
     """Periodic status snapshot (data_buf gid=3, appears ~every minute)."""
     dt: datetime.datetime
     dose: float            # accumulated dose, µSv
-    charge_level: float    # battery, 0.0–1.0
+    charge_level: float    # battery, 0–100 percent
     temperature: float     # device temperature, °C
 
 
@@ -247,7 +247,7 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
                 records.append(RareData(
                     dt=dt,
                     dose=dose,
-                    charge_level=charge_level / 100,         # → 0.0–1.0
+                    charge_level=charge_level / 100,         # → 0–100 percent
                     temperature=(temperature - 2000) / 100,  # → °C
                 ))
 
@@ -305,7 +305,7 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
             count_rate = r.count_rate
         elif isinstance(r, RareData):
             accumulated_dose = r.dose
-            battery = r.charge_level * 100   # convert fraction → percent
+            battery = r.charge_level           # already 0–100 percent
             temperature = r.temperature      # °C, already converted in decoder
 
     return RadiaCodeData(

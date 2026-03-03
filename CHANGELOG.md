@@ -7,6 +7,18 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.2.0] — 2026-03-02
+
+### Fixed
+- **Battery level** — was reporting 10,000% instead of 0–100%. The raw device value was being double-scaled (divided by 100, then multiplied by 100 again).
+- **Post-reconnect zero readings** — dose rate and count rate briefly showed 0.0 after a reconnection because the device buffer was empty. The coordinator now caches the last known good values and uses them until the device reports real data.
+- **Disconnect timeout** — added 5-second timeout on `stop_notify()` and `disconnect()` calls to prevent hanging on dead BLE links.
+
+### Changed
+- **Poll interval** — reduced from 15 seconds to 5 seconds for faster count rate and dose rate updates.
+
+---
+
 ## [0.1.0] — 2026-03-02
 
 Initial public release.
@@ -34,4 +46,5 @@ Initial public release.
 - Requires firmware ≥ 4.8 on the RadiaCode device
 - Minimum Home Assistant version: 2024.1.0
 
+[0.2.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.2.0
 [0.1.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.1.0
