@@ -27,6 +27,15 @@ Commands are strictly sequential (one in-flight at a time). The
 seq counter (0–31) is encoded in each command and echoed by the
 device, letting parse_response_body() detect mismatched replies.
 
+Write mode
+──────────
+Writes use response=False (ATT Write Command / Write Without Response).
+Through ESPHome BT proxies, ATT Write Requests (response=True) can
+hang for 10+ seconds waiting for a Write Response that never arrives
+through the proxy relay, even though the device processes the command
+and sends notification data back.  Write Without Response is fire-and-
+forget; we confirm the command was processed via notification replies.
+
 Connection resilience
 ─────────────────────
 Reconnecting after a dropped BLE link requires careful teardown of
@@ -35,6 +44,8 @@ the old BleakClient:
   • Notification reassembly state (_resp_buf, _resp_total) is reset
   • _client is set to None *before* the slow disconnect() call so
     is_connected returns False immediately, avoiding rapid retry loops
+  • A disconnect callback is registered on BleakClient to detect
+    connection drops immediately and unblock any waiting _execute()
 """
 
 import asyncio
@@ -68,6 +79,8 @@ _LOGGER = logging.getLogger(__name__)
 _WRITE_CHUNK = 18
 
 # Hard deadline — no single command should ever exceed this wall-clock time.
+# With response=False writes completing instantly, this timeout only applies
+# to waiting for notification replies.
 _CMD_TIMEOUT = 10.0
 
 # If no new BLE notification arrives for this many seconds *after* the first
@@ -75,11 +88,6 @@ _CMD_TIMEOUT = 10.0
 # whatever partial data we have.  Typical inter-packet gaps are <300 ms, so
 # 2 s of silence is a clear stall signal.
 _STALL_TIMEOUT = 2.0
-
-# Maximum time to wait for a single write_gatt_char() call.  Through an
-# ESPHome BT proxy, a Write-With-Response to a dead link can hang for 30+ s
-# waiting for the ATT acknowledgement.  A healthy write completes in <1 s.
-_WRITE_TIMEOUT = 10.0
 
 # establish_connection() timeout per attempt.  15 s is generous for a BT
 # proxy hop; if the ESP32 can't connect in this window the slot is likely
@@ -111,6 +119,10 @@ class RadiaCodeBLEClient:
         # Guard: _on_notify ignores packets arriving when no command is in-flight.
         self._expecting_response: bool = False
 
+        # Set by the BleakClient disconnect callback to unblock _execute()
+        # immediately when the BLE link drops.
+        self._disconnected_event: asyncio.Event = asyncio.Event()
+
     # ── Connection management ─────────────────────────────────────────────────
 
     def _reset_notification_state(self) -> None:
@@ -119,6 +131,7 @@ class RadiaCodeBLEClient:
         self._resp_total = 0
         self._notify_event.clear()
         self._expecting_response = False
+        self._disconnected_event.clear()
 
     async def connect(self, ble_device: BLEDevice) -> None:
         """
@@ -162,6 +175,7 @@ class RadiaCodeBLEClient:
             timeout=_CONNECT_TIMEOUT,
         )
 
+        self._client.set_disconnected_callback(self._on_ble_disconnect)
         await self._client.start_notify(NOTIFY_CHAR_UUID, self._on_notify)
 
         # ── Init sequence (mirrors cdump RadiaCode.__init__) ──────────────────
@@ -222,6 +236,18 @@ class RadiaCodeBLEClient:
     @property
     def is_connected(self) -> bool:
         return self._client is not None and self._client.is_connected
+
+    def _on_ble_disconnect(self, _client: BleakClient) -> None:
+        """Called by bleak when the BLE transport disconnects.
+
+        Sets _disconnected_event so that any in-flight _execute() waiting for
+        notifications can bail out immediately instead of waiting for the full
+        CMD_TIMEOUT.
+        """
+        _LOGGER.debug("BLE disconnect callback fired")
+        self._disconnected_event.set()
+        # Also set the notify event so _execute() unblocks from its wait loop.
+        self._notify_event.set()
 
     # ── High-level API ────────────────────────────────────────────────────────
 
@@ -348,23 +374,21 @@ class RadiaCodeBLEClient:
         )
 
         # Write in chunks to respect BLE MTU.
-        # Use response=True (ATT Write Request) to match cdump/bluepy behaviour;
-        # some devices require the ATT acknowledgement before processing the command.
-        # Each write is guarded by _WRITE_TIMEOUT — through an ESPHome proxy a
-        # dead BLE link can block write_gatt_char(response=True) for 30+ seconds.
+        # Use response=False (ATT Write Command / Write Without Response).
+        # Through ESPHome BT proxies, ATT Write Requests (response=True)
+        # can hang for 10+ seconds because the Write Response from the
+        # device doesn't reliably traverse the proxy relay — even while
+        # the device successfully processes the command and sends
+        # notification data.  Write Without Response is fire-and-forget;
+        # we verify the command was processed by the notification reply.
         for offset in range(0, len(packet), _WRITE_CHUNK):
             chunk = packet[offset: offset + _WRITE_CHUNK]
             _LOGGER.debug("_execute: writing chunk offset=%d len=%d", offset, len(chunk))
-            try:
-                await asyncio.wait_for(
-                    self._client.write_gatt_char(WRITE_CHAR_UUID, chunk, response=True),
-                    timeout=_WRITE_TIMEOUT,
+            if self._disconnected_event.is_set():
+                raise ConnectionError(
+                    f"BLE disconnected before write for cmd {cmd:#06x} (seq={seq})"
                 )
-            except asyncio.TimeoutError:
-                raise TimeoutError(
-                    f"BLE write timed out after {_WRITE_TIMEOUT}s for cmd "
-                    f"{cmd:#06x} (seq={seq}, offset={offset})"
-                )
+            await self._client.write_gatt_char(WRITE_CHAR_UUID, chunk, response=False)
             _LOGGER.debug("_execute: chunk write complete")
 
         _LOGGER.debug("_execute: all chunks written, waiting for notify")
@@ -383,6 +407,12 @@ class RadiaCodeBLEClient:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
+                break
+            if self._disconnected_event.is_set():
+                _LOGGER.debug(
+                    "_execute: BLE disconnected while waiting for notify "
+                    "(cmd=%#06x, seq=%d)", cmd, seq,
+                )
                 break
             try:
                 await asyncio.wait_for(
@@ -403,9 +433,16 @@ class RadiaCodeBLEClient:
         # Command done — stop accepting notifications for this round.
         self._expecting_response = False
 
-        if self._notify_event.is_set():
+        # If the disconnect callback set _notify_event, distinguish from
+        # a genuine complete response by checking _disconnected_event.
+        if self._notify_event.is_set() and not self._disconnected_event.is_set():
             body = bytes(self._resp_buf)
             return parse_response_body(body, cmd, seq)
+
+        if self._disconnected_event.is_set() and len(self._resp_buf) < 4:
+            raise ConnectionError(
+                f"BLE connection lost during command {cmd:#06x} (seq={seq})"
+            )
 
         if len(self._resp_buf) >= 4:
             _LOGGER.warning(

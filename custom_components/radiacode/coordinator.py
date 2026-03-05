@@ -1,8 +1,9 @@
 """DataUpdateCoordinator for the RadiaCode integration.
 
 Poll cycle (every 5 seconds):
-  1. Locate the BLE device via HA's Bluetooth manager.
-  2. If not already connected, connect and run the device init sequence.
+  1. If already connected, skip BLE device lookup and poll directly.
+  2. If not connected, locate the BLE device via HA's Bluetooth manager
+     and connect + run the device init sequence.
   3. get_data() → fetches data_buf, decodes records.
   4. On error → disconnect and retry once (same poll cycle) before giving up.
   5. Merge results with cached RareData values (battery, accumulated_dose appear
@@ -13,6 +14,14 @@ The BLE connection is kept open between polls to avoid the expensive
 connect + init round-trip (~7-15 s through ESPHome BT proxies). This
 dramatically reduces the data_buf size on each read, making complete
 transfers possible within the proxy's notification buffer limit.
+
+BLE device lookup
+─────────────────
+The ``async_ble_device_from_address`` lookup is only performed when we
+need to establish a new connection.  Doing this unconditionally on every
+poll caused false "not found" errors when the HA Bluetooth scanner
+hadn't seen a recent advertisement — even though the BLE connection was
+perfectly healthy.
 
 Stale connection recovery
 ─────────────────────────
@@ -49,7 +58,7 @@ _POLL_INTERVAL = timedelta(seconds=5)
 # Seconds to wait after disconnecting before retrying.  The ESPHome BT proxy
 # needs time to release the BLE connection slot; without this delay the retry
 # hits "slots=0/3 free" and spins for the full connection timeout.
-_RETRY_DELAY = 5.0
+_RETRY_DELAY = 2.0
 
 
 class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
@@ -87,13 +96,21 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         an entire poll interval whenever the BLE link drops silently.
         """
 
-        ble_device = bluetooth.async_ble_device_from_address(
-            self.hass, self._address, connectable=True
-        )
-        if ble_device is None:
-            raise UpdateFailed(
-                f"RadiaCode {self._address} not found — is the device on and in range?"
+        # Only look up the BLE device when we need to establish a new
+        # connection.  When already connected, skip the lookup — it can
+        # return None if the HA scanner hasn't received a recent
+        # advertisement, which would falsely mark the sensor unavailable
+        # even though we have a healthy active connection.
+        ble_device = None
+        if not self._client.is_connected:
+            ble_device = bluetooth.async_ble_device_from_address(
+                self.hass, self._address, connectable=True
             )
+            if ble_device is None:
+                raise UpdateFailed(
+                    f"RadiaCode {self._address} not found — "
+                    f"is the device on and in range?"
+                )
 
         data = await self._poll_with_retry(ble_device)
 
@@ -135,9 +152,12 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         )
 
     async def _poll_with_retry(
-        self, ble_device: BLEDevice
+        self, ble_device: Optional[BLEDevice]
     ) -> RadiaCodeData:
         """Connect (if needed), poll, and retry once on failure.
+
+        ``ble_device`` may be None when the client is already connected
+        (the caller skips the BLE lookup in that case).
 
         On the first failure we disconnect and immediately attempt a fresh
         connection + poll.  If that also fails, we propagate the error to
@@ -148,6 +168,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
 
         try:
             if not self._client.is_connected:
+                if ble_device is None:
+                    raise UpdateFailed(
+                        f"RadiaCode {self._address} not found — "
+                        f"is the device on and in range?"
+                    )
                 _LOGGER.debug("RadiaCode not connected, establishing connection")
                 await self._client.connect(ble_device)
             return await self._client.get_data()
@@ -183,7 +208,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         )
         if ble_device is None:
             raise UpdateFailed(
-                f"RadiaCode {self._address} not found on retry — is the device on and in range?"
+                f"RadiaCode {self._address} not found on retry — "
+                f"is the device on and in range?"
             )
 
         try:
@@ -193,5 +219,6 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         except Exception as retry_err:
             await self._client.disconnect()
             raise UpdateFailed(
-                f"Error communicating with RadiaCode {self._address} (retry also failed): {retry_err}"
+                f"Error communicating with RadiaCode {self._address} "
+                f"(retry also failed): {retry_err}"
             ) from retry_err
