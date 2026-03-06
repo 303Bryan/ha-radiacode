@@ -131,5 +131,5 @@ class RadiaCodeSensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
         """Return the current sensor value from the coordinator's data."""
         if self.coordinator.data is None:
             return None
-        data: RadiaCodeData = self.coordinator.data
+        data: RadiaCodeData = self.coordinator.data.sensors
         return getattr(data, self.entity_description.key, None)

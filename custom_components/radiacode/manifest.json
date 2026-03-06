@@ -1,7 +1,7 @@
 {
   "domain": "radiacode",
-  "name": "RadiaCode",
-  "version": "0.3.0",
+  "name": "Radiacode",
+  "version": "0.4.0",
   "codeowners": ["@303Bryan"],
   "config_flow": true,
   "dependencies": ["bluetooth"],

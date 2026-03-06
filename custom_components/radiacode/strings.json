@@ -2,12 +2,12 @@
   "config": {
     "step": {
       "bluetooth_confirm": {
-        "title": "RadiaCode Device Found",
-        "description": "Found RadiaCode device **{name}**. Add it to Home Assistant?"
+        "title": "Radiacode Device Found",
+        "description": "Found Radiacode device **{name}**. Add it to Home Assistant?"
       },
       "user": {
-        "title": "RadiaCode",
-        "description": "Enter the Bluetooth address of your RadiaCode device. You can find it in your phone's Bluetooth settings when paired with the RadiaCode app.",
+        "title": "Radiacode",
+        "description": "Enter the Bluetooth address of your Radiacode device. You can find it in your phone's Bluetooth settings when paired with the Radiacode app.",
         "data": {
           "address": "Bluetooth Address",
           "name": "Device Name (optional)"

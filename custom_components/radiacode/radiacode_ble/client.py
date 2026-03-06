@@ -62,14 +62,19 @@ from .protocol import (
     CMD,
     VS,
     VSFR,
+    SETTINGS_VSFR_IDS,
     WRITE_CHAR_UUID,
     NOTIFY_CHAR_UUID,
     RadiaCodeData,
+    RadiaCodeSettings,
     build_command,
     parse_response_body,
     parse_vs_response,
     parse_vsfr_batch_response,
+    parse_vsfr_read_response,
+    parse_write_response,
     decode_data_buf,
+    decode_settings,
     extract_sensor_values,
     decode_serial_number,
 )
@@ -123,6 +128,11 @@ class RadiaCodeBLEClient:
         # Set by the BleakClient disconnect callback to unblock _execute()
         # immediately when the BLE link drops.
         self._disconnected_event: asyncio.Event = asyncio.Event()
+
+        # Serialize BLE command execution.  Without this, a UI-triggered
+        # write (e.g. switch toggle) can overlap with a coordinator poll,
+        # corrupting the shared notification reassembly state.
+        self._cmd_lock: asyncio.Lock = asyncio.Lock()
 
     # ── Connection management ─────────────────────────────────────────────────
 
@@ -268,46 +278,45 @@ class RadiaCodeBLEClient:
         """
         Poll the device and return the latest sensor readings.
 
-        Reads VSFR registers for dose_rate, accumulated_dose, and temperature
-        (small response, immune to BT proxy buffer overflow), then reads
-        data_buf for count_rate (float CPS from RealTimeData) and battery
-        (from RareData, appears ~once per minute).
+        Data sources:
+          - VSFR batch read: temperature (TEMP_degC is the only sensor
+            register that works via batch/individual reads over BLE;
+            DR_uR_h and DS_uR are rejected by the device firmware).
+          - data_buf records: dose_rate (from DoseRateDB/RawData/RealTimeData),
+            count_rate (from RealTimeData), accumulated_dose and battery
+            (from RareData, ~once per minute).
 
         Returns a RadiaCodeData with:
-          dose_rate        – µSv/h   (from VSFR DR_uR_h, converted µR/h → µSv/h)
-          count_rate       – CPS     (from data_buf RealTimeData, float precision)
-          accumulated_dose – µSv     (from VSFR DS_uR, converted µR → µSv)
-          battery          – %       (from data_buf RareData, None most polls)
-          temperature      – °C      (from VSFR TEMP_degC)
+          dose_rate        – from data_buf (DoseRateDB, RawData, or RealTimeData)
+          count_rate       – CPS (from data_buf RealTimeData)
+          accumulated_dose – µSv (from data_buf RareData)
+          battery          – % (from data_buf RareData, None most polls)
+          temperature      – °C (from VSFR TEMP_degC, fallback to data_buf)
         """
-        # 1. VSFR batch read — dose_rate, accumulated_dose, temperature.
-        #    Response is ~20 bytes (fits in one BLE notification packet).
-        dose_rate: Optional[float] = None
-        accumulated_dose: Optional[float] = None
+        # 1. VSFR batch read — only TEMP_degC works over BLE.
+        #    DR_uR_h and DS_uR are marked invalid in batch reads and return
+        #    retcode=0 for individual reads, so we get those from data_buf.
         temperature: Optional[float] = None
         try:
-            vsfr_ids = [VSFR.DR_uR_h, VSFR.DS_uR, VSFR.TEMP_degC]
+            vsfr_ids = [VSFR.TEMP_degC]
             values = await self._read_vsfr_batch(vsfr_ids)
-            dose_rate = values[0] / 100.0         # µR/h → µSv/h
-            accumulated_dose = values[1] / 100.0  # µR → µSv
-            temperature = values[2]               # already °C
+            if values[0] is not None:
+                temperature = values[0]               # already °C
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("VSFR batch read failed, falling back to data_buf: %s", err)
+            _LOGGER.debug("VSFR batch read for TEMP failed: %s", err)
 
-        # 2. data_buf read — count_rate (float CPS) and battery (from RareData).
+        # 2. data_buf read — primary source for dose_rate, count_rate,
+        #    accumulated_dose, and battery.  The extract_sensor_values()
+        #    function pulls dose_rate from DoseRateDB/RawData/RealTimeData
+        #    records, preferring the first source with a non-zero value.
         raw = await self._read_vs(VS.DATA_BUF)
         records = decode_data_buf(raw, self._base_time)
         buf_data = extract_sensor_values(records)
 
-        # Prefer VSFR values; fall back to data_buf if VSFR read failed.
         result = RadiaCodeData(
-            dose_rate=dose_rate if dose_rate is not None else buf_data.dose_rate,
+            dose_rate=buf_data.dose_rate,
             count_rate=buf_data.count_rate,
-            accumulated_dose=(
-                accumulated_dose
-                if accumulated_dose is not None
-                else buf_data.accumulated_dose
-            ),
+            accumulated_dose=buf_data.accumulated_dose,
             battery=buf_data.battery,
             temperature=(
                 temperature if temperature is not None else buf_data.temperature
@@ -315,11 +324,11 @@ class RadiaCodeBLEClient:
         )
 
         _LOGGER.debug(
-            "get_data → dose_rate=%.4f µSv/h  count_rate=%.1f CPS  "
-            "dose=%.4f µSv  battery=%s%%  temp=%s°C",
-            result.dose_rate or 0,
+            "get_data → dose_rate=%s µSv/h  count_rate=%.1f CPS  "
+            "dose=%s µSv  battery=%s%%  temp=%s°C",
+            f"{result.dose_rate:.6e}" if result.dose_rate is not None else "None",
             result.count_rate or 0,
-            result.accumulated_dose or 0,
+            f"{result.accumulated_dose:.4f}" if result.accumulated_dose is not None else "None",
             f"{result.battery:.0f}" if result.battery is not None else "—",
             f"{result.temperature:.1f}" if result.temperature is not None else "—",
         )
@@ -329,6 +338,26 @@ class RadiaCodeBLEClient:
         """Return the device serial number string, e.g. 'RC-103-012345'."""
         raw = await self._read_vs(VS.SERIAL_NUMBER)
         return decode_serial_number(raw)
+
+    async def get_settings(self) -> RadiaCodeSettings:
+        """Read all device settings via a single VSFR batch read.
+
+        Returns a RadiaCodeSettings with current display, sound, vibration,
+        and alarm threshold values.  The response is ~60 bytes (fits in one
+        BLE notification), so this never hits BT proxy buffer limits.
+        """
+        values = await self._read_vsfr_batch(SETTINGS_VSFR_IDS)
+        return decode_settings(values)
+
+    async def write_vsfr(self, vsfr_id: int, value: int) -> bool:
+        """Write a single VSFR register.  Returns True on success.
+
+        The *value* is always packed as uint32.  For bool registers pass 1/0;
+        for byte registers (e.g. brightness 0-9) pass the integer directly.
+        """
+        args = struct.pack("<II", vsfr_id, value)
+        payload = await self._execute(CMD.WR_VIRT_SFR, args)
+        return parse_write_response(payload)
 
     # ── Notification handler ──────────────────────────────────────────────────
 
@@ -396,13 +425,24 @@ class RadiaCodeBLEClient:
         """
         Send one command and return the response payload (echo header stripped).
 
+        The _cmd_lock ensures only one command is in-flight at a time.
+        Without this, a UI-triggered write (switch toggle, number change)
+        could overlap with a coordinator poll, corrupting the shared
+        notification reassembly state (_resp_buf / _notify_event).
+
         Steps:
-          1. Allocate the next sequence number.
-          2. Reset notification state.
-          3. Write the framed packet in _WRITE_CHUNK-byte pieces.
-          4. Await the notify event (up to _CMD_TIMEOUT seconds).
-          5. Verify the echo header and return the payload.
+          1. Acquire _cmd_lock (serialize with other commands).
+          2. Allocate the next sequence number.
+          3. Reset notification state.
+          4. Write the framed packet in _WRITE_CHUNK-byte pieces.
+          5. Await the notify event (up to _CMD_TIMEOUT seconds).
+          6. Verify the echo header and return the payload.
         """
+        async with self._cmd_lock:
+            return await self._execute_locked(cmd, args)
+
+    async def _execute_locked(self, cmd: int, args: bytes = b"") -> bytes:
+        """Inner _execute body, called with _cmd_lock held."""
         seq = self._seq
         self._seq = (self._seq + 1) % 32
 
@@ -510,10 +550,11 @@ class RadiaCodeBLEClient:
         )
         return parse_vs_response(payload)
 
-    async def _read_vsfr_batch(self, vsfr_ids: list[int]) -> list[int | float]:
+    async def _read_vsfr_batch(self, vsfr_ids: list[int]) -> list[int | float | None]:
         """Read multiple VSFR registers in a single command.
 
-        Returns decoded values in the same order as *vsfr_ids*.
+        Returns decoded values in the same order as *vsfr_ids*.  Values
+        for registers the device marks as invalid are returned as None.
         The response is very small (~20 bytes for 3 registers), so it
         never hits BT proxy notification buffer limits.
         """
@@ -522,3 +563,18 @@ class RadiaCodeBLEClient:
             args += struct.pack("<I", int(vid))
         payload = await self._execute(CMD.RD_VIRT_SFR_BATCH, args)
         return parse_vsfr_batch_response(payload, vsfr_ids)
+
+    async def _read_vsfr(self, vsfr_id: int) -> int | float:
+        """Read a single VSFR register via RD_VIRT_SFR (0x0824).
+
+        Used as a fallback when the batch read marks a register as
+        invalid.  DR_uR_h and DS_uR consistently fail in batch reads
+        on current firmware but work fine with individual reads.
+
+        Returns the decoded value (int or float depending on
+        ``_VSFR_FORMATS``).  Raises on communication or protocol errors.
+        """
+        payload = await self._execute(
+            CMD.RD_VIRT_SFR, struct.pack("<I", int(vsfr_id))
+        )
+        return parse_vsfr_read_response(payload, vsfr_id)
