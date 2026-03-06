@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional
 
@@ -49,7 +50,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import CONF_ADDRESS, DOMAIN
 from .radiacode_ble import RadiaCodeBLEClient
-from .radiacode_ble.protocol import RadiaCodeData
+from .radiacode_ble.protocol import RadiaCodeData, RadiaCodeSettings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,7 +62,18 @@ _POLL_INTERVAL = timedelta(seconds=5)
 _RETRY_DELAY = 2.0
 
 
-class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
+@dataclass
+class RadiaCodeCoordinatorData:
+    """Combined data container returned by the coordinator.
+
+    Entities use ``.sensors`` for read-only sensor values and ``.settings``
+    for writable device configuration.
+    """
+    sensors: RadiaCodeData
+    settings: RadiaCodeSettings
+
+
+class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     """Coordinator that polls a RadiaCode device on a fixed schedule."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -87,7 +99,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         self._last_dose_rate: Optional[float] = None
         self._last_count_rate: Optional[float] = None
 
-    async def _async_update_data(self) -> RadiaCodeData:
+        # Cache device settings; updated every poll, kept on read failure.
+        self._last_settings: RadiaCodeSettings = RadiaCodeSettings()
+
+    async def _async_update_data(self) -> RadiaCodeCoordinatorData:
         """Fetch data_buf from device, reconnecting only when needed.
 
         If the existing connection turns out to be stale (get_data fails),
@@ -141,14 +156,25 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
         if count_rate is not None and count_rate == 0 and self._last_count_rate is not None:
             count_rate = self._last_count_rate
 
-        # Return a fully-populated RadiaCodeData using cached values where
-        # the device didn't send fresh data this cycle.
-        return RadiaCodeData(
+        # Build sensor snapshot with cached fallbacks.
+        sensors = RadiaCodeData(
             dose_rate=dose_rate,
             count_rate=count_rate,
             accumulated_dose=self._last_accumulated_dose,
             battery=self._last_battery,
             temperature=self._last_temperature,
+        )
+
+        # Read device settings — small BLE response (~60 bytes).
+        # On failure, keep the last known values so entity states stay valid.
+        try:
+            self._last_settings = await self._client.get_settings()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Settings read failed, using cached values: %s", err)
+
+        return RadiaCodeCoordinatorData(
+            sensors=sensors,
+            settings=self._last_settings,
         )
 
     async def _poll_with_retry(
@@ -222,3 +248,26 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeData]):
                 f"Error communicating with RadiaCode {self._address} "
                 f"(retry also failed): {retry_err}"
             ) from retry_err
+
+    async def async_write_setting(self, vsfr_id: int, value: int) -> None:
+        """Write a single device setting register and refresh data.
+
+        Raises UpdateFailed if the write fails or the device rejects the value.
+        """
+        if not self._client.is_connected:
+            raise UpdateFailed("Cannot write setting: device not connected")
+
+        try:
+            ok = await self._client.write_vsfr(vsfr_id, value)
+        except Exception as err:
+            raise UpdateFailed(
+                f"Failed to write VSFR {vsfr_id:#06x}={value}: {err}"
+            ) from err
+
+        if not ok:
+            raise UpdateFailed(
+                f"Device rejected VSFR write {vsfr_id:#06x}={value}"
+            )
+
+        # Trigger an immediate refresh so the new value shows up in the UI.
+        await self.async_request_refresh()

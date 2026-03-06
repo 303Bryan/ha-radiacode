@@ -62,14 +62,18 @@ from .protocol import (
     CMD,
     VS,
     VSFR,
+    SETTINGS_VSFR_IDS,
     WRITE_CHAR_UUID,
     NOTIFY_CHAR_UUID,
     RadiaCodeData,
+    RadiaCodeSettings,
     build_command,
     parse_response_body,
     parse_vs_response,
     parse_vsfr_batch_response,
+    parse_write_response,
     decode_data_buf,
+    decode_settings,
     extract_sensor_values,
     decode_serial_number,
 )
@@ -329,6 +333,26 @@ class RadiaCodeBLEClient:
         """Return the device serial number string, e.g. 'RC-103-012345'."""
         raw = await self._read_vs(VS.SERIAL_NUMBER)
         return decode_serial_number(raw)
+
+    async def get_settings(self) -> RadiaCodeSettings:
+        """Read all device settings via a single VSFR batch read.
+
+        Returns a RadiaCodeSettings with current display, sound, vibration,
+        and alarm threshold values.  The response is ~60 bytes (fits in one
+        BLE notification), so this never hits BT proxy buffer limits.
+        """
+        values = await self._read_vsfr_batch(SETTINGS_VSFR_IDS)
+        return decode_settings(values)
+
+    async def write_vsfr(self, vsfr_id: int, value: int) -> bool:
+        """Write a single VSFR register.  Returns True on success.
+
+        The *value* is always packed as uint32.  For bool registers pass 1/0;
+        for byte registers (e.g. brightness 0-9) pass the integer directly.
+        """
+        args = struct.pack("<II", vsfr_id, value)
+        payload = await self._execute(CMD.WR_VIRT_SFR, args)
+        return parse_write_response(payload)
 
     # ── Notification handler ──────────────────────────────────────────────────
 

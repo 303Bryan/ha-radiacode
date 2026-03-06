@@ -24,9 +24,9 @@ Wire format (response, arrives via BLE notifications):
 import datetime
 import logging
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Optional
+from typing import Callable, Optional
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,21 +60,76 @@ class VS(IntEnum):
 # ── Virtual SFR IDs (used with WR_VIRT_SFR) ──────────────────────────────────
 
 class VSFR(IntEnum):
-    DEVICE_TIME = 0x0504   # written as 0 after init
-    CPS         = 0x8020   # counts per second (uint32)
-    DR_uR_h     = 0x8021   # dose rate in µR/h (uint32)
-    DS_uR       = 0x8022   # accumulated dose in µR (uint32)
-    TEMP_degC   = 0x8024   # temperature in °C (float)
+    # Init / time
+    DEVICE_TIME    = 0x0504   # written as 0 after init
+
+    # Display settings
+    DISP_BRT       = 0x0511   # brightness 0-9 (byte)
+    DISP_OFF_TIME  = 0x0513   # auto-off: 0=5s 1=10s 2=15s 3=30s
+    DISP_ON        = 0x0514   # display on/off (bool)
+    DISP_DIR       = 0x0515   # direction: 0=Auto 1=Right 2=Left
+    DISP_BACKLT_ON = 0x0516   # backlight on/off (bool)
+
+    # Sound / vibration
+    SOUND_ON       = 0x0522   # sound on/off (bool)
+    VIBRO_ON       = 0x0531   # vibration on/off (bool)
+
+    # Alarm thresholds
+    DR_LEV1_uR_h   = 0x8000  # dose rate alarm L1, µR/h
+    DR_LEV2_uR_h   = 0x8001  # dose rate alarm L2, µR/h
+    DOSE_RESET     = 0x8007  # write 1 to reset accumulated dose
+    CR_LEV1_cp10s  = 0x8008  # count rate alarm L1, counts/10s
+    CR_LEV2_cp10s  = 0x8009  # count rate alarm L2, counts/10s
+    DS_LEV1_uR     = 0x8014  # accumulated dose alarm L1, µR
+    DS_LEV2_uR     = 0x8015  # accumulated dose alarm L2, µR
+
+    # Sensor registers (read-only)
+    CPS            = 0x8020   # counts per second (uint32)
+    DR_uR_h        = 0x8021   # dose rate in µR/h (uint32)
+    DS_uR          = 0x8022   # accumulated dose in µR (uint32)
+    TEMP_degC      = 0x8024   # temperature in °C (float)
 
 
 # Struct format for reinterpreting raw uint32 VSFR values into typed values.
+# All settings registers are uint32 on the wire (bools and bytes packed in uint32).
 _VSFR_FORMATS: dict[int, str] = {
-    VSFR.DEVICE_TIME: "I",
-    VSFR.CPS:         "I",
-    VSFR.DR_uR_h:     "I",
-    VSFR.DS_uR:       "I",
-    VSFR.TEMP_degC:   "f",
+    VSFR.DEVICE_TIME:    "I",
+    VSFR.DISP_BRT:       "I",
+    VSFR.DISP_OFF_TIME:  "I",
+    VSFR.DISP_ON:        "I",
+    VSFR.DISP_DIR:       "I",
+    VSFR.DISP_BACKLT_ON: "I",
+    VSFR.SOUND_ON:       "I",
+    VSFR.VIBRO_ON:       "I",
+    VSFR.DR_LEV1_uR_h:  "I",
+    VSFR.DR_LEV2_uR_h:  "I",
+    VSFR.CR_LEV1_cp10s:  "I",
+    VSFR.CR_LEV2_cp10s:  "I",
+    VSFR.DS_LEV1_uR:     "I",
+    VSFR.DS_LEV2_uR:     "I",
+    VSFR.CPS:            "I",
+    VSFR.DR_uR_h:        "I",
+    VSFR.DS_uR:          "I",
+    VSFR.TEMP_degC:      "f",
 }
+
+# VSFR IDs to batch-read for device settings (order matches RadiaCodeSettings).
+# DOSE_RESET is excluded — it is write-only / stateless.
+SETTINGS_VSFR_IDS: list[int] = [
+    VSFR.SOUND_ON,
+    VSFR.VIBRO_ON,
+    VSFR.DISP_ON,
+    VSFR.DISP_BACKLT_ON,
+    VSFR.DISP_BRT,
+    VSFR.DISP_OFF_TIME,
+    VSFR.DISP_DIR,
+    VSFR.DR_LEV1_uR_h,
+    VSFR.DR_LEV2_uR_h,
+    VSFR.DS_LEV1_uR,
+    VSFR.DS_LEV2_uR,
+    VSFR.CR_LEV1_cp10s,
+    VSFR.CR_LEV2_cp10s,
+]
 
 
 # ── Data types returned from data_buf ─────────────────────────────────────────
@@ -106,6 +161,47 @@ class RadiaCodeData:
     accumulated_dose: Optional[float]  # µSv      (from RareData)
     battery: Optional[float]           # percent  (from RareData)
     temperature: Optional[float]       # °C       (from RareData)
+
+
+@dataclass
+class RadiaCodeSettings:
+    """Current device settings, read from VSFR batch.
+
+    Fields are in the same order as SETTINGS_VSFR_IDS.  Alarm thresholds
+    are stored in device-native units; the HA entity layer converts.
+    """
+    sound_on: Optional[bool] = None
+    vibro_on: Optional[bool] = None
+    display_on: Optional[bool] = None
+    display_backlight_on: Optional[bool] = None
+    display_brightness: Optional[int] = None        # 0-9
+    display_off_time: Optional[int] = None           # 0=5s 1=10s 2=15s 3=30s
+    display_direction: Optional[int] = None          # 0=Auto 1=Right 2=Left
+    dr_alarm_level1: Optional[int] = None            # µR/h
+    dr_alarm_level2: Optional[int] = None            # µR/h
+    ds_alarm_level1: Optional[int] = None            # µR
+    ds_alarm_level2: Optional[int] = None            # µR
+    cr_alarm_level1: Optional[int] = None            # counts/10s
+    cr_alarm_level2: Optional[int] = None            # counts/10s
+
+
+def decode_settings(values: list[int | float]) -> RadiaCodeSettings:
+    """Convert raw VSFR batch values (in SETTINGS_VSFR_IDS order) to settings."""
+    return RadiaCodeSettings(
+        sound_on=bool(values[0]),
+        vibro_on=bool(values[1]),
+        display_on=bool(values[2]),
+        display_backlight_on=bool(values[3]),
+        display_brightness=int(values[4]),
+        display_off_time=int(values[5]),
+        display_direction=int(values[6]),
+        dr_alarm_level1=int(values[7]),
+        dr_alarm_level2=int(values[8]),
+        ds_alarm_level1=int(values[9]),
+        ds_alarm_level2=int(values[10]),
+        cr_alarm_level1=int(values[11]),
+        cr_alarm_level2=int(values[12]),
+    )
 
 
 # ── Command builder ───────────────────────────────────────────────────────────
@@ -222,6 +318,14 @@ def parse_vsfr_batch_response(
         result.append(value)
 
     return result
+
+
+def parse_write_response(payload: bytes) -> bool:
+    """Parse a WR_VIRT_SFR response.  Returns True if the write succeeded."""
+    if len(payload) < 4:
+        raise ValueError(f"Write response too short: {len(payload)} bytes")
+    (retcode,) = struct.unpack_from("<I", payload, 0)
+    return retcode == 1
 
 
 # Byte count of each sample in the eid=1 variable-length sample blocks.
