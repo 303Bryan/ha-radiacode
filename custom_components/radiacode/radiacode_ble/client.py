@@ -71,6 +71,7 @@ from .protocol import (
     parse_response_body,
     parse_vs_response,
     parse_vsfr_batch_response,
+    parse_vsfr_read_response,
     parse_write_response,
     decode_data_buf,
     decode_settings,
@@ -277,10 +278,17 @@ class RadiaCodeBLEClient:
         """
         Poll the device and return the latest sensor readings.
 
-        Reads VSFR registers for dose_rate, accumulated_dose, and temperature
-        (small response, immune to BT proxy buffer overflow), then reads
-        data_buf for count_rate (float CPS from RealTimeData) and battery
-        (from RareData, appears ~once per minute).
+        Reads VSFR registers for dose_rate, accumulated_dose, and temperature,
+        then reads data_buf for count_rate (float CPS from RealTimeData) and
+        battery (from RareData, appears ~once per minute).
+
+        VSFR reading strategy:
+          1. Try a batch read for all three registers (one BLE round-trip).
+          2. For any register the device marks as invalid in the batch
+             response (DR_uR_h and DS_uR are consistently invalid on
+             current firmware), fall back to individual RD_VIRT_SFR reads.
+          3. As a last resort, use data_buf values (though dose_rate from
+             data_buf is always 0.0 on current firmware).
 
         Returns a RadiaCodeData with:
           dose_rate        – µSv/h   (from VSFR DR_uR_h, converted µR/h → µSv/h)
@@ -289,11 +297,7 @@ class RadiaCodeBLEClient:
           battery          – %       (from data_buf RareData, None most polls)
           temperature      – °C      (from VSFR TEMP_degC)
         """
-        # 1. VSFR batch read — dose_rate, accumulated_dose, temperature.
-        #    The device may mark some registers as invalid in the batch
-        #    response (e.g. DR_uR_h, DS_uR are consistently invalid on
-        #    some firmware versions); those come back as None from the
-        #    parser, and we fall back to data_buf values below.
+        # 1. VSFR batch read — try to get all three in one command.
         dose_rate: Optional[float] = None
         accumulated_dose: Optional[float] = None
         temperature: Optional[float] = None
@@ -307,14 +311,31 @@ class RadiaCodeBLEClient:
             if values[2] is not None:
                 temperature = values[2]               # already °C
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("VSFR batch read failed, falling back to data_buf: %s", err)
+            _LOGGER.debug("VSFR batch read failed: %s", err)
 
-        # 2. data_buf read — count_rate (float CPS) and battery (from RareData).
+        # 2. Individual VSFR reads for registers the batch couldn't provide.
+        #    DR_uR_h and DS_uR are consistently marked invalid in batch reads
+        #    on current firmware, but individual RD_VIRT_SFR (0x0824) works.
+        if dose_rate is None:
+            try:
+                raw_val = await self._read_vsfr(VSFR.DR_uR_h)
+                dose_rate = raw_val / 100.0           # µR/h → µSv/h
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Individual VSFR read DR_uR_h failed: %s", err)
+
+        if accumulated_dose is None:
+            try:
+                raw_val = await self._read_vsfr(VSFR.DS_uR)
+                accumulated_dose = raw_val / 100.0    # µR → µSv
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Individual VSFR read DS_uR failed: %s", err)
+
+        # 3. data_buf read — count_rate (float CPS) and battery (from RareData).
         raw = await self._read_vs(VS.DATA_BUF)
         records = decode_data_buf(raw, self._base_time)
         buf_data = extract_sensor_values(records)
 
-        # Prefer VSFR values; fall back to data_buf if VSFR read failed.
+        # Prefer VSFR values; fall back to data_buf if both read methods failed.
         result = RadiaCodeData(
             dose_rate=dose_rate if dose_rate is not None else buf_data.dose_rate,
             count_rate=buf_data.count_rate,
@@ -569,3 +590,18 @@ class RadiaCodeBLEClient:
             args += struct.pack("<I", int(vid))
         payload = await self._execute(CMD.RD_VIRT_SFR_BATCH, args)
         return parse_vsfr_batch_response(payload, vsfr_ids)
+
+    async def _read_vsfr(self, vsfr_id: int) -> int | float:
+        """Read a single VSFR register via RD_VIRT_SFR (0x0824).
+
+        Used as a fallback when the batch read marks a register as
+        invalid.  DR_uR_h and DS_uR consistently fail in batch reads
+        on current firmware but work fine with individual reads.
+
+        Returns the decoded value (int or float depending on
+        ``_VSFR_FORMATS``).  Raises on communication or protocol errors.
+        """
+        payload = await self._execute(
+            CMD.RD_VIRT_SFR, struct.pack("<I", int(vsfr_id))
+        )
+        return parse_vsfr_read_response(payload, vsfr_id)

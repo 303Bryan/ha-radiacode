@@ -44,6 +44,7 @@ class CMD(IntEnum):
     SET_EXCHANGE      = 0x0007  # required handshake on connect
     GET_VERSION       = 0x000A  # firmware version
     GET_SERIAL        = 0x000B  # hardware serial
+    RD_VIRT_SFR       = 0x0824  # read single virtual SFR (register)
     WR_VIRT_SFR       = 0x0825  # write virtual SFR (register)
     RD_VIRT_STRING    = 0x0826  # read virtual string (data_buf, serial, etc.)
     RD_VIRT_SFR_BATCH = 0x082A  # read multiple VSFRs in one command
@@ -341,6 +342,30 @@ def parse_write_response(payload: bytes) -> bool:
         raise ValueError(f"Write response too short: {len(payload)} bytes")
     (retcode,) = struct.unpack_from("<I", payload, 0)
     return retcode == 1
+
+
+def parse_vsfr_read_response(payload: bytes, vsfr_id: int) -> int | float:
+    """Parse a RD_VIRT_SFR (individual register read) response.
+
+    After the 4-byte echo header (already stripped by parse_response_body):
+      [uint32_le retcode] [uint32_le raw_value]
+
+    The raw uint32 value is reinterpreted through ``_VSFR_FORMATS``
+    (e.g. TEMP_degC is stored as a float in the uint32 bit pattern).
+
+    Raises ValueError if the response is too short or the device
+    returned a non-success retcode.
+    """
+    if len(payload) < 8:
+        raise ValueError(
+            f"VSFR read response too short: {len(payload)} bytes, need 8"
+        )
+    retcode, raw = struct.unpack_from("<II", payload, 0)
+    if retcode != 1:
+        raise ValueError(f"VSFR read failed: retcode={retcode}")
+    fmt = _VSFR_FORMATS.get(vsfr_id, "I")
+    (value,) = struct.unpack(f"<{fmt}", struct.pack("<I", raw))
+    return value
 
 
 # Byte count of each sample in the eid=1 variable-length sample blocks.
