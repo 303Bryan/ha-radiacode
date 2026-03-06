@@ -185,22 +185,26 @@ class RadiaCodeSettings:
     cr_alarm_level2: Optional[int] = None            # counts/10s
 
 
-def decode_settings(values: list[int | float]) -> RadiaCodeSettings:
-    """Convert raw VSFR batch values (in SETTINGS_VSFR_IDS order) to settings."""
+def decode_settings(values: list[int | float | None]) -> RadiaCodeSettings:
+    """Convert raw VSFR batch values (in SETTINGS_VSFR_IDS order) to settings.
+
+    Values may be None if the device reported the register as invalid
+    in the batch response; those fields keep their dataclass default (None).
+    """
     return RadiaCodeSettings(
-        sound_on=bool(values[0]),
-        vibro_on=bool(values[1]),
-        display_on=bool(values[2]),
-        display_backlight_on=bool(values[3]),
-        display_brightness=int(values[4]),
-        display_off_time=int(values[5]),
-        display_direction=int(values[6]),
-        dr_alarm_level1=int(values[7]),
-        dr_alarm_level2=int(values[8]),
-        ds_alarm_level1=int(values[9]),
-        ds_alarm_level2=int(values[10]),
-        cr_alarm_level1=int(values[11]),
-        cr_alarm_level2=int(values[12]),
+        sound_on=bool(values[0]) if values[0] is not None else None,
+        vibro_on=bool(values[1]) if values[1] is not None else None,
+        display_on=bool(values[2]) if values[2] is not None else None,
+        display_backlight_on=bool(values[3]) if values[3] is not None else None,
+        display_brightness=int(values[4]) if values[4] is not None else None,
+        display_off_time=int(values[5]) if values[5] is not None else None,
+        display_direction=int(values[6]) if values[6] is not None else None,
+        dr_alarm_level1=int(values[7]) if values[7] is not None else None,
+        dr_alarm_level2=int(values[8]) if values[8] is not None else None,
+        ds_alarm_level1=int(values[9]) if values[9] is not None else None,
+        ds_alarm_level2=int(values[10]) if values[10] is not None else None,
+        cr_alarm_level1=int(values[11]) if values[11] is not None else None,
+        cr_alarm_level2=int(values[12]) if values[12] is not None else None,
     )
 
 
@@ -282,40 +286,51 @@ def parse_vs_response(payload: bytes) -> bytes:
 
 def parse_vsfr_batch_response(
     payload: bytes, vsfr_ids: list[int]
-) -> list[int | float]:
+) -> list[int | float | None]:
     """Parse a RD_VIRT_SFR_BATCH response into decoded register values.
 
     The response after the 4-byte echo header (already stripped):
       [uint32_le valid_flags] [uint32_le val0] [uint32_le val1] ...
 
+    The device only includes uint32 values for registers whose
+    corresponding bit is set in *valid_flags*.  Registers marked
+    invalid (bit=0) are omitted from the response payload entirely,
+    and this function returns ``None`` for those positions.
+
     Each raw uint32 value is reinterpreted through ``_VSFR_FORMATS``
     (e.g. TEMP_degC is stored as a float in the uint32 bit pattern).
 
-    Returns a list of decoded values in the same order as *vsfr_ids*.
+    Returns a list of decoded values (or None) in the same order as
+    *vsfr_ids*.
     """
-    nvsfr = len(vsfr_ids)
-    needed = 4 + 4 * nvsfr
-    if len(payload) < needed:
+    if len(payload) < 4:
         raise ValueError(
-            f"VSFR batch response too short: {len(payload)} bytes, "
-            f"need {needed} for {nvsfr} registers"
+            f"VSFR batch response too short: {len(payload)} bytes, need ≥4"
         )
 
     (valid_flags,) = struct.unpack_from("<I", payload, 0)
-    expected_flags = (1 << nvsfr) - 1
-    if valid_flags != expected_flags:
+
+    # Count how many registers the device actually included values for.
+    n_valid = bin(valid_flags).count("1")
+    needed = 4 + 4 * n_valid
+    if len(payload) < needed:
         raise ValueError(
-            f"VSFR validity flags mismatch: "
-            f"{valid_flags:#0{nvsfr + 2}b} != {expected_flags:#0{nvsfr + 2}b}"
+            f"VSFR batch response too short: {len(payload)} bytes, "
+            f"need {needed} for {n_valid} valid registers"
         )
 
-    raw_values = struct.unpack_from(f"<{nvsfr}I", payload, 4)
-
-    result: list[int | float] = []
-    for i, raw in enumerate(raw_values):
+    nvsfr = len(vsfr_ids)
+    result: list[int | float | None] = []
+    offset = 4
+    for i in range(nvsfr):
+        if not (valid_flags & (1 << i)):
+            result.append(None)
+            continue
+        (raw,) = struct.unpack_from("<I", payload, offset)
         fmt = _VSFR_FORMATS.get(vsfr_ids[i], "I")
         (value,) = struct.unpack(f"<{fmt}", struct.pack("<I", raw))
         result.append(value)
+        offset += 4
 
     return result
 

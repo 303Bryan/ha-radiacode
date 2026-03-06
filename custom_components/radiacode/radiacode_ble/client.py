@@ -128,6 +128,11 @@ class RadiaCodeBLEClient:
         # immediately when the BLE link drops.
         self._disconnected_event: asyncio.Event = asyncio.Event()
 
+        # Serialize BLE command execution.  Without this, a UI-triggered
+        # write (e.g. switch toggle) can overlap with a coordinator poll,
+        # corrupting the shared notification reassembly state.
+        self._cmd_lock: asyncio.Lock = asyncio.Lock()
+
     # ── Connection management ─────────────────────────────────────────────────
 
     def _reset_notification_state(self) -> None:
@@ -285,18 +290,24 @@ class RadiaCodeBLEClient:
           temperature      – °C      (from VSFR TEMP_degC)
         """
         # 1. VSFR batch read — dose_rate, accumulated_dose, temperature.
-        #    Response is ~20 bytes (fits in one BLE notification packet).
+        #    The device may mark some registers as invalid in the batch
+        #    response (e.g. DR_uR_h, DS_uR are consistently invalid on
+        #    some firmware versions); those come back as None from the
+        #    parser, and we fall back to data_buf values below.
         dose_rate: Optional[float] = None
         accumulated_dose: Optional[float] = None
         temperature: Optional[float] = None
         try:
             vsfr_ids = [VSFR.DR_uR_h, VSFR.DS_uR, VSFR.TEMP_degC]
             values = await self._read_vsfr_batch(vsfr_ids)
-            dose_rate = values[0] / 100.0         # µR/h → µSv/h
-            accumulated_dose = values[1] / 100.0  # µR → µSv
-            temperature = values[2]               # already °C
+            if values[0] is not None:
+                dose_rate = values[0] / 100.0         # µR/h → µSv/h
+            if values[1] is not None:
+                accumulated_dose = values[1] / 100.0  # µR → µSv
+            if values[2] is not None:
+                temperature = values[2]               # already °C
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("VSFR batch read failed, falling back to data_buf: %s", err)
+            _LOGGER.debug("VSFR batch read failed, falling back to data_buf: %s", err)
 
         # 2. data_buf read — count_rate (float CPS) and battery (from RareData).
         raw = await self._read_vs(VS.DATA_BUF)
@@ -420,13 +431,24 @@ class RadiaCodeBLEClient:
         """
         Send one command and return the response payload (echo header stripped).
 
+        The _cmd_lock ensures only one command is in-flight at a time.
+        Without this, a UI-triggered write (switch toggle, number change)
+        could overlap with a coordinator poll, corrupting the shared
+        notification reassembly state (_resp_buf / _notify_event).
+
         Steps:
-          1. Allocate the next sequence number.
-          2. Reset notification state.
-          3. Write the framed packet in _WRITE_CHUNK-byte pieces.
-          4. Await the notify event (up to _CMD_TIMEOUT seconds).
-          5. Verify the echo header and return the payload.
+          1. Acquire _cmd_lock (serialize with other commands).
+          2. Allocate the next sequence number.
+          3. Reset notification state.
+          4. Write the framed packet in _WRITE_CHUNK-byte pieces.
+          5. Await the notify event (up to _CMD_TIMEOUT seconds).
+          6. Verify the echo header and return the payload.
         """
+        async with self._cmd_lock:
+            return await self._execute_locked(cmd, args)
+
+    async def _execute_locked(self, cmd: int, args: bytes = b"") -> bytes:
+        """Inner _execute body, called with _cmd_lock held."""
         seq = self._seq
         self._seq = (self._seq + 1) % 32
 
@@ -534,10 +556,11 @@ class RadiaCodeBLEClient:
         )
         return parse_vs_response(payload)
 
-    async def _read_vsfr_batch(self, vsfr_ids: list[int]) -> list[int | float]:
+    async def _read_vsfr_batch(self, vsfr_ids: list[int]) -> list[int | float | None]:
         """Read multiple VSFR registers in a single command.
 
-        Returns decoded values in the same order as *vsfr_ids*.
+        Returns decoded values in the same order as *vsfr_ids*.  Values
+        for registers the device marks as invalid are returned as None.
         The response is very small (~20 bytes for 3 registers), so it
         never hits BT proxy notification buffer limits.
         """
