@@ -278,72 +278,45 @@ class RadiaCodeBLEClient:
         """
         Poll the device and return the latest sensor readings.
 
-        Reads VSFR registers for dose_rate, accumulated_dose, and temperature,
-        then reads data_buf for count_rate (float CPS from RealTimeData) and
-        battery (from RareData, appears ~once per minute).
-
-        VSFR reading strategy:
-          1. Try a batch read for all three registers (one BLE round-trip).
-          2. For any register the device marks as invalid in the batch
-             response (DR_uR_h and DS_uR are consistently invalid on
-             current firmware), fall back to individual RD_VIRT_SFR reads.
-          3. As a last resort, use data_buf values (though dose_rate from
-             data_buf is always 0.0 on current firmware).
+        Data sources:
+          - VSFR batch read: temperature (TEMP_degC is the only sensor
+            register that works via batch/individual reads over BLE;
+            DR_uR_h and DS_uR are rejected by the device firmware).
+          - data_buf records: dose_rate (from DoseRateDB/RawData/RealTimeData),
+            count_rate (from RealTimeData), accumulated_dose and battery
+            (from RareData, ~once per minute).
 
         Returns a RadiaCodeData with:
-          dose_rate        – µSv/h   (from VSFR DR_uR_h, converted µR/h → µSv/h)
-          count_rate       – CPS     (from data_buf RealTimeData, float precision)
-          accumulated_dose – µSv     (from VSFR DS_uR, converted µR → µSv)
-          battery          – %       (from data_buf RareData, None most polls)
-          temperature      – °C      (from VSFR TEMP_degC)
+          dose_rate        – from data_buf (DoseRateDB, RawData, or RealTimeData)
+          count_rate       – CPS (from data_buf RealTimeData)
+          accumulated_dose – µSv (from data_buf RareData)
+          battery          – % (from data_buf RareData, None most polls)
+          temperature      – °C (from VSFR TEMP_degC, fallback to data_buf)
         """
-        # 1. VSFR batch read — try to get all three in one command.
-        dose_rate: Optional[float] = None
-        accumulated_dose: Optional[float] = None
+        # 1. VSFR batch read — only TEMP_degC works over BLE.
+        #    DR_uR_h and DS_uR are marked invalid in batch reads and return
+        #    retcode=0 for individual reads, so we get those from data_buf.
         temperature: Optional[float] = None
         try:
-            vsfr_ids = [VSFR.DR_uR_h, VSFR.DS_uR, VSFR.TEMP_degC]
+            vsfr_ids = [VSFR.TEMP_degC]
             values = await self._read_vsfr_batch(vsfr_ids)
             if values[0] is not None:
-                dose_rate = values[0] / 100.0         # µR/h → µSv/h
-            if values[1] is not None:
-                accumulated_dose = values[1] / 100.0  # µR → µSv
-            if values[2] is not None:
-                temperature = values[2]               # already °C
+                temperature = values[0]               # already °C
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("VSFR batch read failed: %s", err)
+            _LOGGER.debug("VSFR batch read for TEMP failed: %s", err)
 
-        # 2. Individual VSFR reads for registers the batch couldn't provide.
-        #    DR_uR_h and DS_uR are consistently marked invalid in batch reads
-        #    on current firmware, but individual RD_VIRT_SFR (0x0824) works.
-        if dose_rate is None:
-            try:
-                raw_val = await self._read_vsfr(VSFR.DR_uR_h)
-                dose_rate = raw_val / 100.0           # µR/h → µSv/h
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Individual VSFR read DR_uR_h failed: %s", err)
-
-        if accumulated_dose is None:
-            try:
-                raw_val = await self._read_vsfr(VSFR.DS_uR)
-                accumulated_dose = raw_val / 100.0    # µR → µSv
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Individual VSFR read DS_uR failed: %s", err)
-
-        # 3. data_buf read — count_rate (float CPS) and battery (from RareData).
+        # 2. data_buf read — primary source for dose_rate, count_rate,
+        #    accumulated_dose, and battery.  The extract_sensor_values()
+        #    function pulls dose_rate from DoseRateDB/RawData/RealTimeData
+        #    records, preferring the first source with a non-zero value.
         raw = await self._read_vs(VS.DATA_BUF)
         records = decode_data_buf(raw, self._base_time)
         buf_data = extract_sensor_values(records)
 
-        # Prefer VSFR values; fall back to data_buf if both read methods failed.
         result = RadiaCodeData(
-            dose_rate=dose_rate if dose_rate is not None else buf_data.dose_rate,
+            dose_rate=buf_data.dose_rate,
             count_rate=buf_data.count_rate,
-            accumulated_dose=(
-                accumulated_dose
-                if accumulated_dose is not None
-                else buf_data.accumulated_dose
-            ),
+            accumulated_dose=buf_data.accumulated_dose,
             battery=buf_data.battery,
             temperature=(
                 temperature if temperature is not None else buf_data.temperature
@@ -351,11 +324,11 @@ class RadiaCodeBLEClient:
         )
 
         _LOGGER.debug(
-            "get_data → dose_rate=%.4f µSv/h  count_rate=%.1f CPS  "
-            "dose=%.4f µSv  battery=%s%%  temp=%s°C",
-            result.dose_rate or 0,
+            "get_data → dose_rate=%s µSv/h  count_rate=%.1f CPS  "
+            "dose=%s µSv  battery=%s%%  temp=%s°C",
+            f"{result.dose_rate:.6e}" if result.dose_rate is not None else "None",
             result.count_rate or 0,
-            result.accumulated_dose or 0,
+            f"{result.accumulated_dose:.4f}" if result.accumulated_dose is not None else "None",
             f"{result.battery:.0f}" if result.battery is not None else "—",
             f"{result.temperature:.1f}" if result.temperature is not None else "—",
         )

@@ -137,12 +137,30 @@ SETTINGS_VSFR_IDS: list[int] = [
 
 @dataclass
 class RealTimeData:
-    """Real-time radiation measurement (data_buf gid=0)."""
+    """Real-time radiation measurement (data_buf gid=0, appears ~every second)."""
     dt: datetime.datetime
     count_rate: float      # counts per second (CPS)
     count_rate_err: float  # error, percent
-    dose_rate: float       # µSv/h
+    dose_rate: float       # dose rate (float, units vary by firmware)
     dose_rate_err: float   # error, percent
+
+
+@dataclass
+class DoseRateDB:
+    """Dose-rate database record (data_buf gid=2, appears periodically)."""
+    dt: datetime.datetime
+    count: int             # total counts in measurement period
+    count_rate: float      # counts per second (CPS)
+    dose_rate: float       # dose rate (float, units vary by firmware)
+    dose_rate_err: float   # error, percent
+
+
+@dataclass
+class RawData:
+    """Raw radiation data (data_buf gid=1, appears periodically)."""
+    dt: datetime.datetime
+    count_rate: float      # counts per second (CPS)
+    dose_rate: float       # dose rate (float, units vary by firmware)
 
 
 @dataclass
@@ -415,6 +433,14 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
     records: list = []
     next_seq: Optional[int] = None
 
+    # Diagnostic counters for record types
+    gid_counts: dict[int, int] = {}
+
+    _LOGGER.debug(
+        "decode_data_buf: %d bytes, first_hex=%s",
+        len(data), data[:60].hex() if data else "",
+    )
+
     while buf.remaining() >= 7:
         seq, eid, gid, ts_offset = buf.unpack("<BBBi")
         dt = base_time + datetime.timedelta(milliseconds=ts_offset * 10)
@@ -423,6 +449,7 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
             break  # sequence jump — stop decoding
 
         next_seq = (seq + 1) % 256
+        gid_counts[gid] = gid_counts.get(gid, 0) + 1
 
         try:
             if eid == 0 and gid == 0:       # GRP_RealTimeData
@@ -435,11 +462,23 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
                     dose_rate_err=dr_err / 10,
                 ))
 
-            elif eid == 0 and gid == 1:     # GRP_RawData (skip)
-                buf.unpack("<ff")
+            elif eid == 0 and gid == 1:     # GRP_RawData
+                count_rate, dose_rate = buf.unpack("<ff")
+                records.append(RawData(
+                    dt=dt,
+                    count_rate=count_rate,
+                    dose_rate=dose_rate,
+                ))
 
-            elif eid == 0 and gid == 2:     # GRP_DoseRateDB (skip)
-                buf.unpack("<IffHH")
+            elif eid == 0 and gid == 2:     # GRP_DoseRateDB
+                count, count_rate, dose_rate, dr_err, _flags = buf.unpack("<IffHH")
+                records.append(DoseRateDB(
+                    dt=dt,
+                    count=count,
+                    count_rate=count_rate,
+                    dose_rate=dose_rate,
+                    dose_rate_err=dr_err / 10,
+                ))
 
             elif eid == 0 and gid == 3:     # GRP_RareData
                 _dur, dose, temperature, charge_level, _flags = buf.unpack("<IfHHH")
@@ -479,6 +518,25 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
         except ValueError:
             break  # truncated record; stop cleanly
 
+    # Log record type distribution and dose_rate values for diagnostics
+    _LOGGER.debug("decode_data_buf: gid_counts=%s, total_records=%d", gid_counts, len(records))
+    for r in records:
+        if isinstance(r, RealTimeData):
+            _LOGGER.debug(
+                "  RealTimeData: count_rate=%.2f dose_rate=%.6e dose_rate_err=%.1f%%",
+                r.count_rate, r.dose_rate, r.dose_rate_err,
+            )
+        elif isinstance(r, DoseRateDB):
+            _LOGGER.debug(
+                "  DoseRateDB: count=%d count_rate=%.2f dose_rate=%.6e dose_rate_err=%.1f%%",
+                r.count, r.count_rate, r.dose_rate, r.dose_rate_err,
+            )
+        elif isinstance(r, RawData):
+            _LOGGER.debug(
+                "  RawData: count_rate=%.2f dose_rate=%.6e",
+                r.count_rate, r.dose_rate,
+            )
+
     return records
 
 
@@ -486,8 +544,10 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     """
     Return the most recent sensor values from a decoded data_buf record list.
 
-    RealTimeData appears on every ~1 s tick; RareData appears ~once per minute,
-    so battery and accumulated_dose may be None if no RareData was in this batch.
+    Dose rate and count rate are extracted from all record types that carry
+    them (RealTimeData, DoseRateDB, RawData), preferring the most recent
+    non-zero value.  RareData appears ~once per minute, so battery and
+    accumulated_dose may be None if no RareData was in this batch.
 
     Records are iterated in arrival order; each match overwrites the previous,
     so the final values reflect the *last* (most recent) record of each type.
@@ -500,8 +560,23 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
 
     for r in records:
         if isinstance(r, RealTimeData):
-            dose_rate = r.dose_rate
             count_rate = r.count_rate
+            # RealTimeData.dose_rate is ~0 on some firmware; keep it only
+            # if it's meaningfully non-zero (> 1e-4), otherwise preserve
+            # any better value from DoseRateDB or RawData.
+            if r.dose_rate > 1e-4:
+                dose_rate = r.dose_rate
+        elif isinstance(r, DoseRateDB):
+            if r.dose_rate > 1e-4:
+                dose_rate = r.dose_rate
+            # DoseRateDB also has count_rate; use it if we don't have one yet
+            if count_rate is None:
+                count_rate = r.count_rate
+        elif isinstance(r, RawData):
+            if r.dose_rate > 1e-4:
+                dose_rate = r.dose_rate
+            if count_rate is None:
+                count_rate = r.count_rate
         elif isinstance(r, RareData):
             accumulated_dose = r.dose
             battery = r.charge_level           # already 0–100 percent
