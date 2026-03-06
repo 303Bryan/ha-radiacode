@@ -1,5 +1,3 @@
-<img src="custom_components/radiacode/icon.png" alt="Radiacode" width="100" align="right"/>
-
 # Radiacode for Home Assistant
 
 [![GitHub Release](https://img.shields.io/github/v/release/303Bryan/ha-radiacode)](https://github.com/303Bryan/ha-radiacode/releases)
@@ -7,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Validate](https://github.com/303Bryan/ha-radiacode/actions/workflows/validate.yml/badge.svg)](https://github.com/303Bryan/ha-radiacode/actions/workflows/validate.yml)
 
-A custom Home Assistant integration for **Radiacode** radiation detectors (RC-102, RC-103, RC-110) via Bluetooth Low Energy.
+A custom Home Assistant integration for **Radiacode** radiation detectors via Bluetooth Low Energy.
 
 Connects wirelessly using HA's built-in Bluetooth stack — works with local Bluetooth adapters and [ESPHome Bluetooth proxies](https://esphome.io/components/bluetooth_proxy.html) for whole-home coverage.
 
@@ -81,8 +79,8 @@ The integration exposes the full Radiacode configuration as writable HA entities
 
 ## Requirements
 
-- **Home Assistant** 2024.1.0 or newer
-- **Radiacode** RC-102, RC-103, or RC-110 with firmware ≥ 4.8
+- **Home Assistant**
+- **Radiacode** RC-102, RC-103, or RC-110 (tested with firmware 4.8)
 - **Bluetooth** — one of:
   - A Bluetooth adapter on your HA host (USB dongle or built-in), **or**
   - One or more [ESPHome Bluetooth proxies](https://esphome.io/components/bluetooth_proxy.html) within range of the device
@@ -121,16 +119,11 @@ If HA detects your Radiacode over Bluetooth, a notification will appear on the *
 
 ### Manual Setup
 
-If auto-discovery doesn't trigger (common with ESPHome BT proxies where the device may not be actively advertising):
+If auto-discovery doesn't trigger:
 
 1. Go to **Settings → Devices & Services → Add Integration**
 2. Search for **Radiacode**
 3. Enter the Bluetooth MAC address of your device
-
-**Finding the MAC address:**
-- In the Radiacode mobile app: **Settings → Device Info**
-- In your phone's Bluetooth settings when the device is paired
-- In the HA Bluetooth integration's device list under **Settings → System → Bluetooth**
 
 ---
 
@@ -174,17 +167,6 @@ This usually means the BLE link is dropping. Check:
 - Try moving a Bluetooth proxy closer to the device
 
 ### Enabling debug logging
-
-Add to `configuration.yaml`:
-
-```yaml
-logger:
-  default: warning
-  logs:
-    custom_components.radiacode: debug
-```
-
-Then restart HA and reproduce the issue. Logs appear under **Settings → System → Logs**.
 
 ---
 
