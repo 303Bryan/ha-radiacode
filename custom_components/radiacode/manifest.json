@@ -1,6 +1,6 @@
 {
   "domain": "radiacode",
-  "name": "RadiaCode",
+  "name": "Radiacode",
   "version": "0.4.0b5",
   "codeowners": ["@303Bryan"],
   "config_flow": true,
