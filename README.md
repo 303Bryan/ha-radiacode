@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Validate](https://github.com/303Bryan/ha-radiacode/actions/workflows/validate.yml/badge.svg)](https://github.com/303Bryan/ha-radiacode/actions/workflows/validate.yml)
 
-A custom Home Assistant integration for **RadiaCode** radiation detectors (RC-102, RC-103, RC-110) via Bluetooth Low Energy.
+A custom Home Assistant integration for **Radiacode** radiation detectors via Bluetooth Low Energy.
 
 Connects wirelessly using HA's built-in Bluetooth stack — works with local Bluetooth adapters and [ESPHome Bluetooth proxies](https://esphome.io/components/bluetooth_proxy.html) for whole-home coverage.
 
