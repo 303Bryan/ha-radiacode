@@ -11,6 +11,15 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.4.0b6] — 2026-03-06
+
+### Changed
+- **Branding** — Rename "RadiaCode" → "Radiacode" throughout (manifest, hacs.json, strings, translations, README).
+- **Documentation** — Add Device Controls section to README covering all switch/number/select/button entities; remove now-resolved dose rate known limitation; full CHANGELOG history for all versions.
+- **Icon** — README header now displays the integration icon so it renders correctly in HACS and GitHub.
+
+---
+
 ## [0.4.0b5] — 2026-03-06
 
 ### Fixed
@@ -96,7 +105,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v0.4.0b5...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v0.4.0b6...HEAD
+[0.4.0b6]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0b6
 [0.4.0b5]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0b5
 [0.4.0b4]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0b4
 [0.4.0b3]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0b3
