@@ -1,4 +1,4 @@
-# RadiaCode for Home Assistant
+# Radiacode for Home Assistant
 
 [![GitHub Release](https://img.shields.io/github/v/release/303Bryan/ha-radiacode)](https://github.com/303Bryan/ha-radiacode/releases)
 [![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz)
@@ -39,7 +39,7 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 ## Requirements
 
 - **Home Assistant**
-- **RadiaCode** RC-102, RC-103, or RC-110 (tested with firmware 4.8)
+- **Radiacode** RC-102, RC-103, or RC-110 (tested with firmware 4.8)
 - **Bluetooth** — one of:
   - A Bluetooth adapter on your HA host (USB dongle or built-in), **or**
   - One or more [ESPHome Bluetooth proxies](https://esphome.io/components/bluetooth_proxy.html) within range of the device
