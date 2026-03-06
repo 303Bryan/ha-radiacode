@@ -11,6 +11,28 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.4.0] — 2026-03-06
+
+### Added
+- **Device controls** — Switches, numbers, selects, and buttons for full Radiacode configuration from HA (sound, vibration, display, brightness, alarm thresholds, orientation, dose reset).
+- **Integration icon** — Radiation trefoil icon, light + dark theme (1× and 2×).
+- **Temperature sensor** — Internal device temperature via VSFR `TEMP_degC`.
+
+### Fixed
+- **Dose rate unit conversion** — Raw `data_buf` dose_rate is in R/h; multiplied by 10,000 to produce correct µSv/h values (~0.10–0.30 µSv/h at background).
+- **Accumulated dose unit** — Same ×10,000 conversion applied to `RareData.dose` (R → µSv).
+- **DoseRateDB and RawData decoding** — Previously skipped record types now decoded and used as dose rate sources.
+- **Write Without Response** — BLE writes use `response=False`; ATT Write Requests stalled 10+ s through ESPHome BT proxies.
+- **BLE device lookup** — `async_ble_device_from_address()` called only on new connections, not every poll.
+- **Partial VSFR batch responses** — Sensor registers marked invalid by firmware are gracefully skipped.
+- **BLE command serialisation** — Commands queued to prevent framing corruption through BT proxies.
+
+### Changed
+- **Polling** — `data_buf` is now the primary source for dose rate, count rate, accumulated dose, and battery; only `TEMP_degC` still uses a VSFR batch read.
+- **Branding** — Renamed "RadiaCode" → "Radiacode" throughout.
+
+---
+
 ## [0.4.0b6] — 2026-03-06
 
 ### Changed
@@ -105,7 +127,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v0.4.0b6...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0
 [0.4.0b6]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0b6
 [0.4.0b5]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0b5
 [0.4.0b4]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0b4
