@@ -68,6 +68,7 @@ from .protocol import (
     build_command,
     parse_response_body,
     parse_vs_response,
+    parse_vsfr_batch_response,
     decode_data_buf,
     extract_sensor_values,
     decode_serial_number,
@@ -201,6 +202,18 @@ class RadiaCodeBLEClient:
         # cdump sets this to now+128 s during init.
         self._base_time = datetime.datetime.now() + datetime.timedelta(seconds=128)
 
+        # Drain any stale data_buf records accumulated while disconnected.
+        # The first read after a fresh connection returns ALL records buffered
+        # on the device (often 1000+ bytes / 50+ notification packets), which
+        # overflows the ESPHome BT proxy's notification buffer.  By draining
+        # here, subsequent poll reads are small (5 s worth of data ≈ 5 records).
+        # A partial/truncated drain is fine — the device clears sent records.
+        try:
+            await self._read_vs(VS.DATA_BUF)
+            _LOGGER.debug("Drained stale data_buf after init")
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("data_buf drain read failed (non-fatal)")
+
         _LOGGER.debug(
             "RadiaCode connected and initialised (%s)", ble_device.address
         )
@@ -255,19 +268,52 @@ class RadiaCodeBLEClient:
         """
         Poll the device and return the latest sensor readings.
 
-        Returns a RadiaCodeData with:
-          dose_rate        – µSv/h  (None if no RealTimeData record in this batch)
-          count_rate       – CPS    (None if no RealTimeData record in this batch)
-          accumulated_dose – µSv    (None if no RareData record in this batch)
-          battery          – %      (None if no RareData record in this batch)
+        Reads VSFR registers for dose_rate, accumulated_dose, and temperature
+        (small response, immune to BT proxy buffer overflow), then reads
+        data_buf for count_rate (float CPS from RealTimeData) and battery
+        (from RareData, appears ~once per minute).
 
-        RealTimeData appears on every ~1 s tick buffered since last call.
-        RareData appears ~once per minute, so battery/accumulated_dose
-        will be None in many poll cycles and must be cached by the caller.
+        Returns a RadiaCodeData with:
+          dose_rate        – µSv/h   (from VSFR DR_uR_h, converted µR/h → µSv/h)
+          count_rate       – CPS     (from data_buf RealTimeData, float precision)
+          accumulated_dose – µSv     (from VSFR DS_uR, converted µR → µSv)
+          battery          – %       (from data_buf RareData, None most polls)
+          temperature      – °C      (from VSFR TEMP_degC)
         """
+        # 1. VSFR batch read — dose_rate, accumulated_dose, temperature.
+        #    Response is ~20 bytes (fits in one BLE notification packet).
+        dose_rate: Optional[float] = None
+        accumulated_dose: Optional[float] = None
+        temperature: Optional[float] = None
+        try:
+            vsfr_ids = [VSFR.DR_uR_h, VSFR.DS_uR, VSFR.TEMP_degC]
+            values = await self._read_vsfr_batch(vsfr_ids)
+            dose_rate = values[0] / 100.0         # µR/h → µSv/h
+            accumulated_dose = values[1] / 100.0  # µR → µSv
+            temperature = values[2]               # already °C
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("VSFR batch read failed, falling back to data_buf: %s", err)
+
+        # 2. data_buf read — count_rate (float CPS) and battery (from RareData).
         raw = await self._read_vs(VS.DATA_BUF)
         records = decode_data_buf(raw, self._base_time)
-        result = extract_sensor_values(records)
+        buf_data = extract_sensor_values(records)
+
+        # Prefer VSFR values; fall back to data_buf if VSFR read failed.
+        result = RadiaCodeData(
+            dose_rate=dose_rate if dose_rate is not None else buf_data.dose_rate,
+            count_rate=buf_data.count_rate,
+            accumulated_dose=(
+                accumulated_dose
+                if accumulated_dose is not None
+                else buf_data.accumulated_dose
+            ),
+            battery=buf_data.battery,
+            temperature=(
+                temperature if temperature is not None else buf_data.temperature
+            ),
+        )
+
         _LOGGER.debug(
             "get_data → dose_rate=%.4f µSv/h  count_rate=%.1f CPS  "
             "dose=%.4f µSv  battery=%s%%  temp=%s°C",
@@ -463,3 +509,16 @@ class RadiaCodeBLEClient:
             CMD.RD_VIRT_STRING, struct.pack("<I", int(vs_id))
         )
         return parse_vs_response(payload)
+
+    async def _read_vsfr_batch(self, vsfr_ids: list[int]) -> list[int | float]:
+        """Read multiple VSFR registers in a single command.
+
+        Returns decoded values in the same order as *vsfr_ids*.
+        The response is very small (~20 bytes for 3 registers), so it
+        never hits BT proxy notification buffer limits.
+        """
+        args = struct.pack("<I", len(vsfr_ids))
+        for vid in vsfr_ids:
+            args += struct.pack("<I", int(vid))
+        payload = await self._execute(CMD.RD_VIRT_SFR_BATCH, args)
+        return parse_vsfr_batch_response(payload, vsfr_ids)

@@ -41,12 +41,13 @@ NOTIFY_CHAR_UUID = "e63215e7-7003-49d8-96b0-b024798fb901"
 # ── Command IDs ───────────────────────────────────────────────────────────────
 
 class CMD(IntEnum):
-    SET_EXCHANGE   = 0x0007  # required handshake on connect
-    GET_VERSION    = 0x000A  # firmware version
-    GET_SERIAL     = 0x000B  # hardware serial
-    WR_VIRT_SFR    = 0x0825  # write virtual SFR (register)
-    RD_VIRT_STRING = 0x0826  # read virtual string (data_buf, serial, etc.)
-    SET_TIME       = 0x0A04  # set device clock
+    SET_EXCHANGE      = 0x0007  # required handshake on connect
+    GET_VERSION       = 0x000A  # firmware version
+    GET_SERIAL        = 0x000B  # hardware serial
+    WR_VIRT_SFR       = 0x0825  # write virtual SFR (register)
+    RD_VIRT_STRING    = 0x0826  # read virtual string (data_buf, serial, etc.)
+    RD_VIRT_SFR_BATCH = 0x082A  # read multiple VSFRs in one command
+    SET_TIME          = 0x0A04  # set device clock
 
 
 # ── Virtual String IDs (args to RD_VIRT_STRING) ───────────────────────────────
@@ -60,6 +61,20 @@ class VS(IntEnum):
 
 class VSFR(IntEnum):
     DEVICE_TIME = 0x0504   # written as 0 after init
+    CPS         = 0x8020   # counts per second (uint32)
+    DR_uR_h     = 0x8021   # dose rate in µR/h (uint32)
+    DS_uR       = 0x8022   # accumulated dose in µR (uint32)
+    TEMP_degC   = 0x8024   # temperature in °C (float)
+
+
+# Struct format for reinterpreting raw uint32 VSFR values into typed values.
+_VSFR_FORMATS: dict[int, str] = {
+    VSFR.DEVICE_TIME: "I",
+    VSFR.CPS:         "I",
+    VSFR.DR_uR_h:     "I",
+    VSFR.DS_uR:       "I",
+    VSFR.TEMP_degC:   "f",
+}
 
 
 # ── Data types returned from data_buf ─────────────────────────────────────────
@@ -167,6 +182,46 @@ def parse_vs_response(payload: bytes) -> bytes:
         )
 
     return data
+
+
+def parse_vsfr_batch_response(
+    payload: bytes, vsfr_ids: list[int]
+) -> list[int | float]:
+    """Parse a RD_VIRT_SFR_BATCH response into decoded register values.
+
+    The response after the 4-byte echo header (already stripped):
+      [uint32_le valid_flags] [uint32_le val0] [uint32_le val1] ...
+
+    Each raw uint32 value is reinterpreted through ``_VSFR_FORMATS``
+    (e.g. TEMP_degC is stored as a float in the uint32 bit pattern).
+
+    Returns a list of decoded values in the same order as *vsfr_ids*.
+    """
+    nvsfr = len(vsfr_ids)
+    needed = 4 + 4 * nvsfr
+    if len(payload) < needed:
+        raise ValueError(
+            f"VSFR batch response too short: {len(payload)} bytes, "
+            f"need {needed} for {nvsfr} registers"
+        )
+
+    (valid_flags,) = struct.unpack_from("<I", payload, 0)
+    expected_flags = (1 << nvsfr) - 1
+    if valid_flags != expected_flags:
+        raise ValueError(
+            f"VSFR validity flags mismatch: "
+            f"{valid_flags:#0{nvsfr + 2}b} != {expected_flags:#0{nvsfr + 2}b}"
+        )
+
+    raw_values = struct.unpack_from(f"<{nvsfr}I", payload, 4)
+
+    result: list[int | float] = []
+    for i, raw in enumerate(raw_values):
+        fmt = _VSFR_FORMATS.get(vsfr_ids[i], "I")
+        (value,) = struct.unpack(f"<{fmt}", struct.pack("<I", raw))
+        result.append(value)
+
+    return result
 
 
 # Byte count of each sample in the eid=1 variable-length sample blocks.

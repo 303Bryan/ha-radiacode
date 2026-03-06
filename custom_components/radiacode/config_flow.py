@@ -68,6 +68,12 @@ class RadiaCodeConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_user()
 
         if user_input is not None:
+            # Re-check unique_id right before creating the entry.  A race
+            # during HA boot can allow the confirm flow to proceed even
+            # though the entry was already configured by a parallel flow.
+            await self.async_set_unique_id(self._discovery_info.address)
+            self._abort_if_unique_id_configured()
+
             return self.async_create_entry(
                 title=self._name,
                 data={
