@@ -174,10 +174,14 @@ class RareData:
 
 @dataclass
 class RadiaCodeData:
-    """Aggregated sensor readings for one poll cycle."""
-    dose_rate: Optional[float]         # µSv/h   (from RealTimeData)
+    """Aggregated sensor readings for one poll cycle.
+
+    All dose values are already converted to µSv-based units by
+    extract_sensor_values (raw data_buf values are in Roentgen).
+    """
+    dose_rate: Optional[float]         # µSv/h   (converted from R/h)
     count_rate: Optional[float]        # CPS      (from RealTimeData)
-    accumulated_dose: Optional[float]  # µSv      (from RareData)
+    accumulated_dose: Optional[float]  # µSv      (converted from R)
     battery: Optional[float]           # percent  (from RareData)
     temperature: Optional[float]       # °C       (from RareData)
 
@@ -518,23 +522,24 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
         except ValueError:
             break  # truncated record; stop cleanly
 
-    # Log record type distribution and dose_rate values for diagnostics
+    # Log record type distribution and dose_rate values for diagnostics.
+    # Raw dose_rate is in R/h; show converted µSv/h (×10000) for readability.
     _LOGGER.debug("decode_data_buf: gid_counts=%s, total_records=%d", gid_counts, len(records))
     for r in records:
         if isinstance(r, RealTimeData):
             _LOGGER.debug(
-                "  RealTimeData: count_rate=%.2f dose_rate=%.6e dose_rate_err=%.1f%%",
-                r.count_rate, r.dose_rate, r.dose_rate_err,
+                "  RealTimeData: count_rate=%.2f dose_rate=%.6e R/h (%.4f µSv/h) err=%.1f%%",
+                r.count_rate, r.dose_rate, r.dose_rate * 10_000, r.dose_rate_err,
             )
         elif isinstance(r, DoseRateDB):
             _LOGGER.debug(
-                "  DoseRateDB: count=%d count_rate=%.2f dose_rate=%.6e dose_rate_err=%.1f%%",
-                r.count, r.count_rate, r.dose_rate, r.dose_rate_err,
+                "  DoseRateDB: count=%d count_rate=%.2f dose_rate=%.6e R/h (%.4f µSv/h) err=%.1f%%",
+                r.count, r.count_rate, r.dose_rate, r.dose_rate * 10_000, r.dose_rate_err,
             )
         elif isinstance(r, RawData):
             _LOGGER.debug(
-                "  RawData: count_rate=%.2f dose_rate=%.6e",
-                r.count_rate, r.dose_rate,
+                "  RawData: count_rate=%.2f dose_rate=%.6e R/h (%.4f µSv/h)",
+                r.count_rate, r.dose_rate, r.dose_rate * 10_000,
             )
 
     return records
@@ -544,6 +549,17 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     """
     Return the most recent sensor values from a decoded data_buf record list.
 
+    **Unit conversion (confirmed via cdump/radiacode examples):**
+    data_buf dose_rate floats are in **R/h** (Roentgen per hour).
+    Accumulated dose (RareData.dose) is in **R** (Roentgen).
+
+    The device uses a fixed 100 µR = 1 µSv approximation, so:
+      µSv/h = dose_rate_Rh × 1 000 000  (→ µR/h)  ÷ 100  = × 10 000
+      µSv   = dose_R       × 1 000 000  (→ µR)    ÷ 100  = × 10 000
+
+    Reference: cdump narodmon.py uses ``1_000_000 * dose_rate`` → µR/h;
+               cdump webserver.py uses ``10_000 * dose_rate`` → µSv/h.
+
     Dose rate and count rate are extracted from all record types that carry
     them (RealTimeData, DoseRateDB, RawData), preferring the most recent
     non-zero value.  RareData appears ~once per minute, so battery and
@@ -552,6 +568,9 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     Records are iterated in arrival order; each match overwrites the previous,
     so the final values reflect the *last* (most recent) record of each type.
     """
+    # Conversion factor: R/h → µSv/h  (and R → µSv).
+    _R_TO_uSv = 10_000
+
     dose_rate: Optional[float] = None
     count_rate: Optional[float] = None
     accumulated_dose: Optional[float] = None
@@ -561,24 +580,17 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     for r in records:
         if isinstance(r, RealTimeData):
             count_rate = r.count_rate
-            # RealTimeData.dose_rate is ~0 on some firmware; keep it only
-            # if it's meaningfully non-zero (> 1e-4), otherwise preserve
-            # any better value from DoseRateDB or RawData.
-            if r.dose_rate > 1e-4:
-                dose_rate = r.dose_rate
+            dose_rate = r.dose_rate * _R_TO_uSv  # R/h → µSv/h
         elif isinstance(r, DoseRateDB):
-            if r.dose_rate > 1e-4:
-                dose_rate = r.dose_rate
-            # DoseRateDB also has count_rate; use it if we don't have one yet
+            dose_rate = r.dose_rate * _R_TO_uSv  # R/h → µSv/h
             if count_rate is None:
                 count_rate = r.count_rate
         elif isinstance(r, RawData):
-            if r.dose_rate > 1e-4:
-                dose_rate = r.dose_rate
+            dose_rate = r.dose_rate * _R_TO_uSv  # R/h → µSv/h
             if count_rate is None:
                 count_rate = r.count_rate
         elif isinstance(r, RareData):
-            accumulated_dose = r.dose
+            accumulated_dose = r.dose * _R_TO_uSv  # R → µSv
             battery = r.charge_level           # already 0–100 percent
             temperature = r.temperature      # °C, already converted in decoder
 
