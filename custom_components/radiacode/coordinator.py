@@ -31,6 +31,16 @@ dead.  When a get_data() call fails on a connection we *thought* was live,
 we disconnect immediately and retry with a fresh connection in the same
 poll cycle.  This avoids the 15-second wait-for-next-poll that previously
 made the sensor go unavailable.
+
+User-controlled BLE connection
+──────────────────────────────
+The BLE Connection switch lets the user release the device for other
+clients (e.g. the RadiaCode mobile app).  When the switch is turned OFF,
+``_user_disconnected`` is set True and the BLE link is torn down.  The
+``_poll_with_retry`` method checks this flag at 5 checkpoints (before
+connect, after connect, before retry, after retry delay, after retry
+connect) so that a long-running poll cycle bails out promptly instead
+of continuing to connect/retry for 30–60 seconds.
 """
 
 from __future__ import annotations
@@ -199,6 +209,15 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             self._last_poll_duration = time.monotonic() - poll_start
             raise
 
+        # If the user toggled the connection switch OFF during the poll
+        # (and the poll still succeeded), tear down the connection now
+        # rather than keeping it alive for another 5-second cycle.
+        if self._user_disconnected:
+            await self._client.disconnect()
+            self._last_error = "BLE connection disabled by user"
+            self._last_poll_duration = time.monotonic() - poll_start
+            raise UpdateFailed(self._last_error)
+
         # Update cache when fresh RareData arrived in this batch.
         if data.battery is not None:
             self._last_battery = data.battery
@@ -250,6 +269,18 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             settings=self._last_settings,
         )
 
+    def _check_user_disconnected(self, context: str = "") -> None:
+        """Raise UpdateFailed if the user has disabled the BLE connection.
+
+        Called at checkpoints inside ``_poll_with_retry`` so a long-running
+        poll cycle bails out promptly when the user flips the connection
+        switch OFF, rather than continuing to connect/retry for 30-60 s.
+        """
+        if self._user_disconnected:
+            _LOGGER.debug("User disabled BLE — aborting poll (%s)", context)
+            self._last_error = "BLE connection disabled by user"
+            raise UpdateFailed(self._last_error)
+
     async def _poll_with_retry(
         self, ble_device: Optional[BLEDevice]
     ) -> RadiaCodeData:
@@ -264,7 +295,15 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         If the retry also fails, we propagate the error to the
         DataUpdateCoordinator (which marks the entity unavailable and
         retries on the next poll interval).
+
+        Multiple ``_check_user_disconnected()`` checkpoints ensure that if
+        the user disables the BLE connection switch during a long poll
+        cycle, we bail out at the next checkpoint instead of continuing to
+        connect/retry for 30+ seconds.
         """
+        # ── Checkpoint 1: bail before any work ──────────────────────────────
+        self._check_user_disconnected("before connect")
+
         was_connected = self._client.is_connected
 
         try:
@@ -278,7 +317,23 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 _LOGGER.debug("RadiaCode not connected, establishing connection")
                 await self._client.connect(ble_device)
                 self._connection_count += 1
+
+                # ── Checkpoint 2: user may have toggled during connect() ────
+                # connect() can take 15+ s through an ESPHome BT proxy.  If
+                # the user disabled BLE in that window, disconnect the freshly
+                # established link and bail immediately.
+                if self._user_disconnected:
+                    _LOGGER.debug(
+                        "User disabled BLE during connect — tearing down"
+                    )
+                    await self._client.disconnect()
+                    self._last_error = "BLE connection disabled by user"
+                    raise UpdateFailed(self._last_error)
+
             return await self._client.get_data()
+
+        except UpdateFailed:
+            raise
 
         except Exception as first_err:
             _LOGGER.debug(
@@ -287,6 +342,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 first_err,
             )
             await self._client.disconnect()
+
+        # ── Checkpoint 3: bail before retry if user disabled ────────────────
+        self._check_user_disconnected("before retry")
 
         # ── Retry: fresh connection ─────────────────────────────────────────
         # Always retry once — the re-resolved BLE device may route through a
@@ -303,6 +361,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         )
         await asyncio.sleep(_RETRY_DELAY)
 
+        # ── Checkpoint 4: bail after delay if user disabled ─────────────────
+        self._check_user_disconnected("after retry delay")
+
         # Re-resolve the BLE device in case the proxy handle changed.
         ble_device = bluetooth.async_ble_device_from_address(
             self.hass, self._address, connectable=True
@@ -318,7 +379,21 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             _LOGGER.debug("Retry: establishing fresh connection to RadiaCode")
             await self._client.connect(ble_device)
             self._connection_count += 1
+
+            # ── Checkpoint 5: user may have toggled during retry connect ────
+            if self._user_disconnected:
+                _LOGGER.debug(
+                    "User disabled BLE during retry connect — tearing down"
+                )
+                await self._client.disconnect()
+                self._last_error = "BLE connection disabled by user"
+                raise UpdateFailed(self._last_error)
+
             return await self._client.get_data()
+
+        except UpdateFailed:
+            raise
+
         except Exception as retry_err:
             await self._client.disconnect()
             self._last_error = (
