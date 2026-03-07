@@ -111,6 +111,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         """True when the user has explicitly disabled the BLE connection."""
         return self._user_disconnected
 
+    @property
+    def is_ble_connected(self) -> bool:
+        """True when the BLE link to the device is currently active."""
+        return self._client.is_connected
+
     async def async_user_disconnect(self) -> None:
         """Disconnect BLE and suspend polling (user action).
 
@@ -142,12 +147,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         """
 
         # When the user has explicitly disabled the connection, skip polling
-        # and return the last known data so sensors stay visible (not
-        # unavailable).  A first-boot disconnection with no cached data is
-        # an edge case we handle by raising UpdateFailed.
+        # and let UpdateFailed mark all sensor entities unavailable — the
+        # data is intentionally stale and should not be shown as current.
         if self._user_disconnected:
-            if self.data is not None:
-                return self.data
             raise UpdateFailed("BLE connection disabled by user")
 
         # Only look up the BLE device when we need to establish a new

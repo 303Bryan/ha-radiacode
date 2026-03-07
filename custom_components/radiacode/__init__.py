@@ -8,6 +8,7 @@ from .const import DOMAIN
 from .coordinator import RadiaCodeCoordinator
 
 PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
     Platform.SENSOR,
     Platform.SWITCH,
     Platform.NUMBER,

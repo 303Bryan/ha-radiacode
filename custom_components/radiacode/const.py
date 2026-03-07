@@ -37,3 +37,9 @@ SELECT_DISPLAY_OFF_TIME  = "display_off_time"
 
 # Button keys
 BUTTON_DOSE_RESET = "dose_reset"
+
+# Diagnostic sensor keys
+SENSOR_RSSI = "rssi"
+
+# Binary sensor keys
+BINARY_SENSOR_CONNECTIVITY = "connectivity"
