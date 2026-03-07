@@ -19,6 +19,9 @@ SWITCH_VIBRO_ON     = "vibro_on"
 SWITCH_DISPLAY_ON   = "display_on"
 SWITCH_BACKLIGHT_ON = "display_backlight_on"
 
+# Connection switch key (not a device setting — controls integration BLE state)
+SWITCH_BLE_CONNECTED = "ble_connected"
+
 # Number keys — must match RadiaCodeSettings field names exactly
 NUMBER_DISPLAY_BRIGHTNESS = "display_brightness"
 NUMBER_DR_ALARM_L1        = "dr_alarm_level1"

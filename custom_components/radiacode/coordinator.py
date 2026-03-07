@@ -102,6 +102,36 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # Cache device settings; updated every poll, kept on read failure.
         self._last_settings: RadiaCodeSettings = RadiaCodeSettings()
 
+        # Set to True when the user explicitly disconnects via the connection
+        # switch.  Polling is suspended until the user turns it back on.
+        self._user_disconnected: bool = False
+
+    @property
+    def user_disconnected(self) -> bool:
+        """True when the user has explicitly disabled the BLE connection."""
+        return self._user_disconnected
+
+    async def async_user_disconnect(self) -> None:
+        """Disconnect BLE and suspend polling (user action).
+
+        Marks the integration as user-disconnected so the next poll cycle
+        (and all subsequent ones) are skipped without error.  Sensors keep
+        their last known values; the connection switch shows OFF.
+        """
+        self._user_disconnected = True
+        await self._client.disconnect()
+        # Notify listeners immediately so the switch state updates in the UI.
+        self.async_update_listeners()
+
+    async def async_user_reconnect(self) -> None:
+        """Resume BLE polling (user action).
+
+        Clears the user-disconnected flag and triggers an immediate refresh,
+        which will re-establish the BLE connection on the next poll cycle.
+        """
+        self._user_disconnected = False
+        await self.async_request_refresh()
+
     async def _async_update_data(self) -> RadiaCodeCoordinatorData:
         """Fetch data_buf from device, reconnecting only when needed.
 
@@ -110,6 +140,15 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         poll cycle.  This prevents the sensor from going unavailable for
         an entire poll interval whenever the BLE link drops silently.
         """
+
+        # When the user has explicitly disabled the connection, skip polling
+        # and return the last known data so sensors stay visible (not
+        # unavailable).  A first-boot disconnection with no cached data is
+        # an edge case we handle by raising UpdateFailed.
+        if self._user_disconnected:
+            if self.data is not None:
+                return self.data
+            raise UpdateFailed("BLE connection disabled by user")
 
         # Only look up the BLE device when we need to establish a new
         # connection.  When already connected, skip the lookup — it can
