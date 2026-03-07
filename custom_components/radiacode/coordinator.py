@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional
@@ -106,6 +107,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # switch.  Polling is suspended until the user turns it back on.
         self._user_disconnected: bool = False
 
+        # ── Diagnostics ──────────────────────────────────────────────────
+        self._last_error: Optional[str] = None
+        self._last_poll_duration: Optional[float] = None
+        self._connection_count: int = 0
+
     @property
     def user_disconnected(self) -> bool:
         """True when the user has explicitly disabled the BLE connection."""
@@ -115,6 +121,21 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     def is_ble_connected(self) -> bool:
         """True when the BLE link to the device is currently active."""
         return self._client.is_connected
+
+    @property
+    def last_error(self) -> Optional[str]:
+        """The last error message, or None if the last poll succeeded."""
+        return self._last_error
+
+    @property
+    def last_poll_duration(self) -> Optional[float]:
+        """Duration of the last poll cycle in seconds (wall-clock)."""
+        return self._last_poll_duration
+
+    @property
+    def connection_count(self) -> int:
+        """Number of successful BLE connections since HA startup."""
+        return self._connection_count
 
     async def async_user_disconnect(self) -> None:
         """Disconnect BLE and suspend polling (user action).
@@ -150,7 +171,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # and let UpdateFailed mark all sensor entities unavailable — the
         # data is intentionally stale and should not be shown as current.
         if self._user_disconnected:
-            raise UpdateFailed("BLE connection disabled by user")
+            self._last_error = "BLE connection disabled by user"
+            raise UpdateFailed(self._last_error)
+
+        poll_start = time.monotonic()
 
         # Only look up the BLE device when we need to establish a new
         # connection.  When already connected, skip the lookup — it can
@@ -163,12 +187,17 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 self.hass, self._address, connectable=True
             )
             if ble_device is None:
-                raise UpdateFailed(
+                self._last_error = (
                     f"RadiaCode {self._address} not found — "
                     f"is the device on and in range?"
                 )
+                raise UpdateFailed(self._last_error)
 
-        data = await self._poll_with_retry(ble_device)
+        try:
+            data = await self._poll_with_retry(ble_device)
+        except UpdateFailed:
+            self._last_poll_duration = time.monotonic() - poll_start
+            raise
 
         # Update cache when fresh RareData arrived in this batch.
         if data.battery is not None:
@@ -213,6 +242,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Settings read failed, using cached values: %s", err)
 
+        self._last_error = None
+        self._last_poll_duration = time.monotonic() - poll_start
+
         return RadiaCodeCoordinatorData(
             sensors=sensors,
             settings=self._last_settings,
@@ -227,8 +259,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         (the caller skips the BLE lookup in that case).
 
         On the first failure we disconnect and immediately attempt a fresh
-        connection + poll.  If that also fails, we propagate the error to
-        the DataUpdateCoordinator (which marks the entity unavailable and
+        connection + poll.  The retry re-resolves the BLE device, which
+        often selects a different ESPHome BT proxy with a better signal.
+        If the retry also fails, we propagate the error to the
+        DataUpdateCoordinator (which marks the entity unavailable and
         retries on the next poll interval).
         """
         was_connected = self._client.is_connected
@@ -236,17 +270,17 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         try:
             if not self._client.is_connected:
                 if ble_device is None:
-                    raise UpdateFailed(
+                    self._last_error = (
                         f"RadiaCode {self._address} not found — "
                         f"is the device on and in range?"
                     )
+                    raise UpdateFailed(self._last_error)
                 _LOGGER.debug("RadiaCode not connected, establishing connection")
                 await self._client.connect(ble_device)
+                self._connection_count += 1
             return await self._client.get_data()
 
         except Exception as first_err:
-            # If we were already connected, this is likely a stale-connection
-            # failure.  Tear down and retry once with a fresh connection.
             _LOGGER.debug(
                 "Poll failed (was_connected=%s): %s — disconnecting and retrying",
                 was_connected,
@@ -254,13 +288,13 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             )
             await self._client.disconnect()
 
-            if not was_connected:
-                # Connection attempt itself failed — no point retrying immediately.
-                raise UpdateFailed(
-                    f"Error connecting to RadiaCode {self._address}: {first_err}"
-                ) from first_err
-
         # ── Retry: fresh connection ─────────────────────────────────────────
+        # Always retry once — the re-resolved BLE device may route through a
+        # different proxy with a better signal.  The old was_connected guard
+        # prevented this, causing the device to go unavailable when the
+        # initial connection's init sequence failed through one proxy but
+        # would have succeeded through another.
+        #
         # Give the ESPHome BT proxy time to free the BLE connection slot.
         # Without this, the retry immediately hits "slots=0/3 free" and
         # spins for the full connection timeout before failing.
@@ -274,21 +308,24 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             self.hass, self._address, connectable=True
         )
         if ble_device is None:
-            raise UpdateFailed(
+            self._last_error = (
                 f"RadiaCode {self._address} not found on retry — "
                 f"is the device on and in range?"
             )
+            raise UpdateFailed(self._last_error)
 
         try:
             _LOGGER.debug("Retry: establishing fresh connection to RadiaCode")
             await self._client.connect(ble_device)
+            self._connection_count += 1
             return await self._client.get_data()
         except Exception as retry_err:
             await self._client.disconnect()
-            raise UpdateFailed(
+            self._last_error = (
                 f"Error communicating with RadiaCode {self._address} "
                 f"(retry also failed): {retry_err}"
-            ) from retry_err
+            )
+            raise UpdateFailed(self._last_error) from retry_err
 
     async def async_write_setting(self, vsfr_id: int, value: int) -> None:
         """Write a single device setting register and refresh data.

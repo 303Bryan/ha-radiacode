@@ -6,6 +6,8 @@ One binary sensor per device:
 
 from __future__ import annotations
 
+from typing import Any, Optional
+
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
@@ -75,3 +77,17 @@ class RadiaCodeConnectivitySensor(
     def is_on(self) -> bool:
         """Return True when the BLE link to the device is active."""
         return self.coordinator.is_ble_connected
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose connection diagnostics as entity attributes."""
+        attrs: dict[str, Any] = {
+            "connection_count": self.coordinator.connection_count,
+        }
+        last_err = self.coordinator.last_error
+        if last_err is not None:
+            attrs["last_error"] = last_err
+        poll_dur = self.coordinator.last_poll_duration
+        if poll_dur is not None:
+            attrs["last_poll_duration"] = round(poll_dur, 3)
+        return attrs

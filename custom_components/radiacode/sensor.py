@@ -151,6 +151,11 @@ class RadiaCodeRSSISensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity)
     RSSI is sourced from BLE advertisement packets, which the device broadcasts
     continuously regardless of whether there is an active connection.  This
     sensor therefore remains available even when the BLE connection is off.
+
+    In addition to the 5-second coordinator poll, this entity subscribes to
+    BLE advertisement callbacks so the RSSI value refreshes every time the
+    HA Bluetooth scanner receives a new advertisement (typically 1-2× per
+    second), giving near-real-time signal-strength readings.
     """
 
     _attr_has_entity_name = True
@@ -159,7 +164,6 @@ class RadiaCodeRSSISensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity)
     _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = True
 
     def __init__(
         self,
@@ -178,6 +182,28 @@ class RadiaCodeRSSISensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity)
             manufacturer="Radiacode",
             model=model,
         )
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to BLE advertisements for real-time RSSI updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            bluetooth.async_register_callback(
+                self.hass,
+                self._handle_bluetooth_update,
+                bluetooth.BluetoothCallbackMatcher(
+                    address=self._address,
+                ),
+                bluetooth.BluetoothScanningMode.PASSIVE,
+            )
+        )
+
+    def _handle_bluetooth_update(
+        self,
+        service_info: bluetooth.BluetoothServiceInfoBleak,
+        change: bluetooth.BluetoothChange,
+    ) -> None:
+        """Called on each BLE advertisement — triggers an immediate state write."""
+        self.async_write_ha_state()
 
     @property
     def available(self) -> bool:
