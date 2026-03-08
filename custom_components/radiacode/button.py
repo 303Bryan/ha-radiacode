@@ -12,7 +12,6 @@ from homeassistant.components.button import ButtonEntity, ButtonEntityDescriptio
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -21,6 +20,7 @@ from .const import (
     CONF_NAME,
     DOMAIN,
     BUTTON_DOSE_RESET,
+    build_device_info,
 )
 from .coordinator import RadiaCodeCoordinator
 from .radiacode_ble.protocol import VSFR
@@ -65,14 +65,9 @@ class RadiaCodeButton(CoordinatorEntity[RadiaCodeCoordinator], ButtonEntity):
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{entry.data[CONF_ADDRESS]}-{description.key}"
-
-        device_name = entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS])
-        model = device_name if device_name.startswith("RC-") else "RadiaCode"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.data[CONF_ADDRESS])},
-            name=device_name,
-            manufacturer="Radiacode",
-            model=model,
+        self._attr_device_info = build_device_info(
+            entry.data[CONF_ADDRESS],
+            entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
         )
 
     async def async_press(self) -> None:

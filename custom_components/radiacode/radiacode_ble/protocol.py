@@ -608,3 +608,31 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
 def decode_serial_number(data: bytes) -> str:
     """Decode VS.SERIAL_NUMBER bytes into a string, e.g. 'RC-103-012345'."""
     return data.decode("ascii").strip("\x00")
+
+
+# ── Firmware version decoder ─────────────────────────────────────────────────
+
+def parse_firmware_version(data: bytes) -> str:
+    """Parse a GET_VERSION response into a ``'major.minor'`` string.
+
+    The response contains two version tuples (boot + target/firmware).
+    We extract the **target** version which is the user-visible firmware.
+
+    Wire layout (from cdump ``fw_version()``):
+      [uint16 boot_minor] [uint16 boot_major]
+      [uint8 date_len] [ascii boot_date …]
+      [uint16 target_minor] [uint16 target_major]
+      [uint8 date_len] [ascii target_date …]
+    """
+    # Skip boot version: 4 bytes (minor + major) + length-prefixed string.
+    offset = 4  # boot_minor(H) + boot_major(H)
+    if offset >= len(data):
+        return "unknown"
+    boot_date_len = data[offset]
+    offset += 1 + boot_date_len
+
+    # Read target (firmware) version.
+    if offset + 4 > len(data):
+        return "unknown"
+    target_minor, target_major = struct.unpack_from("<HH", data, offset)
+    return f"{target_major}.{target_minor}"

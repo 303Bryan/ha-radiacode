@@ -1,5 +1,7 @@
 """Constants for the RadiaCode integration."""
 
+from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
+
 DOMAIN = "radiacode"
 
 # Config-entry data keys
@@ -19,6 +21,9 @@ SWITCH_VIBRO_ON     = "vibro_on"
 SWITCH_DISPLAY_ON   = "display_on"
 SWITCH_BACKLIGHT_ON = "display_backlight_on"
 
+# Connection switch key (not a device setting — controls integration BLE state)
+SWITCH_BLE_CONNECTED = "ble_connected"
+
 # Number keys — must match RadiaCodeSettings field names exactly
 NUMBER_DISPLAY_BRIGHTNESS = "display_brightness"
 NUMBER_DR_ALARM_L1        = "dr_alarm_level1"
@@ -34,3 +39,26 @@ SELECT_DISPLAY_OFF_TIME  = "display_off_time"
 
 # Button keys
 BUTTON_DOSE_RESET = "dose_reset"
+
+# Diagnostic sensor keys
+SENSOR_RSSI = "rssi"
+
+# Binary sensor keys
+BINARY_SENSOR_CONNECTIVITY = "connectivity"
+
+
+def build_device_info(address: str, name: str) -> DeviceInfo:
+    """Build a DeviceInfo dict shared by every entity on this device.
+
+    Centralised here so that manufacturer, model, and connection data are
+    defined in exactly one place.  The serial number and firmware version
+    are populated later by the coordinator once the BLE link is live.
+    """
+    model = name if name.startswith("RC-") else "RadiaCode"
+    return DeviceInfo(
+        identifiers={(DOMAIN, address)},
+        connections={(CONNECTION_BLUETOOTH, address)},
+        name=name,
+        manufacturer="303Bryan",
+        model=model,
+    )
