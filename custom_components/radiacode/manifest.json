@@ -6,6 +6,7 @@
   "config_flow": true,
   "dependencies": ["bluetooth"],
   "documentation": "https://github.com/303Bryan/ha-radiacode",
+  "issue_tracker": "https://github.com/303Bryan/ha-radiacode/issues",
   "integration_type": "device",
   "iot_class": "local_polling",
   "bluetooth": [
