@@ -57,6 +57,7 @@ from bleak.backends.device import BLEDevice
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import CONF_ADDRESS, DOMAIN
@@ -116,6 +117,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # Set to True when the user explicitly disconnects via the connection
         # switch.  Polling is suspended until the user turns it back on.
         self._user_disconnected: bool = False
+
+        # ── Device identity (fetched once on first successful connection) ──
+        self._serial_number: Optional[str] = None
+        self._fw_version: Optional[str] = None
 
         # ── Diagnostics ──────────────────────────────────────────────────
         self._last_error: Optional[str] = None
@@ -261,6 +266,13 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Settings read failed, using cached values: %s", err)
 
+        # Fetch serial number and firmware version once per connection
+        # lifecycle.  These are static — they never change while the device
+        # is running — so we only read them on the first successful poll
+        # after a fresh connection and then update the HA device registry.
+        if self._serial_number is None and self._client.is_connected:
+            await self._fetch_device_identity()
+
         self._last_error = None
         self._last_poll_duration = time.monotonic() - poll_start
 
@@ -268,6 +280,37 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             sensors=sensors,
             settings=self._last_settings,
         )
+
+    async def _fetch_device_identity(self) -> None:
+        """Fetch serial number and firmware version, then update the registry.
+
+        Called once after the first successful BLE poll.  On failure (e.g.
+        intermittent BLE glitch) the values stay None and we retry on the
+        next poll cycle.
+        """
+        try:
+            self._serial_number = await self._client.get_serial_number()
+            self._fw_version = await self._client.get_firmware_version()
+            _LOGGER.debug(
+                "Device identity: serial=%s  firmware=%s",
+                self._serial_number,
+                self._fw_version,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Failed to fetch serial/firmware (will retry next poll)")
+            self._serial_number = None  # ensure we retry
+            return
+
+        # Push the serial number and firmware version into the HA device
+        # registry so they appear on the device info card.
+        registry = dr.async_get(self.hass)
+        device = registry.async_get_device(identifiers={(DOMAIN, self._address)})
+        if device is not None:
+            registry.async_update_device(
+                device.id,
+                serial_number=self._serial_number,
+                sw_version=self._fw_version,
+            )
 
     def _check_user_disconnected(self, context: str = "") -> None:
         """Raise UpdateFailed if the user has disabled the BLE connection.

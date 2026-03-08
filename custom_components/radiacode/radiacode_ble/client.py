@@ -77,6 +77,7 @@ from .protocol import (
     decode_settings,
     extract_sensor_values,
     decode_serial_number,
+    parse_firmware_version,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -338,6 +339,11 @@ class RadiaCodeBLEClient:
         """Return the device serial number string, e.g. 'RC-103-012345'."""
         raw = await self._read_vs(VS.SERIAL_NUMBER)
         return decode_serial_number(raw)
+
+    async def get_firmware_version(self) -> str:
+        """Return the firmware version string, e.g. '4.8'."""
+        payload = await self._execute(CMD.GET_VERSION)
+        return parse_firmware_version(payload)
 
     async def get_settings(self) -> RadiaCodeSettings:
         """Read all device settings via a single VSFR batch read.

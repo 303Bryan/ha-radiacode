@@ -15,11 +15,10 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import BINARY_SENSOR_CONNECTIVITY, CONF_ADDRESS, CONF_NAME, DOMAIN
+from .const import BINARY_SENSOR_CONNECTIVITY, CONF_ADDRESS, CONF_NAME, DOMAIN, build_device_info
 from .coordinator import RadiaCodeCoordinator
 
 
@@ -58,14 +57,9 @@ class RadiaCodeConnectivitySensor(
     ) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.data[CONF_ADDRESS]}-{BINARY_SENSOR_CONNECTIVITY}"
-
-        device_name = entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS])
-        model = device_name if device_name.startswith("RC-") else "RadiaCode"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.data[CONF_ADDRESS])},
-            name=device_name,
-            manufacturer="Radiacode",
-            model=model,
+        self._attr_device_info = build_device_info(
+            entry.data[CONF_ADDRESS],
+            entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
         )
 
     @property
