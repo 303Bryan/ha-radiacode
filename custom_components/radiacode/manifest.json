@@ -1,14 +1,6 @@
 {
   "domain": "radiacode",
   "name": "Radiacode",
-  "version": "0.6.2",
-  "codeowners": ["@303Bryan"],
-  "config_flow": true,
-  "dependencies": ["bluetooth"],
-  "documentation": "https://github.com/303Bryan/ha-radiacode",
-  "issue_tracker": "https://github.com/303Bryan/ha-radiacode/issues",
-  "integration_type": "device",
-  "iot_class": "local_polling",
   "bluetooth": [
     {
       "local_name": "RC-*"
@@ -17,5 +9,13 @@
       "local_name": "RadiaCode-*"
     }
   ],
-  "requirements": ["bleak-retry-connector>=3.0.0"]
+  "codeowners": ["@303Bryan"],
+  "config_flow": true,
+  "dependencies": ["bluetooth"],
+  "documentation": "https://github.com/303Bryan/ha-radiacode",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/303Bryan/ha-radiacode/issues",
+  "requirements": ["bleak-retry-connector>=3.0.0"],
+  "version": "0.6.2"
 }
