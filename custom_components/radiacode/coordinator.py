@@ -61,7 +61,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import CONF_ADDRESS, DOMAIN
-from .radiacode_ble import RadiaCodeBLEClient
+from .radiacode_ble import RadiaCodeBLEClient, RadiaCodeInitError
 from .radiacode_ble.protocol import RadiaCodeData, RadiaCodeSettings
 
 _LOGGER = logging.getLogger(__name__)
@@ -379,11 +379,16 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             raise
 
         except Exception as first_err:
-            _LOGGER.debug(
-                "Poll failed (was_connected=%s): %s — disconnecting and retrying",
-                was_connected,
-                first_err,
-            )
+            if isinstance(first_err, RadiaCodeInitError):
+                _LOGGER.warning(
+                    "RadiaCode init step %r failed: %s — retrying once",
+                    first_err.step, first_err.__cause__,
+                )
+            else:
+                _LOGGER.debug(
+                    "Poll failed (was_connected=%s): %s — disconnecting and retrying",
+                    was_connected, first_err,
+                )
             await self._client.disconnect()
 
         # ── Checkpoint 3: bail before retry if user disabled ────────────────
@@ -439,10 +444,18 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
 
         except Exception as retry_err:
             await self._client.disconnect()
-            self._last_error = (
-                f"Error communicating with RadiaCode {self._address} "
-                f"(retry also failed): {retry_err}"
-            )
+            if isinstance(retry_err, RadiaCodeInitError):
+                # Surface the failing init step so the user can see it on
+                # the BLE Connected sensor without enabling debug logs.
+                self._last_error = (
+                    f"RadiaCode init step '{retry_err.step}' failed for "
+                    f"{self._address}: {retry_err.__cause__}"
+                )
+            else:
+                self._last_error = (
+                    f"Error communicating with RadiaCode {self._address} "
+                    f"(retry also failed): {retry_err}"
+                )
             raise UpdateFailed(self._last_error) from retry_err
 
     async def async_write_setting(self, vsfr_id: int, value: int) -> None:
