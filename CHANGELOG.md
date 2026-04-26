@@ -9,6 +9,10 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.6.4] — 2026-04-26 (pre-release)
+
 ### Fixed
 - **Bleak compatibility (#9)** — Replace deprecated `BleakClient.set_disconnected_callback()` (removed in bleak 1.0) with the `disconnected_callback=` argument to `establish_connection()`. The deprecated call raised `AttributeError` on recent installs before the init handshake ever ran, leaving every entity except RSSI permanently unavailable.
 - **Init-failure diagnostics (#9)** — Each post-connect step (`service_discovery`, `start_notify`, `set_exchange`, `set_time`, `device_time`) is now wrapped in a `RadiaCodeInitError` carrying the failing step name. The coordinator surfaces it on the BLE Connected sensor's `last_error` attribute, so users (especially early RC-101 owners on FW 4.14) can see exactly where init fails without enabling debug logging.
@@ -132,7 +136,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.6.4
 [0.4.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0
 [0.4.0b6]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0b6
 [0.4.0b5]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0b5
