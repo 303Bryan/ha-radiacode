@@ -63,6 +63,7 @@ from .protocol import (
     VS,
     VSFR,
     SETTINGS_VSFR_IDS,
+    SERVICE_UUID,
     WRITE_CHAR_UUID,
     NOTIFY_CHAR_UUID,
     RadiaCodeData,
@@ -79,6 +80,20 @@ from .protocol import (
     decode_serial_number,
     parse_firmware_version,
 )
+
+
+class RadiaCodeInitError(Exception):
+    """Raised when the post-connect initialisation sequence fails.
+
+    Carries the *step* name (e.g. ``"set_exchange"``) so the coordinator
+    can surface which part of init failed to the user.  The original
+    exception is chained via ``__cause__`` for log-level diagnostics.
+    """
+
+    def __init__(self, step: str, cause: BaseException) -> None:
+        super().__init__(f"RadiaCode init step {step!r} failed: {cause}")
+        self.step = step
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -104,7 +119,7 @@ _CONNECT_TIMEOUT = 15.0
 
 class RadiaCodeBLEClient:
     """
-    Async BLE client for RadiaCode radiation detectors (RC-102/103/110).
+    Async BLE client for RadiaCode radiation detectors (RC-101/102/103/110).
 
     Replicates the transport behaviour of cdump/radiacode's Bluetooth class
     using bleak instead of bluepy, making it compatible with HA's Bluetooth
@@ -158,6 +173,9 @@ class RadiaCodeBLEClient:
 
         Raises:
             Exception: if bleak_retry_connector cannot establish a connection.
+            RadiaCodeInitError: if the post-connect init sequence fails.
+                ``step`` identifies which sub-step failed so the coordinator
+                can surface it to the user (issue #9: early RC-101 hardware).
         """
         # ── Tear down any previous client to prevent double _on_notify ──────
         old = self._client
@@ -179,20 +197,57 @@ class RadiaCodeBLEClient:
         self._seq = 0
         self._reset_notification_state()
 
+        # Pass the disconnected callback via establish_connection.
+        # ``BleakClient.set_disconnected_callback`` was deprecated in bleak
+        # 0.18 and removed in bleak 1.0; calling it on a recent install
+        # raises AttributeError before the init sequence ever runs.
         self._client = await establish_connection(
             BleakClient,
             ble_device,
             ble_device.address,
+            disconnected_callback=self._on_ble_disconnect,
             max_attempts=2,   # allow one internal retry; coordinator adds another layer
             timeout=_CONNECT_TIMEOUT,
         )
 
-        self._client.set_disconnected_callback(self._on_ble_disconnect)
-        await self._client.start_notify(NOTIFY_CHAR_UUID, self._on_notify)
+        # ── Verify the device exposes the expected RadiaCode service ────────
+        # Early RC-101 hardware (~2019) sometimes connects but doesn't expose
+        # the e63215e5-… service.  Surface that with a clear error rather
+        # than a TimeoutError on the first SET_EXCHANGE attempt.
+        services = self._client.services
+        service_uuids = [s.uuid for s in services]
+        if SERVICE_UUID not in service_uuids:
+            _LOGGER.warning(
+                "RadiaCode service %s not found on %s. Discovered services: %s",
+                SERVICE_UUID, ble_device.address, service_uuids,
+            )
+            raise RadiaCodeInitError(
+                "service_discovery",
+                RuntimeError(
+                    f"RadiaCode GATT service {SERVICE_UUID} not advertised; "
+                    f"discovered services: {service_uuids or 'none'}"
+                ),
+            )
+
+        mtu = getattr(self._client, "mtu_size", None)
+        _LOGGER.debug(
+            "RadiaCode BLE connected: addr=%s mtu=%s services=%d",
+            ble_device.address, mtu, len(service_uuids),
+        )
+
+        try:
+            await self._client.start_notify(NOTIFY_CHAR_UUID, self._on_notify)
+        except Exception as err:
+            raise RadiaCodeInitError("start_notify", err) from err
 
         # ── Init sequence (mirrors cdump RadiaCode.__init__) ──────────────────
+        # Each step is wrapped so the coordinator can surface which part of
+        # init failed (e.g. "RC-101 didn't reply to SET_EXCHANGE").
         # 1. Handshake — device expects this exact payload before responding to data
-        await self._execute(CMD.SET_EXCHANGE, b"\x01\xff\x12\xff")
+        try:
+            await self._execute(CMD.SET_EXCHANGE, b"\x01\xff\x12\xff")
+        except Exception as err:
+            raise RadiaCodeInitError("set_exchange", err) from err
 
         # 2. Sync device clock to host time
         now = datetime.datetime.now()
@@ -201,13 +256,19 @@ class RadiaCodeBLEClient:
             now.day, now.month, now.year - 2000, 0,
             now.second, now.minute, now.hour, 0,
         )
-        await self._execute(CMD.SET_TIME, time_payload)
+        try:
+            await self._execute(CMD.SET_TIME, time_payload)
+        except Exception as err:
+            raise RadiaCodeInitError("set_time", err) from err
 
         # 3. Zero out DEVICE_TIME VSFR
-        await self._execute(
-            CMD.WR_VIRT_SFR,
-            struct.pack("<II", int(VSFR.DEVICE_TIME), 0),
-        )
+        try:
+            await self._execute(
+                CMD.WR_VIRT_SFR,
+                struct.pack("<II", int(VSFR.DEVICE_TIME), 0),
+            )
+        except Exception as err:
+            raise RadiaCodeInitError("device_time", err) from err
 
         # base_time anchors the 10 ms timestamp offsets inside data_buf records.
         # cdump sets this to now+128 s during init.
