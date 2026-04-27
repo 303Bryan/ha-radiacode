@@ -11,7 +11,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [0.6.4] — 2026-04-26 (pre-release)
+## [0.6.4] — 2026-04-27
 
 ### Fixed
 - **Bleak compatibility (#9)** — Replace deprecated `BleakClient.set_disconnected_callback()` (removed in bleak 1.0) with the `disconnected_callback=` argument to `establish_connection()`. The deprecated call raised `AttributeError` on recent installs before the init handshake ever ran, leaving every entity except RSSI permanently unavailable.
