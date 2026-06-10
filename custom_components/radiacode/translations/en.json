@@ -18,7 +18,19 @@
       "already_configured": "This device is already configured."
     },
     "error": {
-      "cannot_connect": "Failed to connect to the device. Make sure it is powered on and in range."
+      "cannot_connect": "Failed to connect to the device. Make sure it is powered on and in range.",
+      "invalid_address": "Invalid Bluetooth address. Expected format: AA:BB:CC:DD:EE:FF."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Radiacode Options",
+        "description": "Adjust how often the device is polled over Bluetooth.",
+        "data": {
+          "poll_interval": "Poll interval (seconds)"
+        }
+      }
     }
   }
 }

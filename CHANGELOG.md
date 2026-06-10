@@ -11,6 +11,31 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.0.0b1] — 2026-06-10
+
+First 1.0 beta. Focus: configurability, observability, and robustness.
+
+### Added
+- **Configurable poll interval** — New options flow (Settings → Devices & Services → Radiacode → Configure) lets you set the BLE poll interval from 5 to 300 seconds. Longer intervals reduce BT proxy load and device battery drain.
+- **Radiation Alarm binary sensor** — Turns on when the dose rate reaches the device's L1 alarm threshold; the active alarm level (0/1/2) and both thresholds (µSv/h) are exposed as attributes for automations. Computed in HA from device thresholds, so it works even with device sound/vibration off.
+- **Diagnostics support** — Download a diagnostics dump (connection stats, last sensor/settings snapshot, options) from the device page. Bluetooth address and device name are redacted.
+- **Protocol test suite** — 33 pytest unit tests covering command framing, response parsing, VSFR batch decoding, data_buf decoding, unit conversion, and settings/identity decoders. Runs in CI alongside hassfest and HACS validation.
+- **Manual entry address normalisation** — Bluetooth addresses entered with dashes, dots, or no separators are normalised to colon format; invalid addresses are rejected with a clear error instead of creating a broken entry.
+
+### Fixed
+- **Dose Reset latency** — Pressing Dose Reset now zeroes the Accumulated Dose sensor immediately. Previously the cached pre-reset value kept showing for up to a minute (until the next RareData record).
+- **Crash race on disconnect during command** — A BLE write racing with a disconnect could raise `AttributeError` (`NoneType.write_gatt_char`); it now raises a clean `ConnectionError` that the coordinator's retry logic handles.
+- **Deprecated event-loop API** — `asyncio.get_event_loop()` inside the command loop replaced with `get_running_loop()` (the former is deprecated in coroutines and slated for removal).
+- **Corrupt notification guard** — A malformed first notification packet declaring a negative body length is now ignored instead of corrupting reassembly state.
+- **BLE teardown on shutdown/unload** — The BLE connection is now released on Home Assistant shutdown and config entry unload, freeing the device for the mobile app while HA is down. Entry unload no longer reaches into the client through a private attribute.
+- **Bluetooth dependency** — Manifest now depends on `bluetooth_adapters` (the HA-recommended dependency for BLE integrations) instead of `bluetooth`.
+- **Discovery UX** — The discovered-device card now shows the device name, and the confirm dialog is a proper single-button confirmation.
+
+### Changed
+- **README** — Corrected alarm threshold ranges, documented all diagnostic/connection entities, the new options flow, and filled in the previously empty debug-logging section.
+
+---
+
 ## [0.6.4] — 2026-04-27
 
 ### Fixed
@@ -136,7 +161,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.0.0b1...HEAD
+[1.0.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.0.0b1
 [0.6.4]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.6.4
 [0.4.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0
 [0.4.0b6]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0b6

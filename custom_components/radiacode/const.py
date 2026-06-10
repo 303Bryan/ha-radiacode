@@ -8,6 +8,12 @@ DOMAIN = "radiacode"
 CONF_ADDRESS = "address"
 CONF_NAME = "name"
 
+# Config-entry option keys
+CONF_POLL_INTERVAL = "poll_interval"
+DEFAULT_POLL_INTERVAL = 5    # seconds
+MIN_POLL_INTERVAL = 5
+MAX_POLL_INTERVAL = 300
+
 # Sensor keys — must match RadiaCodeData field names exactly
 SENSOR_DOSE_RATE        = "dose_rate"
 SENSOR_COUNT_RATE       = "count_rate"
@@ -45,6 +51,7 @@ SENSOR_RSSI = "rssi"
 
 # Binary sensor keys
 BINARY_SENSOR_CONNECTIVITY = "connectivity"
+BINARY_SENSOR_RADIATION_ALARM = "radiation_alarm"
 
 
 def build_device_info(address: str, name: str) -> DeviceInfo:
