@@ -1,0 +1,80 @@
+name: Release
+
+# Manually-dispatched release pipeline.
+#
+# Usage: Actions → Release → Run workflow (on main).
+#
+# Reads the version from custom_components/radiacode/manifest.json,
+# creates tag v<version> on the dispatched commit, and publishes a
+# GitHub release using the matching CHANGELOG.md section as the notes.
+# Versions with a PEP 440 pre-release suffix (e.g. 1.0.0b1, 2.0.0rc1)
+# are automatically marked as pre-releases, which is what HACS uses to
+# decide whether a version is beta-only.
+#
+# Release procedure:
+#   1. Bump "version" in manifest.json and add a CHANGELOG.md section
+#      with the exact same version string; merge to main.
+#   2. Run this workflow on main.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Tag and release from manifest version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from manifest
+        id: version
+        run: |
+          VERSION=$(jq -r .version custom_components/radiacode/manifest.json)
+          if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
+            echo "::error::No version found in manifest.json"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" =~ [0-9](a|b|rc|dev) ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Abort if tag already exists
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists — bump the manifest version first"
+            exit 1
+          fi
+
+      - name: Extract changelog section
+        run: |
+          awk -v ver="${{ steps.version.outputs.version }}" '
+            $0 ~ ("^## \\[" ver "\\]") { flag = 1; next }
+            /^## \[/ { flag = 0 }
+            flag' CHANGELOG.md > release_notes.md
+          if ! grep -q '[^[:space:]]' release_notes.md; then
+            echo "::warning::No CHANGELOG.md section found for ${{ steps.version.outputs.version }}"
+            echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details." > release_notes.md
+          fi
+          echo "Release notes:"
+          cat release_notes.md
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          EXTRA_ARGS=()
+          if [[ "${{ steps.version.outputs.prerelease }}" == "true" ]]; then
+            EXTRA_ARGS+=(--prerelease)
+          fi
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --target "${{ github.sha }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --notes-file release_notes.md \
+            "${EXTRA_ARGS[@]}"
