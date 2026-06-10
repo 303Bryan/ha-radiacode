@@ -9,6 +9,9 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Release workflow** — Manually-dispatched GitHub Action that tags `v<version>` from `manifest.json` and publishes a release with the matching CHANGELOG section as notes; PEP 440 pre-release versions (b/rc/a/dev) are automatically marked as GitHub pre-releases for HACS beta users.
+
 ---
 
 ## [1.0.0b1] — 2026-06-10
