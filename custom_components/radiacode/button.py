@@ -23,7 +23,6 @@ from .const import (
     build_device_info,
 )
 from .coordinator import RadiaCodeCoordinator
-from .radiacode_ble.protocol import VSFR
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,4 +71,4 @@ class RadiaCodeButton(CoordinatorEntity[RadiaCodeCoordinator], ButtonEntity):
 
     async def async_press(self) -> None:
         """Reset accumulated dose by writing 1 to DOSE_RESET register."""
-        await self.coordinator.async_write_setting(VSFR.DOSE_RESET, 1)
+        await self.coordinator.async_reset_dose()

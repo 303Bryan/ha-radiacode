@@ -11,11 +11,11 @@
   ],
   "codeowners": ["@303Bryan"],
   "config_flow": true,
-  "dependencies": ["bluetooth"],
+  "dependencies": ["bluetooth_adapters"],
   "documentation": "https://github.com/303Bryan/ha-radiacode",
   "integration_type": "device",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/303Bryan/ha-radiacode/issues",
   "requirements": ["bleak-retry-connector>=3.0.0"],
-  "version": "0.6.4"
+  "version": "1.0.0b1"
 }

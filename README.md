@@ -13,9 +13,10 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 
 ## Features
 
-- **Real-time radiation monitoring** — dose rate (µSv/h) and count rate (CPS) updated every 5 seconds
+- **Real-time radiation monitoring** — dose rate (µSv/h) and count rate (CPS), polled every 5 seconds by default (configurable 5–300 s)
+- **Radiation alarm** — binary sensor that trips when the dose rate crosses the device's alarm thresholds, for HA automations
 - **Accumulated dose tracking** — total dose since the device was last reset
-- **Device diagnostics** — battery level and internal temperature
+- **Device diagnostics** — battery level, internal temperature, BLE signal strength, and downloadable diagnostics
 - **Device controls** — adjust display settings, alarm thresholds, sound/vibration, and more directly from HA
 - **Auto-discovery** — HA automatically detects Radiacode devices over Bluetooth
 - **BT proxy support** — works through ESPHome Bluetooth proxies; no direct Bluetooth adapter required on the HA host
@@ -32,8 +33,16 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 | Accumulated Dose | µSv | Total dose accumulated since last device reset |
 | Battery | % | Device battery level *(diagnostic)* |
 | Temperature | °C | Device internal temperature *(diagnostic)* |
+| Signal Strength | dBm | BLE RSSI from advertisements *(diagnostic)* |
 
-> **Note:** Dose Rate and Count Rate update every ~5 s. Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates.
+### Binary Sensors
+
+| Entity | Description |
+|--------|-------------|
+| Radiation Alarm | On when the dose rate reaches the device's L1 alarm threshold; `alarm_level` attribute reports 0/1/2 |
+| BLE Connected | True while the BLE link is active; exposes `last_error`, `connection_count`, and `last_poll_duration` attributes *(diagnostic)* |
+
+> **Note:** Dose Rate and Count Rate update on every poll (default every 5 s, configurable). Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates.
 
 ---
 
@@ -49,18 +58,19 @@ The integration exposes the full Radiacode configuration as writable HA entities
 | Vibration | Enable/disable vibration on detection events |
 | Display | Turn the device display on or off |
 | Display Backlight | Enable/disable display backlight |
+| BLE Connection | Turn off to release the device so the Radiacode mobile app can connect; turn back on to resume polling |
 
 ### Numbers
 
 | Entity | Unit | Range | Description |
 |--------|------|-------|-------------|
 | Display Brightness | — | 0–9 | Screen brightness level |
-| Dose Rate Alarm L1 | µSv/h | 0–655 | Level 1 dose rate alarm threshold |
-| Dose Rate Alarm L2 | µSv/h | 0–655 | Level 2 dose rate alarm threshold |
-| Count Rate Alarm L1 | cps | 0–6553 | Level 1 count rate alarm threshold |
-| Count Rate Alarm L2 | cps | 0–6553 | Level 2 count rate alarm threshold |
-| Accumulated Dose Alarm L1 | µSv | 0–655 | Level 1 accumulated dose alarm threshold |
-| Accumulated Dose Alarm L2 | µSv | 0–655 | Level 2 accumulated dose alarm threshold |
+| Dose Rate Alarm L1 | µSv/h | 0–10,000 | Level 1 dose rate alarm threshold |
+| Dose Rate Alarm L2 | µSv/h | 0–10,000 | Level 2 dose rate alarm threshold |
+| Count Rate Alarm L1 | cps | 0–100,000 | Level 1 count rate alarm threshold |
+| Count Rate Alarm L2 | cps | 0–100,000 | Level 2 count rate alarm threshold |
+| Dose Alarm L1 | µSv | 0–1,000,000 | Level 1 accumulated dose alarm threshold |
+| Dose Alarm L2 | µSv | 0–1,000,000 | Level 2 accumulated dose alarm threshold |
 
 ### Selects
 
@@ -123,7 +133,15 @@ If auto-discovery doesn't trigger:
 
 1. Go to **Settings → Devices & Services → Add Integration**
 2. Search for **Radiacode**
-3. Enter the Bluetooth MAC address of your device
+3. Enter the Bluetooth MAC address of your device (e.g. `AA:BB:CC:DD:EE:FF` — dashes, dots, or no separators are also accepted)
+
+### Options
+
+After setup, click **Configure** on the integration to adjust:
+
+| Option | Default | Range | Description |
+|--------|---------|-------|-------------|
+| Poll interval | 5 s | 5–300 s | How often sensor data is read over BLE. Longer intervals reduce BT proxy load and device battery drain. |
 
 ---
 
@@ -167,6 +185,20 @@ This usually means the BLE link is dropping. Check:
 - Try moving a Bluetooth proxy closer to the device
 
 ### Enabling debug logging
+
+Add the following to your `configuration.yaml` and restart HA (or use **Settings → Devices & Services → Radiacode → Enable debug logging** for a temporary session):
+
+```yaml
+logger:
+  logs:
+    custom_components.radiacode: debug
+```
+
+Debug logs include per-poll timings, BLE notification reassembly details, and decoded record distributions — include them when filing an issue.
+
+### Downloading diagnostics
+
+From the device page, click the three-dot menu → **Download diagnostics** to get a JSON dump of connection statistics and the latest sensor/settings snapshot (Bluetooth address and device name are redacted).
 
 ---
 

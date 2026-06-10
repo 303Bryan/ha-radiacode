@@ -60,13 +60,16 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CONF_ADDRESS, DOMAIN
+from .const import (
+    CONF_ADDRESS,
+    CONF_POLL_INTERVAL,
+    DEFAULT_POLL_INTERVAL,
+    DOMAIN,
+)
 from .radiacode_ble import RadiaCodeBLEClient, RadiaCodeInitError
-from .radiacode_ble.protocol import RadiaCodeData, RadiaCodeSettings
+from .radiacode_ble.protocol import VSFR, RadiaCodeData, RadiaCodeSettings
 
 _LOGGER = logging.getLogger(__name__)
-
-_POLL_INTERVAL = timedelta(seconds=5)
 
 # Seconds to wait after disconnecting before retrying.  The ESPHome BT proxy
 # needs time to release the BLE connection slot; without this delay the retry
@@ -89,11 +92,12 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     """Coordinator that polls a RadiaCode device on a fixed schedule."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        poll_interval = entry.options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=_POLL_INTERVAL,
+            update_interval=timedelta(seconds=poll_interval),
         )
         self._address: str = entry.data[CONF_ADDRESS]
         self._client = RadiaCodeBLEClient()
@@ -151,6 +155,25 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     def connection_count(self) -> int:
         """Number of successful BLE connections since HA startup."""
         return self._connection_count
+
+    @property
+    def serial_number(self) -> Optional[str]:
+        """Device serial number, or None until the first successful poll."""
+        return self._serial_number
+
+    @property
+    def firmware_version(self) -> Optional[str]:
+        """Device firmware version, or None until the first successful poll."""
+        return self._fw_version
+
+    async def async_shutdown(self) -> None:
+        """Stop polling and tear down the BLE connection.
+
+        Called on config entry unload and on Home Assistant shutdown so
+        the device is released for other BLE clients (e.g. the mobile app).
+        """
+        await super().async_shutdown()
+        await self._client.disconnect()
 
     async def async_user_disconnect(self) -> None:
         """Disconnect BLE and suspend polling (user action).
@@ -479,4 +502,25 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             )
 
         # Trigger an immediate refresh so the new value shows up in the UI.
+        await self.async_request_refresh()
+
+    async def async_reset_dose(self) -> None:
+        """Reset the accumulated dose counter on the device.
+
+        Also clears the locally cached accumulated dose so the sensor drops
+        to zero immediately instead of showing the stale pre-reset value
+        until the next RareData record arrives (~1 minute later).
+        """
+        if not self._client.is_connected:
+            raise UpdateFailed("Cannot reset dose: device not connected")
+
+        try:
+            ok = await self._client.write_vsfr(VSFR.DOSE_RESET, 1)
+        except Exception as err:
+            raise UpdateFailed(f"Failed to reset accumulated dose: {err}") from err
+
+        if not ok:
+            raise UpdateFailed("Device rejected the accumulated dose reset")
+
+        self._last_accumulated_dose = 0.0
         await self.async_request_refresh()

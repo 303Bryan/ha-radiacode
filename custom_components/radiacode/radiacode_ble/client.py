@@ -462,6 +462,12 @@ class RadiaCodeBLEClient:
                 return
 
             (body_len,) = struct.unpack_from("<i", data, 0)
+            if body_len < 0:
+                _LOGGER.warning(
+                    "Corrupt first BLE notification: negative body length %d; "
+                    "ignoring packet", body_len,
+                )
+                return
             # Total frame = 4-byte header + body
             self._resp_total = 4 + body_len
             self._resp_buf = bytearray(data[4:])
@@ -510,6 +516,14 @@ class RadiaCodeBLEClient:
 
     async def _execute_locked(self, cmd: int, args: bytes = b"") -> bytes:
         """Inner _execute body, called with _cmd_lock held."""
+        # Capture the client reference once — disconnect() can set
+        # self._client = None at any await point while we hold the lock.
+        client = self._client
+        if client is None:
+            raise ConnectionError(
+                f"Not connected — cannot send command {cmd:#06x}"
+            )
+
         seq = self._seq
         self._seq = (self._seq + 1) % 32
 
@@ -541,7 +555,7 @@ class RadiaCodeBLEClient:
                 raise ConnectionError(
                     f"BLE disconnected before write for cmd {cmd:#06x} (seq={seq})"
                 )
-            await self._client.write_gatt_char(WRITE_CHAR_UUID, chunk, response=False)
+            await client.write_gatt_char(WRITE_CHAR_UUID, chunk, response=False)
             _LOGGER.debug("_execute: chunk write complete")
 
         _LOGGER.debug("_execute: all chunks written, waiting for notify")
@@ -552,7 +566,7 @@ class RadiaCodeBLEClient:
         # packets), notifications stop mid-stream. Instead of waiting the
         # full hard timeout, we detect the stall (no new data for
         # _STALL_TIMEOUT seconds) and return what we have.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         deadline = loop.time() + _CMD_TIMEOUT
         last_buf_len = 0
         last_growth = loop.time()
