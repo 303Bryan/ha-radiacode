@@ -9,8 +9,27 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [1.0.0] — 2026-06-10
+
+First stable 1.0 release — identical integration code to [1.0.0b1], promoted after validation on RC-103 hardware (FW 4.8) through an ESPHome BT proxy: options flow reload, dose reset, radiation alarm sensor, and diagnostics download all confirmed working.
+
+Highlights since 0.6.4 (full details under [1.0.0b1]):
+
 ### Added
-- **Release workflow** — Manually-dispatched GitHub Action that tags `v<version>` from `manifest.json` and publishes a release with the matching CHANGELOG section as notes; PEP 440 pre-release versions (b/rc/a/dev) are automatically marked as GitHub pre-releases for HACS beta users.
+- **Configurable poll interval** (5–300 s) via a new options flow.
+- **Radiation Alarm binary sensor** driven by the device's L1/L2 dose rate thresholds, with `alarm_level` attribute for automations.
+- **Diagnostics support** — downloadable dump from the device page (address/name redacted).
+- **Protocol test suite** — 33 pytest unit tests, run in CI alongside hassfest and HACS validation.
+- **Release workflow** — manually-dispatched GitHub Action that tags `v<version>` from `manifest.json` and publishes a release with the matching CHANGELOG section as notes; PEP 440 pre-release versions are automatically marked as GitHub pre-releases for HACS beta users.
+
+### Fixed
+- Dose Reset now zeroes the Accumulated Dose sensor immediately.
+- Clean `ConnectionError` (instead of `AttributeError` crash) when a BLE write races a disconnect.
+- BLE link released on HA shutdown and entry unload, freeing the device for the mobile app.
+- Manual config flow validates and normalises Bluetooth addresses.
+- Deprecated `asyncio.get_event_loop()` replaced; corrupt notification packets guarded; manifest now depends on `bluetooth_adapters`.
 
 ---
 
@@ -164,7 +183,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.0.0b1...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.0.0
 [1.0.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.0.0b1
 [0.6.4]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.6.4
 [0.4.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.4.0
