@@ -11,6 +11,21 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.1.0] — 2026-07-05
+
+Stable release — identical integration code to [1.1.0b1], promoted after validation on RC-103 hardware (FW 4.14).
+
+### Added
+- **Dose rate outlier suppression** — corrupt one-off readings from truncated BT-proxy transfers (e.g. 40,000 µSv/h at background) are rejected or held for one-poll confirmation; genuine sustained radiation events pass through with at most one poll of delay. Applies to count rate too.
+- **Radiation Alarm is now a 3-state enum sensor** — **No Alarm / L1 Alarm / L2 Alarm** with state-dependent icons, replacing the Safe/Unsafe binary sensor. ⚠️ Automations referencing `binary_sensor.*_radiation_alarm` must switch to `sensor.*_radiation_alarm`.
+
+### Fixed
+- **Signal Strength intermittency** — last observed RSSI is held while the BLE connection is active (a connected peripheral cannot advertise) plus a 15-minute grace window when disconnected.
+- **Graph gaps** — dose/count rate fall back to the last known value when a poll decodes no records.
+- **Log spam** — routine BT-proxy truncation messages downgraded to debug.
+
+---
+
 ## [1.1.0b1] — 2026-07-05
 
 ### Added
@@ -196,7 +211,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.1.0b1...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.1.0
 [1.1.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.1.0b1
 [1.0.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.0.0
 [1.0.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.0.0b1
