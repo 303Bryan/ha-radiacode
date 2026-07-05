@@ -11,6 +11,24 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0] — 2026-07-05
+
+Stable release of the 1.3.0 beta cycle, corrected against RC-103 FW 4.14 hardware results.
+
+### Added
+- **Device-health sensors** (batched VSFR read once per minute):
+  - **SiPM Bias Voltage** (mV) — verified reading ~26,963 mV (~27 V); drift indicates SiPM aging
+  - **MCU Temperature** (°C) — *disabled by default*; hardware-verified as centi-degrees, now correctly scaled (÷100 → e.g. 29.7 °C)
+  - **MCU Vref** (mV) — *disabled by default*; verified ~2,093 mV
+- **SFR register directory** — the device's self-describing register listing is read once after connect, logged, and included in the diagnostics download. Note: RC-103 FW 4.14 returns it empty over BLE; the field is null in that case.
+
+### Fixed (vs. 1.3.0b1/b2)
+- **MCU Temperature scaling** — raw register is centi-°C; was displayed unscaled (e.g. 2971 °C).
+- **Accelerometer X/Y/Z removed** — FW rejects the ACC registers over BLE (always Unknown); the entities are removed and cleaned from the registry on upgrade.
+- **Empty SFR directory** no longer logs a misleading "0 bytes, 0 entries" INFO line.
+
+---
+
 ## [1.3.0b2] — 2026-07-05
 
 ### Added
@@ -239,7 +257,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.3.0b2...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0
 [1.3.0b2]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0b2
 [1.3.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0b1
 [1.2.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.2.0

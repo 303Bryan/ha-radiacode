@@ -402,15 +402,23 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         if self._sfr_file is None:
             try:
                 self._sfr_file = await self._client.get_sfr_file()
-                _LOGGER.info(
-                    "Read device SFR register directory: %d bytes, %d entries "
-                    "(full listing at debug level and in diagnostics download)",
-                    len(self._sfr_file),
-                    len(self._sfr_file.splitlines()),
-                )
-                _LOGGER.debug(
-                    "Device SFR register directory:\n%s", self._sfr_file
-                )
+                if self._sfr_file:
+                    _LOGGER.info(
+                        "Read device SFR register directory: %d bytes, %d entries "
+                        "(full listing at debug level and in diagnostics download)",
+                        len(self._sfr_file),
+                        len(self._sfr_file.splitlines()),
+                    )
+                    _LOGGER.debug(
+                        "Device SFR register directory:\n%s", self._sfr_file
+                    )
+                else:
+                    # Some firmware (observed: RC-103 FW 4.14) returns an
+                    # empty SFR_FILE over BLE even though the read succeeds.
+                    _LOGGER.debug(
+                        "Device returned an empty SFR register directory "
+                        "(not provided over BLE on this firmware)"
+                    )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("SFR directory read failed (non-fatal): %s", err)
 

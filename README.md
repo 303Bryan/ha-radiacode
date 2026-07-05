@@ -38,9 +38,8 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 | SiPM Bias Voltage | mV | Detector bias voltage — drift indicates SiPM aging *(diagnostic)* |
 | MCU Temperature | °C | Processor temperature *(diagnostic, disabled by default)* |
 | MCU Vref | mV | Processor reference voltage *(diagnostic, disabled by default)* |
-| Accelerometer X/Y/Z | — | Raw device orientation *(diagnostic, disabled by default)* |
 
-> Device-health sensors are read once per minute. The disabled-by-default entities use registers whose scaling is not yet field-verified — enable them under the entity settings if you'd like to help confirm.
+> Device-health sensors are read once per minute and are hardware-verified on RC-103 firmware 4.14. Enable the disabled-by-default entities under the entity settings if you want them.
 
 ### Radiation Alarm
 

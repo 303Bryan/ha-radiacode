@@ -43,9 +43,6 @@ from .const import (
     CONF_ADDRESS,
     CONF_NAME,
     DOMAIN,
-    SENSOR_ACC_X,
-    SENSOR_ACC_Y,
-    SENSOR_ACC_Z,
     SENSOR_ACCUMULATED_DOSE,
     SENSOR_BATTERY,
     SENSOR_COUNT_RATE,
@@ -122,9 +119,8 @@ SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
 
 
 # Device-health sensors, read from VSFR registers ~once per minute.
-# These registers are documented in cdump/radiacode but unverified over
-# BLE; a register the device rejects shows as Unknown.  The uncertain ones
-# (MCU temp/Vref, accelerometer — unknown scaling) start disabled.
+# Hardware-verified on RC-103 FW 4.14 (SiPM bias ~27 V, MCU temp in
+# centi-°C, Vref ~2.1 V).  A register a firmware rejects shows as Unknown.
 HEALTH_SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
         key=SENSOR_SIPM_BIAS,
@@ -141,7 +137,7 @@ HEALTH_SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=0,
+        suggested_display_precision=1,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
     ),
@@ -152,30 +148,6 @@ HEALTH_SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=0,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        entity_registry_enabled_default=False,
-    ),
-    SensorEntityDescription(
-        key=SENSOR_ACC_X,
-        name="Accelerometer X",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:axis-x-arrow",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        entity_registry_enabled_default=False,
-    ),
-    SensorEntityDescription(
-        key=SENSOR_ACC_Y,
-        name="Accelerometer Y",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:axis-y-arrow",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        entity_registry_enabled_default=False,
-    ),
-    SensorEntityDescription(
-        key=SENSOR_ACC_Z,
-        name="Accelerometer Z",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:axis-z-arrow",
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
     ),

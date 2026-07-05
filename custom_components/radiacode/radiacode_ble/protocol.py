@@ -133,16 +133,13 @@ _VSFR_FORMATS: dict[int, str] = {
 }
 
 # VSFR IDs batch-read for device-health diagnostics (order matches
-# RadiaCodeDiagnostics).  These registers are documented in cdump/radiacode
-# but unexercised over BLE; the device may mark any of them invalid in the
-# batch response, in which case the corresponding field stays None.
+# RadiaCodeDiagnostics).  Hardware-verified on RC-103 FW 4.14: VBIAS reads
+# ~27 000 mV, SYS_MCU_TEMP is centi-°C, SYS_MCU_VREF ~2 095 mV.  ACC_X/Y/Z
+# are rejected (marked invalid) over BLE and are deliberately excluded.
 DIAGNOSTIC_VSFR_IDS: list[int] = [
     VSFR.VBIAS_mV,
     VSFR.SYS_MCU_TEMP,
     VSFR.SYS_MCU_VREF,
-    VSFR.ACC_X,
-    VSFR.ACC_Y,
-    VSFR.ACC_Z,
 ]
 
 # VSFR IDs to batch-read for device settings (order matches RadiaCodeSettings).
@@ -268,23 +265,22 @@ class RadiaCodeDiagnostics:
     Fields are in the same order as DIAGNOSTIC_VSFR_IDS.  Any register the
     device marks invalid (or rejects over BLE) stays None.
     """
-    sipm_bias_mv: Optional[int] = None      # SiPM bias voltage, mV
-    mcu_temperature: Optional[int] = None   # MCU temperature, °C
-    mcu_vref_mv: Optional[int] = None       # MCU reference voltage, mV
-    acc_x: Optional[int] = None             # accelerometer X (raw int16)
-    acc_y: Optional[int] = None             # accelerometer Y (raw int16)
-    acc_z: Optional[int] = None             # accelerometer Z (raw int16)
+    sipm_bias_mv: Optional[int] = None        # SiPM bias voltage, mV
+    mcu_temperature: Optional[float] = None   # MCU temperature, °C
+    mcu_vref_mv: Optional[int] = None         # MCU reference voltage, mV
 
 
 def decode_diagnostics(values: list[int | float | None]) -> RadiaCodeDiagnostics:
-    """Convert raw VSFR batch values (DIAGNOSTIC_VSFR_IDS order) to diagnostics."""
+    """Convert raw VSFR batch values (DIAGNOSTIC_VSFR_IDS order) to diagnostics.
+
+    SYS_MCU_TEMP is reported in centi-degrees (°C × 100); verified on
+    RC-103 FW 4.14 where raw 2971 corresponds to ~29.7 °C, a few degrees
+    above the detector-board temperature as expected for the MCU.
+    """
     return RadiaCodeDiagnostics(
         sipm_bias_mv=int(values[0]) if values[0] is not None else None,
-        mcu_temperature=int(values[1]) if values[1] is not None else None,
+        mcu_temperature=values[1] / 100.0 if values[1] is not None else None,
         mcu_vref_mv=int(values[2]) if values[2] is not None else None,
-        acc_x=int(values[3]) if values[3] is not None else None,
-        acc_y=int(values[4]) if values[4] is not None else None,
-        acc_z=int(values[5]) if values[5] is not None else None,
     )
 
 

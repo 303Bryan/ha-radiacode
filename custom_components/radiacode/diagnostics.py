@@ -38,10 +38,11 @@ async def async_get_config_entry_diagnostics(
             "firmware_version": coordinator.firmware_version,
             # The device's self-describing SFR register directory: every
             # register the firmware supports, with address, size, type,
-            # and signedness.  None if not yet read (or unsupported).
+            # and signedness.  None if not yet read or if the firmware
+            # returns it empty over BLE (observed on RC-103 FW 4.14).
             "sfr_register_directory": (
                 coordinator.sfr_file.splitlines()
-                if coordinator.sfr_file is not None
+                if coordinator.sfr_file
                 else None
             ),
         },
