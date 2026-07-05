@@ -31,6 +31,7 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 | Dose Rate | µSv/h | Real-time ambient radiation dose rate |
 | Count Rate | cps | Raw detector counts per second |
 | Accumulated Dose | µSv | Total dose accumulated since last device reset |
+| Hardness | — | Spectral hardness coefficient (µR/h ÷ cps), as in the Radiacode app — characteristic per isotope, useful for pseudo-identification of sources |
 | Battery | % | Device battery level *(diagnostic)* |
 | Temperature | °C | Device internal temperature *(diagnostic)* |
 | Signal Strength | dBm | BLE RSSI from advertisements *(diagnostic)* |

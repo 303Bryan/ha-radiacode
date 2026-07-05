@@ -380,3 +380,21 @@ def test_spike_filter_first_reading_accepted(protocol):
     # No baseline yet — first reading is always accepted (whatever it is)
     f = protocol.SpikeFilter(factor=50.0, pass_below=5.0)
     assert f.filter(120.0) == 120.0
+
+
+# ── Hardness ──────────────────────────────────────────────────────────────────
+
+
+def test_compute_hardness_matches_app_formula(protocol):
+    # 0.15 µSv/h = 15 µR/h at 10 cps → hardness 1.5
+    assert protocol.compute_hardness(0.15, 10.0) == pytest.approx(1.5)
+
+
+def test_compute_hardness_undefined_without_counts(protocol):
+    assert protocol.compute_hardness(0.15, 0.0) is None
+    assert protocol.compute_hardness(0.15, None) is None
+    assert protocol.compute_hardness(None, 10.0) is None
+
+
+def test_compute_hardness_zero_dose_rate(protocol):
+    assert protocol.compute_hardness(0.0, 10.0) == 0.0
