@@ -47,4 +47,5 @@ async def async_get_config_entry_diagnostics(
         },
         "sensors": asdict(data.sensors) if data is not None else None,
         "settings": asdict(data.settings) if data is not None else None,
+        "device_health": asdict(data.diagnostics) if data is not None else None,
     }

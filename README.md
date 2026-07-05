@@ -35,6 +35,12 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 | Battery | % | Device battery level *(diagnostic)* |
 | Temperature | °C | Device internal temperature *(diagnostic)* |
 | Signal Strength | dBm | BLE RSSI from advertisements *(diagnostic)* |
+| SiPM Bias Voltage | mV | Detector bias voltage — drift indicates SiPM aging *(diagnostic)* |
+| MCU Temperature | °C | Processor temperature *(diagnostic, disabled by default)* |
+| MCU Vref | mV | Processor reference voltage *(diagnostic, disabled by default)* |
+| Accelerometer X/Y/Z | — | Raw device orientation *(diagnostic, disabled by default)* |
+
+> Device-health sensors are read once per minute. The disabled-by-default entities use registers whose scaling is not yet field-verified — enable them under the entity settings if you'd like to help confirm.
 
 ### Radiation Alarm
 
