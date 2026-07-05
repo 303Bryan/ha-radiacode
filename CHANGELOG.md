@@ -11,7 +11,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [1.1.0] — 2026-07-05
+## [1.1.0b1] — 2026-07-05
 
 ### Added
 - **Dose rate outlier suppression** — Truncated BLE transfers through ESPHome BT proxies could occasionally produce a misparsed record with an absurd value (e.g. 40,000 µSv/h at background), ruining graph scaling. Two integrity-preserving layers now guard against this: records with non-finite/negative values are rejected at decode time, and a reading that jumps more than 50× above baseline is held back for **one poll** — if the next poll confirms it (genuine radiation events are sustained), it passes through. Real events are never hidden; worst case they appear one poll (~5 s) later. Suppressed outliers are logged as warnings. The same protection applies to count rate.
@@ -196,8 +196,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.1.0
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.1.0b1...HEAD
+[1.1.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.1.0b1
 [1.0.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.0.0
 [1.0.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.0.0b1
 [0.6.4]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.6.4
