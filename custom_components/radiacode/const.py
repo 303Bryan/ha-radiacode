@@ -54,9 +54,10 @@ SENSOR_RSSI = "rssi"
 SENSOR_SIPM_BIAS   = "sipm_bias_mv"
 SENSOR_MCU_TEMP    = "mcu_temperature"
 SENSOR_MCU_VREF    = "mcu_vref_mv"
-SENSOR_ACC_X       = "acc_x"
-SENSOR_ACC_Y       = "acc_y"
-SENSOR_ACC_Z       = "acc_z"
+
+# Removed-entity unique_id suffixes cleaned from the registry on setup
+# (accelerometer registers are rejected over BLE by device firmware).
+REMOVED_SENSOR_KEYS = ("acc_x", "acc_y", "acc_z")
 
 # Radiation alarm enum sensor (moved from binary_sensor in 1.1.0)
 SENSOR_RADIATION_ALARM = "radiation_alarm"

@@ -403,39 +403,35 @@ def test_compute_hardness_zero_dose_rate(protocol):
 # ── Device-health diagnostics ─────────────────────────────────────────────────
 
 
-def test_diagnostic_batch_decodes_signed_accelerometer(protocol):
-    # ACC axes are int16 in the low half of the uint32 register: -512 packs
-    # to 0xFE00 in the low bytes and must decode back to -512, not 65024.
-    ids = protocol.DIAGNOSTIC_VSFR_IDS
-    raw_acc = struct.unpack("<I", struct.pack("<hxx", -512))[0]
-    payload = struct.pack(
-        "<IIIIIII",
-        0b111111,       # all six registers valid
-        28500,          # VBIAS_mV
-        31,             # SYS_MCU_TEMP
-        3300,           # SYS_MCU_VREF
-        raw_acc,        # ACC_X = -512
-        struct.unpack("<I", struct.pack("<hxx", 0))[0],    # ACC_Y = 0
-        struct.unpack("<I", struct.pack("<hxx", 1024))[0], # ACC_Z = 1024
-    )
-    values = protocol.parse_vsfr_batch_response(payload, ids)
+def test_diagnostic_batch_decodes_hardware_values(protocol):
+    # Values observed on RC-103 FW 4.14: VBIAS 26963 mV, MCU temp raw 2971
+    # (centi-°C → 29.71 °C), Vref 2093 mV.
+    payload = struct.pack("<IIII", 0b111, 26963, 2971, 2093)
+    values = protocol.parse_vsfr_batch_response(payload, protocol.DIAGNOSTIC_VSFR_IDS)
     diag = protocol.decode_diagnostics(values)
-    assert diag.sipm_bias_mv == 28500
-    assert diag.mcu_temperature == 31
-    assert diag.mcu_vref_mv == 3300
-    assert diag.acc_x == -512
-    assert diag.acc_y == 0
-    assert diag.acc_z == 1024
+    assert diag.sipm_bias_mv == 26963
+    assert diag.mcu_temperature == pytest.approx(29.71)
+    assert diag.mcu_vref_mv == 2093
 
 
 def test_diagnostic_batch_rejected_registers_are_none(protocol):
     # Device rejects everything except VBIAS (bit 0)
-    payload = struct.pack("<II", 0b000001, 28500)
+    payload = struct.pack("<II", 0b001, 26963)
     values = protocol.parse_vsfr_batch_response(payload, protocol.DIAGNOSTIC_VSFR_IDS)
     diag = protocol.decode_diagnostics(values)
-    assert diag.sipm_bias_mv == 28500
+    assert diag.sipm_bias_mv == 26963
     assert diag.mcu_temperature is None
-    assert diag.acc_x is None
+    assert diag.mcu_vref_mv is None
+
+
+def test_signed_int16_register_format(protocol):
+    # ACC registers (excluded from the health batch — firmware rejects them
+    # over BLE) keep their signed-int16 format in the table: -512 must
+    # decode as -512, not 65024.
+    raw = struct.unpack("<I", struct.pack("<hxx", -512))[0]
+    payload = struct.pack("<II", 0b1, raw)
+    values = protocol.parse_vsfr_batch_response(payload, [protocol.VSFR.ACC_X])
+    assert values == [-512]
 
 
 # ── SFR directory decoder ─────────────────────────────────────────────────────
