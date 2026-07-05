@@ -79,6 +79,7 @@ from .protocol import (
     decode_data_buf,
     decode_diagnostics,
     decode_settings,
+    decode_sfr_file,
     extract_sensor_values,
     decode_serial_number,
     parse_firmware_version,
@@ -418,6 +419,18 @@ class RadiaCodeBLEClient:
         """
         values = await self._read_vsfr_batch(SETTINGS_VSFR_IDS)
         return decode_settings(values)
+
+    async def get_sfr_file(self) -> str:
+        """Read the device's self-describing SFR register directory.
+
+        Returns an ASCII listing of every Special Function Register the
+        firmware supports — address, size, type, and signedness.  The
+        listing can be several KB; through an ESPHome BT proxy the
+        transfer may be truncated by the notification buffer limit, in
+        which case a partial listing is returned.
+        """
+        raw = await self._read_vs(VS.SFR_FILE)
+        return decode_sfr_file(raw)
 
     async def get_diagnostics(self) -> RadiaCodeDiagnostics:
         """Read device-health registers via a single VSFR batch read.

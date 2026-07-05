@@ -436,3 +436,27 @@ def test_diagnostic_batch_rejected_registers_are_none(protocol):
     assert diag.sipm_bias_mv == 28500
     assert diag.mcu_temperature is None
     assert diag.acc_x is None
+
+
+# ── SFR directory decoder ─────────────────────────────────────────────────────
+
+
+def test_decode_sfr_file_plain_ascii(protocol):
+    data = b"0x0500 1 int unsigned DEVICE_CTRL\n0x8024 4 float TEMP_degC\x00\x00"
+    text = protocol.decode_sfr_file(data)
+    assert text.splitlines() == [
+        "0x0500 1 int unsigned DEVICE_CTRL",
+        "0x8024 4 float TEMP_degC",
+    ]
+
+
+def test_decode_sfr_file_tolerates_truncated_bytes(protocol):
+    # BT-proxy truncation can cut mid-character; non-ASCII bytes must not raise
+    data = b"0x0500 1 int unsigned DEVICE\xff"
+    text = protocol.decode_sfr_file(data)
+    assert text.startswith("0x0500 1 int unsigned DEVICE")
+
+
+def test_decode_sfr_file_empty(protocol):
+    assert protocol.decode_sfr_file(b"") == ""
+    assert protocol.decode_sfr_file(b"\x00\x00") == ""

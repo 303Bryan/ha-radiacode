@@ -57,6 +57,7 @@ class CMD(IntEnum):
 class VS(IntEnum):
     SERIAL_NUMBER = 0x08   # ASCII serial, e.g. "RC-103-012345"
     DATA_BUF      = 0x100  # real-time + accumulated sensor data stream
+    SFR_FILE      = 0x101  # ASCII directory of all SFRs the device supports
 
 
 # ── Virtual SFR IDs (used with WR_VIRT_SFR) ──────────────────────────────────
@@ -778,6 +779,23 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
 def decode_serial_number(data: bytes) -> str:
     """Decode VS.SERIAL_NUMBER bytes into a string, e.g. 'RC-103-012345'."""
     return data.decode("ascii").strip("\x00")
+
+
+# ── SFR directory decoder ─────────────────────────────────────────────────────
+
+def decode_sfr_file(data: bytes) -> str:
+    """Decode the VS.SFR_FILE payload into readable text.
+
+    The device self-describes its Special Function Registers: the payload
+    is an ASCII listing of every SFR with its address (opcode), size in
+    bytes, type (int or float), and signedness.  Invaluable for verifying
+    register formats per firmware version without reverse engineering.
+
+    Decoded permissively (errors="replace") — through a BT proxy the
+    transfer may be truncated mid-character, and a best-effort partial
+    listing is far more useful than an exception.
+    """
+    return data.decode("ascii", errors="replace").strip("\x00").strip()
 
 
 # ── Firmware version decoder ─────────────────────────────────────────────────

@@ -11,6 +11,13 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0b2] — 2026-07-05
+
+### Added
+- **SFR register directory** — the device self-describes every Special Function Register it supports (address, size, type, signedness) via the `SFR_FILE` virtual string. The integration now reads this once after connecting, logs a one-line summary at INFO (full listing at debug level), and includes it in the diagnostics download under `device.sfr_register_directory`. This is the authoritative per-firmware source for verifying the register formats used by the 1.3.0b1 device-health sensors. Through a BT proxy the listing may be truncated by the notification buffer limit — a partial listing is kept.
+
+---
+
 ## [1.3.0b1] — 2026-07-05
 
 ### Added
@@ -232,7 +239,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.3.0b1...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.3.0b2...HEAD
+[1.3.0b2]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0b2
 [1.3.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0b1
 [1.2.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.2.0
 [1.1.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.1.0
