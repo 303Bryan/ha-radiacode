@@ -36,6 +36,14 @@ async def async_get_config_entry_diagnostics(
         "device": {
             "serial_number": "**REDACTED**" if coordinator.serial_number else None,
             "firmware_version": coordinator.firmware_version,
+            # The device's self-describing SFR register directory: every
+            # register the firmware supports, with address, size, type,
+            # and signedness.  None if not yet read (or unsupported).
+            "sfr_register_directory": (
+                coordinator.sfr_file.splitlines()
+                if coordinator.sfr_file is not None
+                else None
+            ),
         },
         "connection": {
             "ble_connected": coordinator.is_ble_connected,

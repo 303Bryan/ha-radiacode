@@ -210,7 +210,7 @@ Debug logs include per-poll timings, BLE notification reassembly details, and de
 
 ### Downloading diagnostics
 
-From the device page, click the three-dot menu → **Download diagnostics** to get a JSON dump of connection statistics and the latest sensor/settings snapshot (Bluetooth address and device name are redacted).
+From the device page, click the three-dot menu → **Download diagnostics** to get a JSON dump of connection statistics, the latest sensor/settings snapshot, device-health readings, and the device's self-describing **SFR register directory** — a listing of every register the firmware supports with its address, size, type, and signedness (Bluetooth address and device name are redacted).
 
 ---
 

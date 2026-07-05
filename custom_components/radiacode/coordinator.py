@@ -154,6 +154,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._serial_number: Optional[str] = None
         self._fw_version: Optional[str] = None
 
+        # Device's self-describing SFR register directory (fetched once,
+        # alongside identity).  Logged at debug and exposed in diagnostics.
+        self._sfr_file: Optional[str] = None
+
         # ── Diagnostics ──────────────────────────────────────────────────
         self._last_error: Optional[str] = None
         self._last_poll_duration: Optional[float] = None
@@ -193,6 +197,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     def firmware_version(self) -> Optional[str]:
         """Device firmware version, or None until the first successful poll."""
         return self._fw_version
+
+    @property
+    def sfr_file(self) -> Optional[str]:
+        """The device's SFR register directory text, or None if unread."""
+        return self._sfr_file
 
     async def async_shutdown(self) -> None:
         """Stop polling and tear down the BLE connection.
@@ -384,6 +393,26 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             _LOGGER.debug("Failed to fetch serial/firmware (will retry next poll)")
             self._serial_number = None  # ensure we retry
             return
+
+        # Read the device's self-describing SFR register directory — an
+        # ASCII listing of every register with address, size, type, and
+        # signedness.  One-time read; failure is non-fatal (the listing is
+        # informational).  Through a BT proxy the transfer may be truncated
+        # by the notification buffer; a partial listing is still useful.
+        if self._sfr_file is None:
+            try:
+                self._sfr_file = await self._client.get_sfr_file()
+                _LOGGER.info(
+                    "Read device SFR register directory: %d bytes, %d entries "
+                    "(full listing at debug level and in diagnostics download)",
+                    len(self._sfr_file),
+                    len(self._sfr_file.splitlines()),
+                )
+                _LOGGER.debug(
+                    "Device SFR register directory:\n%s", self._sfr_file
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("SFR directory read failed (non-fatal): %s", err)
 
         # Push the serial number and firmware version into the HA device
         # registry so they appear on the device info card.
