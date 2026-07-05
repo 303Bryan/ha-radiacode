@@ -53,6 +53,7 @@ from .const import (
     SENSOR_RADIATION_ALARM,
     SENSOR_RSSI,
     SENSOR_SIPM_BIAS,
+    SENSOR_SPECTRUM,
     SENSOR_TEMPERATURE,
     build_device_info,
 )
@@ -171,6 +172,7 @@ async def async_setup_entry(
     )
     entities.append(RadiaCodeRSSISensor(coordinator, entry))
     entities.append(RadiaCodeRadiationAlarmSensor(coordinator, entry))
+    entities.append(RadiaCodeSpectrumSensor(coordinator, entry))
     async_add_entities(entities)
 
 
@@ -406,3 +408,60 @@ class RadiaCodeRadiationAlarmSensor(
         if l2 is not None:
             attrs["level2_threshold_usv_h"] = l2
         return attrs
+
+
+class RadiaCodeSpectrumSensor(
+    CoordinatorEntity[RadiaCodeCoordinator], SensorEntity
+):
+    """Gamma spectrum snapshot.
+
+    State is the total count across all channels; the full per-channel
+    histogram and the channel→keV calibration live in attributes, ready
+    for charting (e.g. an ApexCharts card — see the README for a
+    copy-paste example) or for the ``radiacode.get_spectrum`` action.
+
+    The ``channels`` attribute (1024 integers) is excluded from the
+    recorder so spectrum snapshots don't bloat the HA database.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Spectrum"
+    _attr_icon = "mdi:chart-histogram"
+    _attr_native_unit_of_measurement = "counts"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _unrecorded_attributes = frozenset({"channels"})
+
+    def __init__(
+        self,
+        coordinator: RadiaCodeCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.data[CONF_ADDRESS]}-{SENSOR_SPECTRUM}"
+        self._attr_device_info = build_device_info(
+            entry.data[CONF_ADDRESS],
+            entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
+        )
+
+    @property
+    def native_value(self) -> Optional[int]:
+        """Return the total count across all spectrum channels."""
+        if self.coordinator.data is None or self.coordinator.data.spectrum is None:
+            return None
+        return sum(self.coordinator.data.spectrum.counts)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the histogram and calibration for charting."""
+        if self.coordinator.data is None or self.coordinator.data.spectrum is None:
+            return {}
+        spectrum = self.coordinator.data.spectrum
+        return {
+            "duration_s": spectrum.duration_s,
+            "channel_count": len(spectrum.counts),
+            "calibration_a0": spectrum.a0,
+            "calibration_a1": spectrum.a1,
+            "calibration_a2": spectrum.a2,
+            "truncated": spectrum.truncated,
+            "channels": spectrum.counts,
+        }

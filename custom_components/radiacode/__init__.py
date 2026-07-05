@@ -1,15 +1,26 @@
 """RadiaCode Home Assistant integration."""
 
+import voluptuous as vol
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.core import (
+    Event,
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+)
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
 from .const import (
+    ATTR_ACCUMULATED,
     CONF_ADDRESS,
     DOMAIN,
     REMOVED_SENSOR_KEYS,
     SENSOR_RADIATION_ALARM,
+    SERVICE_GET_SPECTRUM,
 )
 from .coordinator import RadiaCodeCoordinator
 
@@ -64,12 +75,76 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_on_ha_stop)
     )
 
+    _async_register_services(hass)
+
     # Polling starts automatically when the first entity subscribes to
     # coordinator updates (via CoordinatorEntity.async_added_to_hass).
     # The first poll runs after update_interval, which is when the BLE
     # connection will be established.
 
     return True
+
+
+def _async_register_services(hass: HomeAssistant) -> None:
+    """Register domain services (idempotent across config entries)."""
+    if hass.services.has_service(DOMAIN, SERVICE_GET_SPECTRUM):
+        return
+
+    async def _handle_get_spectrum(call: ServiceCall) -> ServiceResponse:
+        """Fetch a gamma spectrum on demand and return it as response data."""
+        coordinators: dict[str, RadiaCodeCoordinator] = hass.data.get(DOMAIN, {})
+        address = call.data.get(CONF_ADDRESS)
+        if address is not None:
+            address = address.upper()
+            matches = [
+                c for c in coordinators.values() if c.address == address
+            ]
+        else:
+            matches = list(coordinators.values())
+
+        if not matches:
+            raise HomeAssistantError(
+                "No matching Radiacode device found"
+                + (f" for address {address}" if address else "")
+            )
+        if len(matches) > 1:
+            raise HomeAssistantError(
+                "Multiple Radiacode devices configured — "
+                "pass 'address' to select one"
+            )
+
+        try:
+            spectrum = await matches[0].async_get_spectrum(
+                accumulated=call.data.get(ATTR_ACCUMULATED, False)
+            )
+        except Exception as err:
+            raise HomeAssistantError(str(err)) from err
+
+        return {
+            "duration_s": spectrum.duration_s,
+            "channel_count": len(spectrum.counts),
+            "total_counts": sum(spectrum.counts),
+            "calibration": {
+                "a0": spectrum.a0,
+                "a1": spectrum.a1,
+                "a2": spectrum.a2,
+            },
+            "truncated": spectrum.truncated,
+            "channels": spectrum.counts,
+        }
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_SPECTRUM,
+        _handle_get_spectrum,
+        schema=vol.Schema(
+            {
+                vol.Optional(ATTR_ACCUMULATED, default=False): bool,
+                vol.Optional(CONF_ADDRESS): str,
+            }
+        ),
+        supports_response=SupportsResponse.ONLY,
+    )
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

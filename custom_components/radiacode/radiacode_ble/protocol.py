@@ -48,6 +48,7 @@ class CMD(IntEnum):
     RD_VIRT_SFR       = 0x0824  # read single virtual SFR (register)
     WR_VIRT_SFR       = 0x0825  # write virtual SFR (register)
     RD_VIRT_STRING    = 0x0826  # read virtual string (data_buf, serial, etc.)
+    WR_VIRT_STRING    = 0x0827  # write virtual string (spectrum reset)
     RD_VIRT_SFR_BATCH = 0x082A  # read multiple VSFRs in one command
     SET_TIME          = 0x0A04  # set device clock
 
@@ -55,9 +56,13 @@ class CMD(IntEnum):
 # ── Virtual String IDs (args to RD_VIRT_STRING) ───────────────────────────────
 
 class VS(IntEnum):
+    CONFIGURATION = 0x02   # cp1251 text config (contains SpecFormatVersion)
     SERIAL_NUMBER = 0x08   # ASCII serial, e.g. "RC-103-012345"
     DATA_BUF      = 0x100  # real-time + accumulated sensor data stream
     SFR_FILE      = 0x101  # ASCII directory of all SFRs the device supports
+    SPECTRUM      = 0x200  # current gamma spectrum (since last spectrum reset)
+    ENERGY_CALIB  = 0x202  # 3 floats: channel→keV calibration coefficients
+    SPEC_ACCUM    = 0x205  # accumulated gamma spectrum
 
 
 # ── Virtual SFR IDs (used with WR_VIRT_SFR) ──────────────────────────────────
@@ -767,6 +772,112 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
         accumulated_dose=accumulated_dose,
         battery=battery,
         temperature=temperature,
+    )
+
+
+# ── Gamma spectrum ────────────────────────────────────────────────────────────
+
+@dataclass
+class Spectrum:
+    """A gamma spectrum snapshot.
+
+    Channel energies follow the quadratic calibration:
+      E(ch) [keV] = a0 + a1·ch + a2·ch²
+    """
+    duration_s: int        # accumulation time, seconds
+    a0: float              # calibration: constant term, keV
+    a1: float              # calibration: linear term, keV/channel
+    a2: float              # calibration: quadratic term, keV/channel²
+    counts: list[int] = field(default_factory=list)
+    truncated: bool = False  # True when the BLE transfer was cut short
+
+
+def channel_to_kev(channel: int, a0: float, a1: float, a2: float) -> float:
+    """Convert a spectrum channel index to energy in keV."""
+    return a0 + a1 * channel + a2 * channel * channel
+
+
+def parse_spec_format_version(config_text: str) -> int:
+    """Extract SpecFormatVersion from the device configuration text.
+
+    Falls back to 1 when the line is absent — all firmware this
+    integration supports (≥4.8) uses format version 1, and the
+    configuration text can be truncated by BT-proxy transfers.
+    """
+    for line in config_text.splitlines():
+        if line.startswith("SpecFormatVersion"):
+            _, _, value = line.partition("=")
+            try:
+                return int(value.strip())
+            except ValueError:
+                break
+    return 1
+
+
+def decode_spectrum(data: bytes, format_version: int) -> Spectrum:
+    """Decode a VS.SPECTRUM / VS.SPEC_ACCUM payload.
+
+    Header: [uint32 duration_s] [float a0] [float a1] [float a2],
+    followed by per-channel counts:
+      format 0 — one uint32 per channel
+      format 1 — run-length groups: [uint16: count<<4 | vlen] then
+                 `count` values encoded per vlen (0=zero, 1=uint8,
+                 2/3/5=delta int8/int16/int32, 4=delta int24)
+
+    A transfer truncated by the BT-proxy notification buffer decodes
+    cleanly up to the cut and is flagged ``truncated`` — leading
+    channels (where most background counts live) are still usable.
+
+    Raises ValueError if even the 16-byte header is incomplete.
+    """
+    buf = _Buf(data)
+    duration_s, a0, a1, a2 = buf.unpack("<Ifff")
+
+    counts: list[int] = []
+    truncated = False
+
+    if format_version == 0:
+        while buf.remaining() >= 4:
+            counts.append(buf.unpack("<I")[0])
+        truncated = buf.remaining() > 0
+    else:
+        last = 0
+        try:
+            while buf.remaining() > 0:
+                (group,) = buf.unpack("<H")
+                n_values = (group >> 4) & 0x0FFF
+                vlen = group & 0x0F
+                for _ in range(n_values):
+                    if vlen == 0:
+                        v = 0
+                    elif vlen == 1:
+                        (v,) = buf.unpack("<B")
+                    elif vlen == 2:
+                        v = last + buf.unpack("<b")[0]
+                    elif vlen == 3:
+                        v = last + buf.unpack("<h")[0]
+                    elif vlen == 4:
+                        lo, mid, hi = buf.unpack("<BBb")
+                        v = last + ((hi << 16) | (mid << 8) | lo)
+                    elif vlen == 5:
+                        v = last + buf.unpack("<i")[0]
+                    else:
+                        _LOGGER.warning(
+                            "Spectrum decode: unsupported vlen=%d; stopping", vlen
+                        )
+                        raise ValueError("unsupported vlen")
+                    last = v
+                    counts.append(v)
+        except ValueError:
+            truncated = True
+
+    return Spectrum(
+        duration_s=duration_s,
+        a0=a0,
+        a1=a1,
+        a2=a2,
+        counts=counts,
+        truncated=truncated,
     )
 
 

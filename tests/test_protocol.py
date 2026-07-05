@@ -456,3 +456,69 @@ def test_decode_sfr_file_tolerates_truncated_bytes(protocol):
 def test_decode_sfr_file_empty(protocol):
     assert protocol.decode_sfr_file(b"") == ""
     assert protocol.decode_sfr_file(b"\x00\x00") == ""
+
+
+# ── Gamma spectrum ────────────────────────────────────────────────────────────
+
+
+def _spectrum_header(duration=600, a0=-5.0, a1=2.5, a2=0.001):
+    return struct.pack("<Ifff", duration, a0, a1, a2)
+
+
+def test_decode_spectrum_v0(protocol):
+    data = _spectrum_header() + struct.pack("<IIII", 10, 20, 0, 5)
+    s = protocol.decode_spectrum(data, 0)
+    assert s.duration_s == 600
+    assert s.a0 == pytest.approx(-5.0)
+    assert s.a1 == pytest.approx(2.5)
+    assert s.a2 == pytest.approx(0.001)
+    assert s.counts == [10, 20, 0, 5]
+    assert s.truncated is False
+
+
+def test_decode_spectrum_v1_all_encodings(protocol):
+    # Group 1: 2 zero-valued channels (vlen=0, no payload)
+    g_zeros = struct.pack("<H", (2 << 4) | 0)
+    # Group 2: 1 absolute uint8 value (vlen=1): 200
+    g_u8 = struct.pack("<H", (1 << 4) | 1) + struct.pack("<B", 200)
+    # Group 3: 2 int8 deltas from last=200 (vlen=2): +5 → 205, -10 → 195
+    g_d8 = struct.pack("<H", (2 << 4) | 2) + struct.pack("<bb", 5, -10)
+    # Group 4: 1 int16 delta from 195 (vlen=3): +1000 → 1195
+    g_d16 = struct.pack("<H", (1 << 4) | 3) + struct.pack("<h", 1000)
+    # Group 5: 1 int24 delta from 1195 (vlen=4): +65536 → 66731
+    g_d24 = struct.pack("<H", (1 << 4) | 4) + struct.pack("<BBb", 0, 0, 1)
+    # Group 6: 1 int32 delta from 66731 (vlen=5): -66731 → 0
+    g_d32 = struct.pack("<H", (1 << 4) | 5) + struct.pack("<i", -66731)
+
+    data = _spectrum_header() + g_zeros + g_u8 + g_d8 + g_d16 + g_d24 + g_d32
+    s = protocol.decode_spectrum(data, 1)
+    assert s.counts == [0, 0, 200, 205, 195, 1195, 66731, 0]
+    assert s.truncated is False
+
+
+def test_decode_spectrum_v1_truncated_keeps_leading_channels(protocol):
+    g_u8 = struct.pack("<H", (1 << 4) | 1) + struct.pack("<B", 42)
+    # Second group claims 3 int16 deltas but only 1 is present
+    g_cut = struct.pack("<H", (3 << 4) | 3) + struct.pack("<h", 7)
+    s = protocol.decode_spectrum(_spectrum_header() + g_u8 + g_cut, 1)
+    assert s.counts == [42, 49]
+    assert s.truncated is True
+
+
+def test_decode_spectrum_header_too_short_raises(protocol):
+    with pytest.raises(ValueError):
+        protocol.decode_spectrum(b"\x00\x01", 1)
+
+
+def test_channel_to_kev(protocol):
+    # E(ch) = a0 + a1*ch + a2*ch^2
+    assert protocol.channel_to_kev(0, -5.0, 2.5, 0.001) == pytest.approx(-5.0)
+    assert protocol.channel_to_kev(100, -5.0, 2.5, 0.001) == pytest.approx(255.0)
+
+
+def test_parse_spec_format_version(protocol):
+    assert protocol.parse_spec_format_version("Foo=1\nSpecFormatVersion=1\nBar=2") == 1
+    assert protocol.parse_spec_format_version("SpecFormatVersion=0") == 0
+    # Absent or unparsable → default 1 (all supported firmware)
+    assert protocol.parse_spec_format_version("NoSuchKey=5") == 1
+    assert protocol.parse_spec_format_version("SpecFormatVersion=abc") == 1

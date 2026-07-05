@@ -26,9 +26,12 @@ from .const import (
     CONF_ADDRESS,
     CONF_NAME,
     CONF_POLL_INTERVAL,
+    CONF_SPECTRUM_INTERVAL,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_SPECTRUM_INTERVAL,
     DOMAIN,
     MAX_POLL_INTERVAL,
+    MAX_SPECTRUM_INTERVAL,
     MIN_POLL_INTERVAL,
 )
 
@@ -158,14 +161,26 @@ class RadiaCodeOptionsFlow(OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current = self._entry.options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)
+        current_poll = self._entry.options.get(
+            CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL
+        )
+        current_spectrum = self._entry.options.get(
+            CONF_SPECTRUM_INTERVAL, DEFAULT_SPECTRUM_INTERVAL
+        )
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_POLL_INTERVAL, default=current): vol.All(
+                    vol.Required(CONF_POLL_INTERVAL, default=current_poll): vol.All(
                         vol.Coerce(int),
                         vol.Range(min=MIN_POLL_INTERVAL, max=MAX_POLL_INTERVAL),
+                    ),
+                    # 0 disables spectrum polling entirely
+                    vol.Required(
+                        CONF_SPECTRUM_INTERVAL, default=current_spectrum
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(min=0, max=MAX_SPECTRUM_INTERVAL),
                     ),
                 }
             ),

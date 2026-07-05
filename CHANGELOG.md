@@ -11,6 +11,22 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.0b1] — 2026-07-05
+
+First 2.0 beta: **gamma spectrum support**.
+
+### Added
+- **Spectrum sensor** — state is the total count across all channels; attributes carry the full 1024-channel histogram (`channels`), the channel→keV energy calibration (`calibration_a0/a1/a2`, E = a0 + a1·ch + a2·ch²), accumulation `duration_s`, and a `truncated` flag. The `channels` attribute is excluded from the recorder so the HA database is unaffected. See the README for a copy-paste ApexCharts card that renders the spectrum as an energy plot.
+- **`radiacode.get_spectrum` action** — on-demand spectrum read with response data (current or accumulated via `accumulated: true`), for scripts, automations, and template charts.
+- **Spectrum Reset button** — clears the current spectrum accumulation on the device.
+- **Spectrum poll interval option** — default 60 s, configurable up to 3600 s; set to 0 to disable spectrum polling entirely. The spectrum is the largest BLE transfer the integration performs.
+- Protocol: spectrum decoders for both wire formats (v0 raw uint32, v1 run-length/delta), the format version parsed from the device configuration text, `WR_VIRT_STRING` command for spectrum reset.
+
+### Known limitations (beta)
+- Through an ESPHome BT proxy the spectrum transfer may be truncated by the proxy's notification buffer. Truncated spectra decode cleanly up to the cut (leading channels, where most background counts live) and are flagged `truncated: true`. Direct Bluetooth adapters receive full spectra.
+
+---
+
 ## [1.3.0] — 2026-07-05
 
 Stable release of the 1.3.0 beta cycle, corrected against RC-103 FW 4.14 hardware results.
@@ -257,7 +273,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v2.0.0b1...HEAD
+[2.0.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.0b1
 [1.3.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0
 [1.3.0b2]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0b2
 [1.3.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0b1

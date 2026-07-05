@@ -45,6 +45,51 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 
 The **Radiation Alarm** sensor shows `No Alarm`, `L1 Alarm`, or `L2 Alarm` based on the device's own L1/L2 dose rate thresholds (exposed as attributes in µSv/h). The comparison runs in HA, so automations trigger even when device sound/vibration are off.
 
+### Gamma Spectrum
+
+The **Spectrum** sensor exposes the device's gamma spectrum (default: refreshed every 60 s, configurable in the options). Its state is the total count; the full per-channel histogram and the channel→keV calibration live in attributes:
+
+| Attribute | Description |
+|-----------|-------------|
+| `channels` | Per-channel counts (1024 bins; excluded from the recorder database) |
+| `calibration_a0/a1/a2` | Energy calibration: E(ch) = a0 + a1·ch + a2·ch² keV |
+| `duration_s` | Spectrum accumulation time in seconds |
+| `truncated` | True when a BT-proxy transfer was cut short (leading channels still valid) |
+
+A **Spectrum Reset** button clears the accumulation, and the **`radiacode.get_spectrum` action** returns the spectrum as response data (`accumulated: true` for the device's long-term accumulated spectrum) for use in scripts and automations.
+
+**Plotting the spectrum** — with the community [ApexCharts card](https://github.com/RomRider/apexcharts-card):
+
+```yaml
+type: custom:apexcharts-card
+header:
+  show: true
+  title: Gamma Spectrum
+graph_span: 1h
+update_interval: 60s
+series:
+  - entity: sensor.radiacode_spectrum
+    name: Counts
+    data_generator: |
+      const a0 = entity.attributes.calibration_a0;
+      const a1 = entity.attributes.calibration_a1;
+      const a2 = entity.attributes.calibration_a2;
+      return (entity.attributes.channels || []).map((count, ch) =>
+        [a0 + a1 * ch + a2 * ch * ch, count]);
+yaxis:
+  - min: 0
+apex_config:
+  xaxis:
+    type: numeric
+    title:
+      text: Energy (keV)
+  chart:
+    zoom:
+      enabled: true
+```
+
+> **BT proxy note:** the spectrum is the largest BLE transfer this integration performs. Through an ESPHome proxy it may be truncated by the notification buffer — the decoded leading channels (where most background counts live) are kept and `truncated: true` is set. A direct Bluetooth adapter receives full spectra. Set the spectrum interval option to 0 to disable spectrum polling.
+
 ### Binary Sensors
 
 | Entity | Description |
@@ -151,6 +196,7 @@ After setup, click **Configure** on the integration to adjust:
 | Option | Default | Range | Description |
 |--------|---------|-------|-------------|
 | Poll interval | 5 s | 5–300 s | How often sensor data is read over BLE. Longer intervals reduce BT proxy load and device battery drain. |
+| Spectrum poll interval | 60 s | 0–3600 s | How often the gamma spectrum is read. 0 disables spectrum polling (the largest BLE transfer). |
 
 ---
 
