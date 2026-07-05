@@ -48,7 +48,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Optional
 
@@ -70,6 +70,7 @@ from .radiacode_ble import RadiaCodeBLEClient, RadiaCodeInitError
 from .radiacode_ble.protocol import (
     VSFR,
     RadiaCodeData,
+    RadiaCodeDiagnostics,
     RadiaCodeSettings,
     SpikeFilter,
     compute_hardness,
@@ -83,15 +84,23 @@ _LOGGER = logging.getLogger(__name__)
 _RETRY_DELAY = 2.0
 
 
+# Read the device-health diagnostics batch every N polls (~once per minute
+# at the default 5 s interval).  These values change slowly and each read
+# costs a BLE round-trip.
+_DIAG_POLL_EVERY = 12
+
+
 @dataclass
 class RadiaCodeCoordinatorData:
     """Combined data container returned by the coordinator.
 
-    Entities use ``.sensors`` for read-only sensor values and ``.settings``
-    for writable device configuration.
+    Entities use ``.sensors`` for read-only sensor values, ``.settings``
+    for writable device configuration, and ``.diagnostics`` for
+    device-health readings.
     """
     sensors: RadiaCodeData
     settings: RadiaCodeSettings
+    diagnostics: RadiaCodeDiagnostics = field(default_factory=RadiaCodeDiagnostics)
 
 
 class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
@@ -131,6 +140,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
 
         # Cache device settings; updated every poll, kept on read failure.
         self._last_settings: RadiaCodeSettings = RadiaCodeSettings()
+
+        # Device-health diagnostics; read every _DIAG_POLL_EVERY polls and
+        # cached in between (the values change slowly).
+        self._last_diagnostics: RadiaCodeDiagnostics = RadiaCodeDiagnostics()
+        self._polls_since_diag: int = _DIAG_POLL_EVERY  # read on first poll
 
         # Set to True when the user explicitly disconnects via the connection
         # switch.  Polling is suspended until the user turns it back on.
@@ -324,6 +338,17 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Settings read failed, using cached values: %s", err)
 
+        # Read device-health diagnostics roughly once per minute; the
+        # values change slowly and each read costs a BLE round-trip.
+        self._polls_since_diag += 1
+        if self._polls_since_diag >= _DIAG_POLL_EVERY:
+            try:
+                self._last_diagnostics = await self._client.get_diagnostics()
+                self._polls_since_diag = 0
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Diagnostics read failed, using cached values: %s", err)
+                self._polls_since_diag = 0  # don't hammer a failing batch
+
         # Fetch serial number and firmware version once per connection
         # lifecycle.  These are static — they never change while the device
         # is running — so we only read them on the first successful poll
@@ -337,6 +362,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         return RadiaCodeCoordinatorData(
             sensors=sensors,
             settings=self._last_settings,
+            diagnostics=self._last_diagnostics,
         )
 
     async def _fetch_device_identity(self) -> None:

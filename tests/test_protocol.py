@@ -398,3 +398,41 @@ def test_compute_hardness_undefined_without_counts(protocol):
 
 def test_compute_hardness_zero_dose_rate(protocol):
     assert protocol.compute_hardness(0.0, 10.0) == 0.0
+
+
+# ── Device-health diagnostics ─────────────────────────────────────────────────
+
+
+def test_diagnostic_batch_decodes_signed_accelerometer(protocol):
+    # ACC axes are int16 in the low half of the uint32 register: -512 packs
+    # to 0xFE00 in the low bytes and must decode back to -512, not 65024.
+    ids = protocol.DIAGNOSTIC_VSFR_IDS
+    raw_acc = struct.unpack("<I", struct.pack("<hxx", -512))[0]
+    payload = struct.pack(
+        "<IIIIIII",
+        0b111111,       # all six registers valid
+        28500,          # VBIAS_mV
+        31,             # SYS_MCU_TEMP
+        3300,           # SYS_MCU_VREF
+        raw_acc,        # ACC_X = -512
+        struct.unpack("<I", struct.pack("<hxx", 0))[0],    # ACC_Y = 0
+        struct.unpack("<I", struct.pack("<hxx", 1024))[0], # ACC_Z = 1024
+    )
+    values = protocol.parse_vsfr_batch_response(payload, ids)
+    diag = protocol.decode_diagnostics(values)
+    assert diag.sipm_bias_mv == 28500
+    assert diag.mcu_temperature == 31
+    assert diag.mcu_vref_mv == 3300
+    assert diag.acc_x == -512
+    assert diag.acc_y == 0
+    assert diag.acc_z == 1024
+
+
+def test_diagnostic_batch_rejected_registers_are_none(protocol):
+    # Device rejects everything except VBIAS (bit 0)
+    payload = struct.pack("<II", 0b000001, 28500)
+    values = protocol.parse_vsfr_batch_response(payload, protocol.DIAGNOSTIC_VSFR_IDS)
+    diag = protocol.decode_diagnostics(values)
+    assert diag.sipm_bias_mv == 28500
+    assert diag.mcu_temperature is None
+    assert diag.acc_x is None

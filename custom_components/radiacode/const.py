@@ -50,6 +50,14 @@ BUTTON_DOSE_RESET = "dose_reset"
 # Diagnostic sensor keys
 SENSOR_RSSI = "rssi"
 
+# Device-health sensor keys — must match RadiaCodeDiagnostics field names
+SENSOR_SIPM_BIAS   = "sipm_bias_mv"
+SENSOR_MCU_TEMP    = "mcu_temperature"
+SENSOR_MCU_VREF    = "mcu_vref_mv"
+SENSOR_ACC_X       = "acc_x"
+SENSOR_ACC_Y       = "acc_y"
+SENSOR_ACC_Z       = "acc_z"
+
 # Radiation alarm enum sensor (moved from binary_sensor in 1.1.0)
 SENSOR_RADIATION_ALARM = "radiation_alarm"
 ALARM_STATE_NONE = "No Alarm"

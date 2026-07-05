@@ -28,6 +28,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
+    UnitOfElectricPotential,
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant
@@ -42,13 +43,19 @@ from .const import (
     CONF_ADDRESS,
     CONF_NAME,
     DOMAIN,
+    SENSOR_ACC_X,
+    SENSOR_ACC_Y,
+    SENSOR_ACC_Z,
     SENSOR_ACCUMULATED_DOSE,
     SENSOR_BATTERY,
     SENSOR_COUNT_RATE,
     SENSOR_DOSE_RATE,
     SENSOR_HARDNESS,
+    SENSOR_MCU_TEMP,
+    SENSOR_MCU_VREF,
     SENSOR_RADIATION_ALARM,
     SENSOR_RSSI,
+    SENSOR_SIPM_BIAS,
     SENSOR_TEMPERATURE,
     build_device_info,
 )
@@ -114,6 +121,67 @@ SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
 )
 
 
+# Device-health sensors, read from VSFR registers ~once per minute.
+# These registers are documented in cdump/radiacode but unverified over
+# BLE; a register the device rejects shows as Unknown.  The uncertain ones
+# (MCU temp/Vref, accelerometer — unknown scaling) start disabled.
+HEALTH_SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(
+        key=SENSOR_SIPM_BIAS,
+        name="SiPM Bias Voltage",
+        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    SensorEntityDescription(
+        key=SENSOR_MCU_TEMP,
+        name="MCU Temperature",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    SensorEntityDescription(
+        key=SENSOR_MCU_VREF,
+        name="MCU Vref",
+        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    SensorEntityDescription(
+        key=SENSOR_ACC_X,
+        name="Accelerometer X",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:axis-x-arrow",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    SensorEntityDescription(
+        key=SENSOR_ACC_Y,
+        name="Accelerometer Y",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:axis-y-arrow",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    SensorEntityDescription(
+        key=SENSOR_ACC_Z,
+        name="Accelerometer Z",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:axis-z-arrow",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -125,6 +193,10 @@ async def async_setup_entry(
         RadiaCodeSensor(coordinator, entry, description)
         for description in SENSOR_DESCRIPTIONS
     ]
+    entities.extend(
+        RadiaCodeHealthSensor(coordinator, entry, description)
+        for description in HEALTH_SENSOR_DESCRIPTIONS
+    )
     entities.append(RadiaCodeRSSISensor(coordinator, entry))
     entities.append(RadiaCodeRadiationAlarmSensor(coordinator, entry))
     async_add_entities(entities)
@@ -156,6 +228,21 @@ class RadiaCodeSensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
             return None
         data: RadiaCodeData = self.coordinator.data.sensors
         return getattr(data, self.entity_description.key, None)
+
+
+class RadiaCodeHealthSensor(RadiaCodeSensor):
+    """A device-health sensor backed by the diagnostics VSFR batch."""
+
+    @property
+    def native_value(self) -> Optional[float]:
+        """Return the current value from the coordinator's diagnostics."""
+        if self.coordinator.data is None:
+            return None
+        return getattr(
+            self.coordinator.data.diagnostics,
+            self.entity_description.key,
+            None,
+        )
 
 
 # Keep showing the last known RSSI for this long after the scanner history

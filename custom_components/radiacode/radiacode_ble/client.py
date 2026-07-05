@@ -62,11 +62,13 @@ from .protocol import (
     CMD,
     VS,
     VSFR,
+    DIAGNOSTIC_VSFR_IDS,
     SETTINGS_VSFR_IDS,
     SERVICE_UUID,
     WRITE_CHAR_UUID,
     NOTIFY_CHAR_UUID,
     RadiaCodeData,
+    RadiaCodeDiagnostics,
     RadiaCodeSettings,
     build_command,
     parse_response_body,
@@ -75,6 +77,7 @@ from .protocol import (
     parse_vsfr_read_response,
     parse_write_response,
     decode_data_buf,
+    decode_diagnostics,
     decode_settings,
     extract_sensor_values,
     decode_serial_number,
@@ -415,6 +418,16 @@ class RadiaCodeBLEClient:
         """
         values = await self._read_vsfr_batch(SETTINGS_VSFR_IDS)
         return decode_settings(values)
+
+    async def get_diagnostics(self) -> RadiaCodeDiagnostics:
+        """Read device-health registers via a single VSFR batch read.
+
+        Returns a RadiaCodeDiagnostics with SiPM bias voltage, MCU
+        temperature/Vref, and accelerometer axes.  Registers the device
+        rejects over BLE come back as None fields.
+        """
+        values = await self._read_vsfr_batch(DIAGNOSTIC_VSFR_IDS)
+        return decode_diagnostics(values)
 
     async def write_vsfr(self, vsfr_id: int, value: int) -> bool:
         """Write a single VSFR register.  Returns True on success.

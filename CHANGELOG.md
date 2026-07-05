@@ -11,6 +11,20 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0b1] — 2026-07-05
+
+### Added
+- **Device-health sensors** — six new diagnostic sensors read from documented (but previously unexercised over BLE) VSFR registers, batched once per minute:
+  - **SiPM Bias Voltage** (mV) — detector bias; drift indicates SiPM aging
+  - **MCU Temperature** (°C) — *disabled by default*
+  - **MCU Vref** (mV) — *disabled by default*
+  - **Accelerometer X/Y/Z** (raw) — device orientation; *disabled by default*
+
+  The uncertain entities start disabled because these registers have never been validated over BLE (scaling for MCU temp/Vref and accelerometer axes is undocumented) — enable them from the entity settings to help verify. Registers the firmware rejects show as Unknown; the health batch failing never affects the radiation sensors.
+- Device-health readings included in the downloadable diagnostics dump.
+
+---
+
 ## [1.2.0] — 2026-07-05
 
 ### Added
@@ -218,7 +232,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.3.0b1...HEAD
+[1.3.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0b1
 [1.2.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.2.0
 [1.1.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.1.0
 [1.1.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.1.0b1

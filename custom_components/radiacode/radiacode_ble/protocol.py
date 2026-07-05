@@ -90,6 +90,14 @@ class VSFR(IntEnum):
     DR_uR_h        = 0x8021   # dose rate in µR/h (uint32)
     DS_uR          = 0x8022   # accumulated dose in µR (uint32)
     TEMP_degC      = 0x8024   # temperature in °C (float)
+    ACC_X          = 0x8025   # accelerometer X axis (int16, raw)
+    ACC_Y          = 0x8026   # accelerometer Y axis (int16, raw)
+    ACC_Z          = 0x8027   # accelerometer Z axis (int16, raw)
+
+    # Detector / system health registers (read-only)
+    VBIAS_mV       = 0xC000       # SiPM bias voltage, mV (uint16)
+    SYS_MCU_VREF   = 0xFFFF000C   # MCU reference voltage, mV (int32)
+    SYS_MCU_TEMP   = 0xFFFF000D   # MCU temperature, °C (int32)
 
 
 # Struct format for reinterpreting raw uint32 VSFR values into typed values.
@@ -113,7 +121,28 @@ _VSFR_FORMATS: dict[int, str] = {
     VSFR.DR_uR_h:        "I",
     VSFR.DS_uR:          "I",
     VSFR.TEMP_degC:      "f",
+    # Signed 16-bit values live in the low half of the uint32 register
+    # ("h2x" = int16 + 2 pad bytes, little-endian).
+    VSFR.ACC_X:          "h2x",
+    VSFR.ACC_Y:          "h2x",
+    VSFR.ACC_Z:          "h2x",
+    VSFR.VBIAS_mV:       "I",
+    VSFR.SYS_MCU_VREF:   "i",
+    VSFR.SYS_MCU_TEMP:   "i",
 }
+
+# VSFR IDs batch-read for device-health diagnostics (order matches
+# RadiaCodeDiagnostics).  These registers are documented in cdump/radiacode
+# but unexercised over BLE; the device may mark any of them invalid in the
+# batch response, in which case the corresponding field stays None.
+DIAGNOSTIC_VSFR_IDS: list[int] = [
+    VSFR.VBIAS_mV,
+    VSFR.SYS_MCU_TEMP,
+    VSFR.SYS_MCU_VREF,
+    VSFR.ACC_X,
+    VSFR.ACC_Y,
+    VSFR.ACC_Z,
+]
 
 # VSFR IDs to batch-read for device settings (order matches RadiaCodeSettings).
 # DOSE_RESET is excluded — it is write-only / stateless.
@@ -229,6 +258,33 @@ class RadiaCodeSettings:
     ds_alarm_level2: Optional[int] = None            # µR
     cr_alarm_level1: Optional[int] = None            # counts/10s
     cr_alarm_level2: Optional[int] = None            # counts/10s
+
+
+@dataclass
+class RadiaCodeDiagnostics:
+    """Device-health readings, read from the diagnostics VSFR batch.
+
+    Fields are in the same order as DIAGNOSTIC_VSFR_IDS.  Any register the
+    device marks invalid (or rejects over BLE) stays None.
+    """
+    sipm_bias_mv: Optional[int] = None      # SiPM bias voltage, mV
+    mcu_temperature: Optional[int] = None   # MCU temperature, °C
+    mcu_vref_mv: Optional[int] = None       # MCU reference voltage, mV
+    acc_x: Optional[int] = None             # accelerometer X (raw int16)
+    acc_y: Optional[int] = None             # accelerometer Y (raw int16)
+    acc_z: Optional[int] = None             # accelerometer Z (raw int16)
+
+
+def decode_diagnostics(values: list[int | float | None]) -> RadiaCodeDiagnostics:
+    """Convert raw VSFR batch values (DIAGNOSTIC_VSFR_IDS order) to diagnostics."""
+    return RadiaCodeDiagnostics(
+        sipm_bias_mv=int(values[0]) if values[0] is not None else None,
+        mcu_temperature=int(values[1]) if values[1] is not None else None,
+        mcu_vref_mv=int(values[2]) if values[2] is not None else None,
+        acc_x=int(values[3]) if values[3] is not None else None,
+        acc_y=int(values[4]) if values[4] is not None else None,
+        acc_z=int(values[5]) if values[5] is not None else None,
+    )
 
 
 def decode_settings(values: list[int | float | None]) -> RadiaCodeSettings:
