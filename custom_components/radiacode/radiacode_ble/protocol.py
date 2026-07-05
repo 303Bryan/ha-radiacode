@@ -23,6 +23,7 @@ Wire format (response, arrives via BLE notifications):
 
 import datetime
 import logging
+import math
 import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -295,8 +296,10 @@ def parse_vs_response(payload: bytes) -> bytes:
     if len(data) < data_len:
         # Partial data — common when a large response is truncated by a
         # BT proxy with a limited notification buffer. Return what we have;
-        # decode_data_buf handles truncated records gracefully.
-        _LOGGER.warning(
+        # decode_data_buf handles truncated records gracefully.  Logged at
+        # debug: this is routine through ESPHome proxies (documented
+        # limitation) and would otherwise flood the HA log.
+        _LOGGER.debug(
             "VS data truncated: received %d of %d bytes", len(data), data_len
         )
     elif len(data) > data_len:
@@ -545,6 +548,78 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
     return records
 
 
+def _valid_reading(value: Optional[float], minimum: float = 0.0) -> bool:
+    """True when *value* is a finite number not below *minimum*.
+
+    data_buf transfers through ESPHome BT proxies are frequently truncated
+    mid-stream; a rare mid-stream packet loss can misalign record parsing
+    and produce garbage floats (NaN, inf, negatives, or absurd magnitudes).
+    Finite/non-negative is the record-level sanity gate; magnitude outliers
+    are handled statistically by SpikeFilter in the coordinator.
+    """
+    return value is not None and math.isfinite(value) and value >= minimum
+
+
+class SpikeFilter:
+    """Suppress single-sample spikes without hiding genuine radiation events.
+
+    A reading is passed through immediately unless it exceeds the last
+    accepted reading by more than *factor*.  Such a suspect reading is held
+    back for one sample; if the next reading is consistent with it (within
+    *factor* either way), the event is treated as genuine and passed —
+    real radiation excursions are sustained across polls, while corrupt
+    values from misparsed BLE data are one-off and wildly inconsistent.
+
+    Readings at or below *pass_below* are never filtered, so normal
+    background fluctuation (which can easily be a large *ratio* while
+    remaining a tiny absolute value) is unaffected.
+
+    filter() returns the accepted value, or None while a suspect reading
+    awaits confirmation (callers keep their previous value for that sample).
+    """
+
+    def __init__(self, factor: float = 50.0, pass_below: float = 5.0) -> None:
+        self._factor = factor
+        self._pass_below = pass_below
+        self._baseline: Optional[float] = None
+        self._pending: Optional[float] = None
+        # Set after each filter() call: the suppressed value, or None.
+        self.last_suppressed: Optional[float] = None
+
+    def filter(self, value: Optional[float]) -> Optional[float]:
+        """Return *value* if accepted, else None (held for confirmation)."""
+        self.last_suppressed = None
+        if value is None:
+            return None
+        if not math.isfinite(value) or value < 0:
+            self.last_suppressed = value
+            return None
+
+        if (
+            value <= self._pass_below
+            or self._baseline is None
+            or value <= self._baseline * self._factor
+        ):
+            self._baseline = value
+            self._pending = None
+            return value
+
+        # Suspect spike.  Accept only if consistent with the held sample.
+        if (
+            self._pending is not None
+            and self._pending > 0
+            and value <= self._pending * self._factor
+            and value >= self._pending / self._factor
+        ):
+            self._baseline = value
+            self._pending = None
+            return value
+
+        self._pending = value
+        self.last_suppressed = value
+        return None
+
+
 def extract_sensor_values(records: list) -> RadiaCodeData:
     """
     Return the most recent sensor values from a decoded data_buf record list.
@@ -579,17 +654,34 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
 
     for r in records:
         if isinstance(r, RealTimeData):
+            if not (_valid_reading(r.dose_rate) and _valid_reading(r.count_rate)):
+                _LOGGER.debug("Skipping implausible RealTimeData record: %s", r)
+                continue
             count_rate = r.count_rate
             dose_rate = r.dose_rate * _R_TO_uSv  # R/h → µSv/h
         elif isinstance(r, DoseRateDB):
+            if not (_valid_reading(r.dose_rate) and _valid_reading(r.count_rate)):
+                _LOGGER.debug("Skipping implausible DoseRateDB record: %s", r)
+                continue
             dose_rate = r.dose_rate * _R_TO_uSv  # R/h → µSv/h
             if count_rate is None:
                 count_rate = r.count_rate
         elif isinstance(r, RawData):
+            if not (_valid_reading(r.dose_rate) and _valid_reading(r.count_rate)):
+                _LOGGER.debug("Skipping implausible RawData record: %s", r)
+                continue
             dose_rate = r.dose_rate * _R_TO_uSv  # R/h → µSv/h
             if count_rate is None:
                 count_rate = r.count_rate
         elif isinstance(r, RareData):
+            if (
+                not _valid_reading(r.dose)
+                or not _valid_reading(r.charge_level)
+                or r.charge_level > 150
+                or not _valid_reading(r.temperature, minimum=-100.0)
+            ):
+                _LOGGER.debug("Skipping implausible RareData record: %s", r)
+                continue
             accumulated_dose = r.dose * _R_TO_uSv  # R → µSv
             battery = r.charge_level           # already 0–100 percent
             temperature = r.temperature      # °C, already converted in decoder

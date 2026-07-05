@@ -3,8 +3,9 @@
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN
+from .const import CONF_ADDRESS, DOMAIN, SENSOR_RADIATION_ALARM
 from .coordinator import RadiaCodeCoordinator
 
 PLATFORMS: list[Platform] = [
@@ -29,6 +30,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     The BLE connection is established on the first successful poll cycle.
     """
     coordinator = RadiaCodeCoordinator(hass, entry)
+
+    # 1.0.0 → 1.1.0 migration: the Radiation Alarm moved from a Safe/Unsafe
+    # binary sensor to an enum sensor (No Alarm / L1 Alarm / L2 Alarm).
+    # Remove the orphaned binary_sensor registry entry so it doesn't linger
+    # as a permanently-unavailable entity.
+    ent_reg = er.async_get(hass)
+    stale = ent_reg.async_get_entity_id(
+        Platform.BINARY_SENSOR,
+        DOMAIN,
+        f"{entry.data[CONF_ADDRESS]}-{SENSOR_RADIATION_ALARM}",
+    )
+    if stale is not None:
+        ent_reg.async_remove(stale)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

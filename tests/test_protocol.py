@@ -285,3 +285,98 @@ def test_parse_firmware_version(protocol):
 def test_parse_firmware_version_truncated(protocol):
     assert protocol.parse_firmware_version(b"") == "unknown"
     assert protocol.parse_firmware_version(struct.pack("<HH", 1, 4)) == "unknown"
+
+
+# ── Record validation (corrupt-data rejection) ────────────────────────────────
+
+
+def test_extract_skips_nonfinite_dose_rate(protocol):
+    good = _real_time_record(0, dose_rate=1e-4)
+    bad = struct.pack("<BBBi", 1, 0, 0, 0) + struct.pack(
+        "<ffHHHB", 10.5, float("nan"), 15, 20, 0, 0
+    )
+    data = protocol.extract_sensor_values(protocol.decode_data_buf(good + bad, BASE_TIME))
+    # The corrupt record must not overwrite the good reading
+    assert data.dose_rate == pytest.approx(1.0, rel=1e-4)
+
+
+def test_extract_skips_negative_dose_rate(protocol):
+    bad = struct.pack("<BBBi", 0, 0, 0, 0) + struct.pack(
+        "<ffHHHB", 10.5, -5.0, 15, 20, 0, 0
+    )
+    data = protocol.extract_sensor_values(protocol.decode_data_buf(bad, BASE_TIME))
+    assert data.dose_rate is None
+
+
+def test_extract_skips_implausible_rare_data(protocol):
+    # charge_level far above 100% → record rejected entirely
+    header = struct.pack("<BBBi", 0, 0, 3, 0)
+    body = struct.pack("<IfHHH", 600, 0.001, 4550, 65000, 0)  # charge=650%
+    data = protocol.extract_sensor_values(
+        protocol.decode_data_buf(header + body, BASE_TIME)
+    )
+    assert data.battery is None
+    assert data.accumulated_dose is None
+
+
+# ── SpikeFilter ───────────────────────────────────────────────────────────────
+
+
+def test_spike_filter_passes_normal_values(protocol):
+    f = protocol.SpikeFilter(factor=50.0, pass_below=5.0)
+    assert f.filter(0.15) == 0.15
+    assert f.filter(0.18) == 0.18
+    assert f.filter(0.12) == 0.12
+    assert f.last_suppressed is None
+
+
+def test_spike_filter_passes_small_absolute_values(protocol):
+    f = protocol.SpikeFilter(factor=50.0, pass_below=5.0)
+    assert f.filter(0.01) == 0.01
+    # 400× jump but still ≤ pass_below → passes
+    assert f.filter(4.0) == 4.0
+
+
+def test_spike_filter_suppresses_single_outlier(protocol):
+    f = protocol.SpikeFilter(factor=50.0, pass_below=5.0)
+    assert f.filter(0.15) == 0.15
+    assert f.filter(40000.0) is None          # corrupt spike held back
+    assert f.last_suppressed == 40000.0
+    assert f.filter(0.16) == 0.16             # back to normal → spike discarded
+    assert f.last_suppressed is None
+
+
+def test_spike_filter_confirms_sustained_event(protocol):
+    f = protocol.SpikeFilter(factor=50.0, pass_below=5.0)
+    assert f.filter(0.15) == 0.15
+    assert f.filter(500.0) is None            # first high sample held
+    assert f.filter(520.0) == 520.0           # consistent second sample → real
+    assert f.filter(510.0) == 510.0           # subsequent samples flow through
+
+
+def test_spike_filter_rejects_inconsistent_spikes(protocol):
+    f = protocol.SpikeFilter(factor=50.0, pass_below=5.0)
+    assert f.filter(0.15) == 0.15
+    assert f.filter(40000.0) is None          # garbage
+    assert f.filter(3e9) is None              # different garbage — not confirmation
+    assert f.filter(0.15) == 0.15
+
+
+def test_spike_filter_rejects_nonfinite(protocol):
+    f = protocol.SpikeFilter()
+    assert f.filter(float("nan")) is None
+    assert f.filter(float("inf")) is None
+    assert f.filter(-1.0) is None
+    assert f.filter(0.2) == 0.2
+
+
+def test_spike_filter_none_passthrough(protocol):
+    f = protocol.SpikeFilter()
+    assert f.filter(None) is None
+    assert f.last_suppressed is None
+
+
+def test_spike_filter_first_reading_accepted(protocol):
+    # No baseline yet — first reading is always accepted (whatever it is)
+    f = protocol.SpikeFilter(factor=50.0, pass_below=5.0)
+    assert f.filter(120.0) == 120.0
