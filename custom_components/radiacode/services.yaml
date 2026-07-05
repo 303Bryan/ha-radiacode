@@ -1,0 +1,12 @@
+get_spectrum:
+  fields:
+    accumulated:
+      required: false
+      default: false
+      selector:
+        boolean:
+    address:
+      required: false
+      example: "AA:BB:CC:DD:EE:FF"
+      selector:
+        text:

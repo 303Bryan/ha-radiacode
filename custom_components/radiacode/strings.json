@@ -26,9 +26,26 @@
     "step": {
       "init": {
         "title": "Radiacode Options",
-        "description": "Adjust how often the device is polled over Bluetooth.",
+        "description": "Adjust how often the device is polled over Bluetooth. Spectrum reads are the largest BLE transfer — set the spectrum interval to 0 to disable them.",
         "data": {
-          "poll_interval": "Poll interval (seconds)"
+          "poll_interval": "Poll interval (seconds)",
+          "spectrum_interval": "Spectrum poll interval (seconds, 0 = disabled)"
+        }
+      }
+    }
+  },
+  "services": {
+    "get_spectrum": {
+      "name": "Get spectrum",
+      "description": "Reads the gamma spectrum from the device and returns the per-channel histogram with energy calibration.",
+      "fields": {
+        "accumulated": {
+          "name": "Accumulated",
+          "description": "Return the device's accumulated spectrum instead of the current (since last reset) spectrum."
+        },
+        "address": {
+          "name": "Bluetooth address",
+          "description": "Select a specific device when more than one Radiacode is configured."
         }
       }
     }

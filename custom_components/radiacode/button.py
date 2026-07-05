@@ -1,7 +1,8 @@
 """Button platform for the RadiaCode integration.
 
-One button per device:
-  • Dose Reset — resets the accumulated dose counter to zero
+Two buttons per device:
+  • Dose Reset     — resets the accumulated dose counter to zero
+  • Spectrum Reset — clears the current gamma spectrum accumulation
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from .const import (
     CONF_NAME,
     DOMAIN,
     BUTTON_DOSE_RESET,
+    BUTTON_SPECTRUM_RESET,
     build_device_info,
 )
 from .coordinator import RadiaCodeCoordinator
@@ -32,6 +34,12 @@ BUTTON_DESCRIPTIONS: tuple[ButtonEntityDescription, ...] = (
         key=BUTTON_DOSE_RESET,
         name="Dose Reset",
         icon="mdi:restart",
+        entity_category=EntityCategory.CONFIG,
+    ),
+    ButtonEntityDescription(
+        key=BUTTON_SPECTRUM_RESET,
+        name="Spectrum Reset",
+        icon="mdi:chart-histogram",
         entity_category=EntityCategory.CONFIG,
     ),
 )
@@ -51,7 +59,7 @@ async def async_setup_entry(
 
 
 class RadiaCodeButton(CoordinatorEntity[RadiaCodeCoordinator], ButtonEntity):
-    """A button to reset the accumulated dose counter."""
+    """A RadiaCode action button (dose reset / spectrum reset)."""
 
     _attr_has_entity_name = True
 
@@ -70,5 +78,8 @@ class RadiaCodeButton(CoordinatorEntity[RadiaCodeCoordinator], ButtonEntity):
         )
 
     async def async_press(self) -> None:
-        """Reset accumulated dose by writing 1 to DOSE_RESET register."""
-        await self.coordinator.async_reset_dose()
+        """Execute the reset action for this button."""
+        if self.entity_description.key == BUTTON_SPECTRUM_RESET:
+            await self.coordinator.async_reset_spectrum()
+        else:
+            await self.coordinator.async_reset_dose()

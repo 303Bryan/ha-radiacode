@@ -14,6 +14,11 @@ DEFAULT_POLL_INTERVAL = 5    # seconds
 MIN_POLL_INTERVAL = 5
 MAX_POLL_INTERVAL = 300
 
+# Spectrum poll interval (seconds); 0 disables spectrum polling
+CONF_SPECTRUM_INTERVAL = "spectrum_interval"
+DEFAULT_SPECTRUM_INTERVAL = 60
+MAX_SPECTRUM_INTERVAL = 3600
+
 # Sensor keys — must match RadiaCodeData field names exactly
 SENSOR_DOSE_RATE        = "dose_rate"
 SENSOR_COUNT_RATE       = "count_rate"
@@ -46,6 +51,14 @@ SELECT_DISPLAY_OFF_TIME  = "display_off_time"
 
 # Button keys
 BUTTON_DOSE_RESET = "dose_reset"
+BUTTON_SPECTRUM_RESET = "spectrum_reset"
+
+# Spectrum sensor key
+SENSOR_SPECTRUM = "spectrum"
+
+# Service names
+SERVICE_GET_SPECTRUM = "get_spectrum"
+ATTR_ACCUMULATED = "accumulated"
 
 # Diagnostic sensor keys
 SENSOR_RSSI = "rssi"

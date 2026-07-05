@@ -70,7 +70,10 @@ from .protocol import (
     RadiaCodeData,
     RadiaCodeDiagnostics,
     RadiaCodeSettings,
+    Spectrum,
     build_command,
+    decode_spectrum,
+    parse_spec_format_version,
     parse_response_body,
     parse_vs_response,
     parse_vsfr_batch_response,
@@ -153,6 +156,10 @@ class RadiaCodeBLEClient:
         # write (e.g. switch toggle) can overlap with a coordinator poll,
         # corrupting the shared notification reassembly state.
         self._cmd_lock: asyncio.Lock = asyncio.Lock()
+
+        # Spectrum wire format; all supported firmware (≥4.8) uses 1.
+        # Refined from the device configuration via refresh_spectrum_format().
+        self._spectrum_format_version: int = 1
 
     # ── Connection management ─────────────────────────────────────────────────
 
@@ -419,6 +426,53 @@ class RadiaCodeBLEClient:
         """
         values = await self._read_vsfr_batch(SETTINGS_VSFR_IDS)
         return decode_settings(values)
+
+    async def get_configuration(self) -> str:
+        """Read the device configuration text (cp1251-encoded)."""
+        raw = await self._read_vs(VS.CONFIGURATION)
+        return raw.decode("cp1251", errors="replace")
+
+    async def refresh_spectrum_format(self) -> None:
+        """Refine the spectrum format version from the device configuration.
+
+        Non-fatal: on failure the default (format 1, used by all supported
+        firmware) is kept.
+        """
+        try:
+            config = await self.get_configuration()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Configuration read failed; keeping spectrum format %d: %s",
+                self._spectrum_format_version, err,
+            )
+            return
+        self._spectrum_format_version = parse_spec_format_version(config)
+        _LOGGER.debug(
+            "Spectrum format version: %d", self._spectrum_format_version
+        )
+
+    async def get_spectrum(self, accumulated: bool = False) -> Spectrum:
+        """Read the gamma spectrum.
+
+        ``accumulated=False`` returns the current spectrum (since the last
+        spectrum reset); ``accumulated=True`` returns the device's separate
+        accumulated spectrum.
+
+        This is the largest BLE transfer the integration performs; through
+        an ESPHome BT proxy it may be truncated by the notification buffer,
+        in which case the returned Spectrum has ``truncated=True`` and
+        contains the leading channels only.
+        """
+        vs_id = VS.SPEC_ACCUM if accumulated else VS.SPECTRUM
+        raw = await self._read_vs(vs_id)
+        return decode_spectrum(raw, self._spectrum_format_version)
+
+    async def reset_spectrum(self) -> bool:
+        """Reset the current spectrum accumulation.  Returns True on success."""
+        payload = await self._execute(
+            CMD.WR_VIRT_STRING, struct.pack("<II", int(VS.SPECTRUM), 0)
+        )
+        return parse_write_response(payload)
 
     async def get_sfr_file(self) -> str:
         """Read the device's self-describing SFR register directory.
