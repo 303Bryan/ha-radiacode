@@ -11,6 +11,19 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.1.0b1] — 2026-07-05
+
+### Added
+- **Dose rate outlier suppression** — Truncated BLE transfers through ESPHome BT proxies could occasionally produce a misparsed record with an absurd value (e.g. 40,000 µSv/h at background), ruining graph scaling. Two integrity-preserving layers now guard against this: records with non-finite/negative values are rejected at decode time, and a reading that jumps more than 50× above baseline is held back for **one poll** — if the next poll confirms it (genuine radiation events are sustained), it passes through. Real events are never hidden; worst case they appear one poll (~5 s) later. Suppressed outliers are logged as warnings. The same protection applies to count rate.
+- **Radiation Alarm is now a 3-state enum sensor** — displays **No Alarm / L1 Alarm / L2 Alarm** instead of the previous Safe/Unsafe binary sensor, with a state-dependent icon. The orphaned binary_sensor registry entry is removed automatically on upgrade. Automations using the old `binary_sensor.*_radiation_alarm` entity must be updated to the new `sensor.*_radiation_alarm` states.
+
+### Fixed
+- **Signal Strength intermittency** — the sensor read "Unknown" whenever the HA scanner's advertisement history expired, which is the norm while the BLE connection is active (a connected BLE peripheral stops advertising). The sensor now also checks non-connectable scanner history and holds the last observed RSSI while the connection is active (plus a 15-minute grace window when disconnected).
+- **Graph gaps on record-less polls** — dose rate and count rate now fall back to the last known value when a poll's transfer contained no decodable records (previously only zero values fell back, not missing ones).
+- **Log spam** — the "Partial response … using partial data" and "VS data truncated" messages fired on a large share of polls through BT proxies (documented, expected behaviour) at WARNING level, flooding the HA log every few minutes. Both are now DEBUG.
+
+---
+
 ## [1.0.0] — 2026-06-10
 
 First stable 1.0 release — identical integration code to [1.0.0b1], promoted after validation on RC-103 hardware (FW 4.8) through an ESPHome BT proxy: options flow reload, dose reset, radiation alarm sensor, and diagnostics download all confirmed working.
@@ -183,7 +196,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.1.0b1...HEAD
+[1.1.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.1.0b1
 [1.0.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.0.0
 [1.0.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.0.0b1
 [0.6.4]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.6.4

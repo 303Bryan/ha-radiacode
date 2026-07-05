@@ -67,7 +67,12 @@ from .const import (
     DOMAIN,
 )
 from .radiacode_ble import RadiaCodeBLEClient, RadiaCodeInitError
-from .radiacode_ble.protocol import VSFR, RadiaCodeData, RadiaCodeSettings
+from .radiacode_ble.protocol import (
+    VSFR,
+    RadiaCodeData,
+    RadiaCodeSettings,
+    SpikeFilter,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -114,6 +119,14 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # and use them until the device reports real readings.
         self._last_dose_rate: Optional[float] = None
         self._last_count_rate: Optional[float] = None
+
+        # Outlier suppression: truncated BT-proxy transfers can occasionally
+        # yield a misparsed record with an absurd value (e.g. 40 000 µSv/h at
+        # background).  A reading far above baseline is held back one poll
+        # and only accepted if the next poll confirms it — genuine radiation
+        # events are sustained, corrupt values are one-off.
+        self._dose_rate_filter = SpikeFilter(factor=50.0, pass_below=5.0)
+        self._count_rate_filter = SpikeFilter(factor=50.0, pass_below=100.0)
 
         # Cache device settings; updated every poll, kept on read failure.
         self._last_settings: RadiaCodeSettings = RadiaCodeSettings()
@@ -254,23 +267,40 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         if data.temperature is not None:
             self._last_temperature = data.temperature
 
+        # Run dose_rate/count_rate through the spike filters.  A suspected
+        # outlier is suppressed for one poll (the cached value is shown
+        # instead); a genuine event is confirmed by the next poll and passes.
+        dose_rate = self._dose_rate_filter.filter(data.dose_rate)
+        if self._dose_rate_filter.last_suppressed is not None:
+            _LOGGER.warning(
+                "Suppressed suspected dose rate outlier: %.4g µSv/h "
+                "(awaiting confirmation on next poll)",
+                self._dose_rate_filter.last_suppressed,
+            )
+        count_rate = self._count_rate_filter.filter(data.count_rate)
+        if self._count_rate_filter.last_suppressed is not None:
+            _LOGGER.warning(
+                "Suppressed suspected count rate outlier: %.4g CPS "
+                "(awaiting confirmation on next poll)",
+                self._count_rate_filter.last_suppressed,
+            )
+
         # Update dose_rate/count_rate cache.  After a reconnect, the first
         # poll yields dose_rate=0.0 because the device's buffer was cleared
         # by the init sequence.  We keep the last meaningful values until
         # the device starts streaming real data again.
-        if data.dose_rate is not None and data.dose_rate > 0:
-            self._last_dose_rate = data.dose_rate
-        if data.count_rate is not None and data.count_rate > 0:
-            self._last_count_rate = data.count_rate
+        if dose_rate is not None and dose_rate > 0:
+            self._last_dose_rate = dose_rate
+        if count_rate is not None and count_rate > 0:
+            self._last_count_rate = count_rate
 
         # Determine the best dose_rate/count_rate to expose.  Use fresh
-        # values when available, fall back to cache for the post-reconnect
-        # zero-value transition.
-        dose_rate = data.dose_rate
-        count_rate = data.count_rate
-        if dose_rate is not None and dose_rate == 0 and self._last_dose_rate is not None:
+        # values when available; fall back to cache for the post-reconnect
+        # zero-value transition, for polls whose transfer contained no
+        # decodable records (None), and for suppressed-outlier polls.
+        if not dose_rate and self._last_dose_rate is not None:
             dose_rate = self._last_dose_rate
-        if count_rate is not None and count_rate == 0 and self._last_count_rate is not None:
+        if not count_rate and self._last_count_rate is not None:
             count_rate = self._last_count_rate
 
         # Build sensor snapshot with cached fallbacks.

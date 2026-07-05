@@ -49,9 +49,14 @@ BUTTON_DOSE_RESET = "dose_reset"
 # Diagnostic sensor keys
 SENSOR_RSSI = "rssi"
 
+# Radiation alarm enum sensor (moved from binary_sensor in 1.1.0)
+SENSOR_RADIATION_ALARM = "radiation_alarm"
+ALARM_STATE_NONE = "No Alarm"
+ALARM_STATE_L1 = "L1 Alarm"
+ALARM_STATE_L2 = "L2 Alarm"
+
 # Binary sensor keys
 BINARY_SENSOR_CONNECTIVITY = "connectivity"
-BINARY_SENSOR_RADIATION_ALARM = "radiation_alarm"
 
 
 def build_device_info(address: str, name: str) -> DeviceInfo:

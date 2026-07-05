@@ -35,11 +35,14 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 | Temperature | °C | Device internal temperature *(diagnostic)* |
 | Signal Strength | dBm | BLE RSSI from advertisements *(diagnostic)* |
 
+### Radiation Alarm
+
+The **Radiation Alarm** sensor shows `No Alarm`, `L1 Alarm`, or `L2 Alarm` based on the device's own L1/L2 dose rate thresholds (exposed as attributes in µSv/h). The comparison runs in HA, so automations trigger even when device sound/vibration are off.
+
 ### Binary Sensors
 
 | Entity | Description |
 |--------|-------------|
-| Radiation Alarm | On when the dose rate reaches the device's L1 alarm threshold; `alarm_level` attribute reports 0/1/2 |
 | BLE Connected | True while the BLE link is active; exposes `last_error`, `connection_count`, and `last_poll_duration` attributes *(diagnostic)* |
 
 > **Note:** Dose Rate and Count Rate update on every poll (default every 5 s, configurable). Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates.
@@ -90,7 +93,7 @@ The integration exposes the full Radiacode configuration as writable HA entities
 ## Requirements
 
 - **Home Assistant**
-- **Radiacode** RC-102, RC-103, or RC-110 (tested with firmware 4.8)
+- **Radiacode** RC-102, RC-103, or RC-110 (tested with firmware 4.8 and 4.14)
 - **Bluetooth** — one of:
   - A Bluetooth adapter on your HA host (USB dongle or built-in), **or**
   - One or more [ESPHome Bluetooth proxies](https://esphome.io/components/bluetooth_proxy.html) within range of the device
@@ -163,6 +166,8 @@ For the best results with BT proxies:
 ## Known Limitations
 
 - **BT proxy notification buffer** — ESPHome proxies can forward approximately 28 BLE notification packets per transfer. For large data buffers (accumulated while the device was disconnected), the integration automatically uses whatever data arrived before the buffer filled. No data is lost; the next poll will catch up.
+- **Outlier suppression delay** — a dose/count rate reading more than 50× above the current baseline is held back for one poll and shown only if the next poll confirms it. Genuine radiation events (which are sustained) appear at most one poll interval late; one-off corrupt values from truncated BLE transfers never reach the graph. Suppressed values are logged as warnings.
+- **Signal Strength while connected** — a connected BLE peripheral stops advertising, so no fresh RSSI is available during an active connection; the sensor holds the last observed value until the next advertisement.
 - **RareData update rate** — Battery, Temperature, and Accumulated Dose are updated by the device approximately once per minute, regardless of the poll interval.
 - **Single connection** — The Radiacode can only maintain one BLE connection at a time. While this integration is connected, the Radiacode mobile app will not be able to connect to the device (and vice versa).
 

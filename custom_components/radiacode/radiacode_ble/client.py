@@ -612,7 +612,10 @@ class RadiaCodeBLEClient:
             )
 
         if len(self._resp_buf) >= 4:
-            _LOGGER.warning(
+            # Routine through ESPHome BT proxies (notification buffer limit,
+            # documented README limitation) — debug, not warning, to avoid
+            # flooding the HA log on every large data_buf read.
+            _LOGGER.debug(
                 "Partial response for cmd %#06x (seq=%d): "
                 "received %d bytes, still missing %d; using partial data",
                 cmd, seq, len(self._resp_buf), self._resp_total,
