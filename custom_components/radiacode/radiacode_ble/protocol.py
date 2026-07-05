@@ -185,6 +185,28 @@ class RadiaCodeData:
     accumulated_dose: Optional[float]  # µSv      (converted from R)
     battery: Optional[float]           # percent  (from RareData)
     temperature: Optional[float]       # °C       (from RareData)
+    hardness: Optional[float] = None   # dimensionless (µR/h per cps), derived
+
+
+def compute_hardness(
+    dose_rate_uSv_h: Optional[float], count_rate_cps: Optional[float]
+) -> Optional[float]:
+    """Compute the radiation hardness coefficient shown by the Radiacode app.
+
+    Hardness = dose rate (µR/h) ÷ count rate (cps) — a dimensionless
+    measure of which energies dominate the spectrum, independent of
+    intensity.  Each isotope has a characteristic hardness, so the app
+    uses it for pseudo-identification of sources.
+
+    Our dose_rate is stored in µSv/h; the device's fixed conversion is
+    100 µR = 1 µSv, hence the ×100.
+
+    Returns None when either input is missing or the count rate is zero
+    (hardness is undefined without counts).
+    """
+    if dose_rate_uSv_h is None or count_rate_cps is None or count_rate_cps <= 0:
+        return None
+    return (dose_rate_uSv_h * 100.0) / count_rate_cps
 
 
 @dataclass

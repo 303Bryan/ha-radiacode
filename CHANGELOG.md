@@ -11,6 +11,13 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.2.0] — 2026-07-05
+
+### Added
+- **Hardness sensor** — the dimensionless spectral hardness coefficient shown by the Radiacode mobile app: dose rate (µR/h) ÷ count rate (cps). Characterises which energies dominate the spectrum independent of intensity; each isotope has a characteristic hardness, enabling pseudo-identification of sources from HA history graphs. Computed from the same (outlier-filtered) dose/count values exposed to HA, so all three sensors stay mutually consistent.
+
+---
+
 ## [1.1.0] — 2026-07-05
 
 Stable release — identical integration code to [1.1.0b1], promoted after validation on RC-103 hardware (FW 4.14).
@@ -211,7 +218,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.2.0
 [1.1.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.1.0
 [1.1.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.1.0b1
 [1.0.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.0.0

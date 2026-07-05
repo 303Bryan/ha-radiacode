@@ -20,6 +20,7 @@ SENSOR_COUNT_RATE       = "count_rate"
 SENSOR_ACCUMULATED_DOSE = "accumulated_dose"
 SENSOR_BATTERY          = "battery"
 SENSOR_TEMPERATURE      = "temperature"
+SENSOR_HARDNESS         = "hardness"
 
 # Switch keys — must match RadiaCodeSettings field names exactly
 SWITCH_SOUND_ON     = "sound_on"

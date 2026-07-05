@@ -4,6 +4,7 @@ Sensors per device:
   • Dose Rate          µSv/h   — real-time ambient radiation dose rate
   • Count Rate         cps     — raw detector counts per second
   • Accumulated Dose   µSv     — total dose since last reset
+  • Hardness           —       — spectral hardness coefficient (µR/h ÷ cps)
   • Radiation Alarm    enum    — No Alarm / L1 Alarm / L2 Alarm
   • Battery            %       — device battery level (diagnostic)
   • Temperature        °C      — device temperature (diagnostic)
@@ -45,6 +46,7 @@ from .const import (
     SENSOR_BATTERY,
     SENSOR_COUNT_RATE,
     SENSOR_DOSE_RATE,
+    SENSOR_HARDNESS,
     SENSOR_RADIATION_ALARM,
     SENSOR_RSSI,
     SENSOR_TEMPERATURE,
@@ -79,6 +81,17 @@ SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         suggested_display_precision=4,
         icon="mdi:radioactive",
+    ),
+    SensorEntityDescription(
+        # Radiation hardness — dimensionless (µR/h ÷ cps), matching the
+        # coefficient shown by the Radiacode mobile app.  Characterises
+        # which energies dominate the spectrum independent of intensity;
+        # each isotope has a characteristic hardness value.
+        key=SENSOR_HARDNESS,
+        name="Hardness",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        icon="mdi:chart-bell-curve",
     ),
     SensorEntityDescription(
         key=SENSOR_BATTERY,

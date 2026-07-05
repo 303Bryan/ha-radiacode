@@ -72,6 +72,7 @@ from .radiacode_ble.protocol import (
     RadiaCodeData,
     RadiaCodeSettings,
     SpikeFilter,
+    compute_hardness,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -303,13 +304,17 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         if not count_rate and self._last_count_rate is not None:
             count_rate = self._last_count_rate
 
-        # Build sensor snapshot with cached fallbacks.
+        # Build sensor snapshot with cached fallbacks.  Hardness (µR/h per
+        # cps, the coefficient shown by the Radiacode app) is derived from
+        # the same dose/count values exposed to HA so the three sensors
+        # always stay mutually consistent.
         sensors = RadiaCodeData(
             dose_rate=dose_rate,
             count_rate=count_rate,
             accumulated_dose=self._last_accumulated_dose,
             battery=self._last_battery,
             temperature=self._last_temperature,
+            hardness=compute_hardness(dose_rate, count_rate),
         )
 
         # Read device settings — small BLE response (~60 bytes).
