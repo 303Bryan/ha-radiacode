@@ -1,0 +1,32 @@
+type: custom:plotly-graph
+title: Gamma Spectrum
+refresh_interval: 60
+raw_plotly_config: true
+entities:
+  - entity: sensor.radiacode_spectrum
+    name: Counts
+    type: scatter
+    mode: lines
+    x: |
+      $fn ({ hass, getFromConfig }) => {
+        const sensor = hass.states[getFromConfig('.entity')];
+        if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
+        const a = sensor.attributes;
+        return (a.channels || []).map((_, ch) =>
+          a.calibration_a0 + a.calibration_a1 * ch + a.calibration_a2 * ch * ch);
+      }
+    y: |
+      $fn ({ hass, getFromConfig }) => {
+        const sensor = hass.states[getFromConfig('.entity')];
+        if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
+        return sensor.attributes.channels || [];
+      }
+    hovertemplate: '%{x:.1f} keV<br>%{y} counts<extra></extra>'
+layout:
+  xaxis:
+    type: linear
+    title: Energy (keV)
+    autorange: true
+  yaxis:
+    title: Counts
+    rangemode: tozero

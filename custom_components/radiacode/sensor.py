@@ -31,7 +31,7 @@ from homeassistant.const import (
     UnitOfElectricPotential,
     UnitOfTemperature,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -58,7 +58,7 @@ from .const import (
     build_device_info,
 )
 from .coordinator import RadiaCodeCoordinator
-from .radiacode_ble.protocol import RadiaCodeData
+from .radiacode_ble.protocol import RadiaCodeData, Spectrum
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -442,26 +442,56 @@ class RadiaCodeSpectrumSensor(
             entry.data[CONF_ADDRESS],
             entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
         )
+        self._cached_spectrum: Optional[Spectrum] = None
+        self._attr_native_value: Optional[int] = None
+        self._attr_extra_state_attributes: dict[str, Any] = {}
+        self._last_available = self.available
+        self._refresh_spectrum_cache()
 
-    @property
-    def native_value(self) -> Optional[int]:
-        """Return the total count across all spectrum channels."""
-        if self.coordinator.data is None or self.coordinator.data.spectrum is None:
-            return None
-        return sum(self.coordinator.data.spectrum.counts)
+    async def async_added_to_hass(self) -> None:
+        """Prepare the latest snapshot before Home Assistant's first state write."""
+        await super().async_added_to_hass()
+        self._refresh_spectrum_cache()
+        self._last_available = self.available
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose the histogram and calibration for charting."""
-        if self.coordinator.data is None or self.coordinator.data.spectrum is None:
-            return {}
-        spectrum = self.coordinator.data.spectrum
-        return {
+    def _refresh_spectrum_cache(self) -> bool:
+        """Build entity values only when the coordinator supplies a new snapshot."""
+        spectrum = (
+            self.coordinator.data.spectrum
+            if self.coordinator.data is not None
+            else None
+        )
+        # The coordinator reuses the snapshot between spectrum reads. Its
+        # other sensors update much more often, so compare by identity rather
+        # than repeatedly traversing all 1024 channels on every normal poll.
+        if spectrum is self._cached_spectrum:
+            return False
+        self._cached_spectrum = spectrum
+        if spectrum is None:
+            self._attr_native_value = None
+            self._attr_extra_state_attributes = {}
+            return True
+
+        # Keep an entity-owned copy so a published state's histogram remains
+        # consistent with its total even if the source list is later changed.
+        channels = list(spectrum.counts)
+        self._attr_native_value = sum(channels)
+        self._attr_extra_state_attributes = {
             "duration_s": spectrum.duration_s,
-            "channel_count": len(spectrum.counts),
+            "channel_count": len(channels),
             "calibration_a0": spectrum.a0,
             "calibration_a1": spectrum.a1,
             "calibration_a2": spectrum.a2,
             "truncated": spectrum.truncated,
-            "channels": spectrum.counts,
+            "channels": channels,
         }
+        return True
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Publish new spectra and connection availability transitions."""
+        spectrum_changed = self._refresh_spectrum_cache()
+        available = self.available
+        if spectrum_changed or available != self._last_available:
+            self._last_available = available
+            self.async_write_ha_state()

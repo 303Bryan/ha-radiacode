@@ -49,6 +49,12 @@ def test_parse_response_body_seq_mismatch(protocol):
         protocol.parse_response_body(body, 0x0007, 5)
 
 
+def test_parse_response_body_reserved_byte_mismatch(protocol):
+    body = bytes([0x07, 0x00, 0x01, 0x85]) + b"payload"
+    with pytest.raises(ValueError, match="echo header mismatch.*reserved=0x01"):
+        protocol.parse_response_body(body, 0x0007, 5)
+
+
 def test_parse_response_body_too_short(protocol):
     with pytest.raises(ValueError, match="too short"):
         protocol.parse_response_body(b"\x07\x00", 0x0007, 0)
@@ -74,10 +80,28 @@ def test_parse_vs_response_bad_retcode(protocol):
         protocol.parse_vs_response(payload)
 
 
-def test_parse_vs_response_truncated_returns_partial(protocol):
-    # BT proxy buffer exhaustion: fewer bytes than declared — keep partial data
+def test_parse_vs_response_truncated_raises(protocol):
+    # A complete outer frame must contain all bytes of its declared VS value.
+    # Accepting this could silently remove SpecFormatVersion from configuration.
     payload = struct.pack("<II", 1, 100) + b"part"
-    assert protocol.parse_vs_response(payload) == b"part"
+    with pytest.raises(ValueError, match="length mismatch"):
+        protocol.parse_vs_response(payload)
+
+
+def test_parse_vs_response_empty_is_valid(protocol):
+    assert protocol.parse_vs_response(struct.pack("<II", 1, 0)) == b""
+    assert protocol.parse_vs_response(struct.pack("<II", 1, 0) + b"\x00") == b""
+
+
+@pytest.mark.parametrize("extra", [b"\x01", b"\x00\x00"])
+def test_parse_vs_response_padding_workaround_only_allows_single_null(protocol, extra):
+    with pytest.raises(ValueError, match="length mismatch"):
+        protocol.parse_vs_response(struct.pack("<II", 1, 5) + b"hello" + extra)
+
+
+def test_parse_vs_response_keeps_null_within_declared_length(protocol):
+    payload = struct.pack("<II", 1, 6) + b"hello\x00"
+    assert protocol.parse_vs_response(payload) == b"hello\x00"
 
 
 def test_parse_vs_response_overlong_raises(protocol):
@@ -466,34 +490,47 @@ def _spectrum_header(duration=600, a0=-5.0, a1=2.5, a2=0.001):
 
 
 def test_decode_spectrum_v0(protocol):
-    data = _spectrum_header() + struct.pack("<IIII", 10, 20, 0, 5)
+    counts = [102, 20, 0, 5] + [0] * 1019 + [73]
+    data = _spectrum_header() + struct.pack("<1024I", *counts)
     s = protocol.decode_spectrum(data, 0)
     assert s.duration_s == 600
     assert s.a0 == pytest.approx(-5.0)
     assert s.a1 == pytest.approx(2.5)
     assert s.a2 == pytest.approx(0.001)
-    assert s.counts == [10, 20, 0, 5]
+    assert s.counts == counts
     assert s.truncated is False
+
+
+# Manually encoded wire vector, independent of decoder implementation. The
+# upstream decoder at cdump/radiacode commit 2b217916f49f5eedddf8f0d9116fcfd3c6b8832e
+# documents this format in src/radiacode/decoders/spectrum.py. This is a synthetic
+# complete 1024-channel payload, not a claimed hardware capture:
+#   2 zeros; absolute 200; deltas +5, -10, +1000, +65536, -66731; 1016 zeros.
+_SPECTRUM_V1_BODY = bytes.fromhex(
+    "20 00 11 00 c8 22 00 05 f6 13 00 e8 03 "
+    "14 00 00 00 01 15 00 55 fb fe ff 80 3f"
+)
+_SPECTRUM_V1_COUNTS = [0, 0, 200, 205, 195, 1195, 66731, 0] + [0] * 1016
 
 
 def test_decode_spectrum_v1_all_encodings(protocol):
-    # Group 1: 2 zero-valued channels (vlen=0, no payload)
-    g_zeros = struct.pack("<H", (2 << 4) | 0)
-    # Group 2: 1 absolute uint8 value (vlen=1): 200
-    g_u8 = struct.pack("<H", (1 << 4) | 1) + struct.pack("<B", 200)
-    # Group 3: 2 int8 deltas from last=200 (vlen=2): +5 → 205, -10 → 195
-    g_d8 = struct.pack("<H", (2 << 4) | 2) + struct.pack("<bb", 5, -10)
-    # Group 4: 1 int16 delta from 195 (vlen=3): +1000 → 1195
-    g_d16 = struct.pack("<H", (1 << 4) | 3) + struct.pack("<h", 1000)
-    # Group 5: 1 int24 delta from 1195 (vlen=4): +65536 → 66731
-    g_d24 = struct.pack("<H", (1 << 4) | 4) + struct.pack("<BBb", 0, 0, 1)
-    # Group 6: 1 int32 delta from 66731 (vlen=5): -66731 → 0
-    g_d32 = struct.pack("<H", (1 << 4) | 5) + struct.pack("<i", -66731)
-
-    data = _spectrum_header() + g_zeros + g_u8 + g_d8 + g_d16 + g_d24 + g_d32
+    data = _spectrum_header() + _SPECTRUM_V1_BODY
     s = protocol.decode_spectrum(data, 1)
-    assert s.counts == [0, 0, 200, 205, 195, 1195, 66731, 0]
+    assert s.counts == _SPECTRUM_V1_COUNTS
     assert s.truncated is False
+
+
+def test_absent_format_uses_uncompressed_1024_channel_payload(protocol):
+    # A perfectly valid raw count of 102 has low nibble 6. Guessing compressed
+    # format 1 interprets that as the unsupported vlen=6 reported in issue #21.
+    counts = [102] + [0] * 1023
+    data = _spectrum_header() + struct.pack("<1024I", *counts)
+    version = protocol.parse_spec_format_version("SerialNumber=RC-103G-000001")
+    s = protocol.decode_spectrum(data, version)
+    assert s.counts == counts
+    assert not s.truncated
+    with pytest.raises(ValueError, match="vlen=6"):
+        protocol.decode_spectrum(data, 1)
 
 
 def test_decode_spectrum_v1_truncated_keeps_leading_channels(protocol):
@@ -503,6 +540,75 @@ def test_decode_spectrum_v1_truncated_keeps_leading_channels(protocol):
     s = protocol.decode_spectrum(_spectrum_header() + g_u8 + g_cut, 1)
     assert s.counts == [42, 49]
     assert s.truncated is True
+
+
+@pytest.mark.parametrize("format_version", [0, 1])
+def test_decode_spectrum_every_byte_cut_is_flagged(protocol, format_version):
+    if format_version == 0:
+        expected = [102, 20, 0, 5] + [0] * 1019 + [73]
+        data = _spectrum_header() + struct.pack("<1024I", *expected)
+    else:
+        expected = _SPECTRUM_V1_COUNTS
+        data = _spectrum_header() + _SPECTRUM_V1_BODY
+    # Includes cuts at complete channel/group boundaries, which have no leftover
+    # bytes but are still incomplete spectra. A partial value is never appended.
+    for cut in range(16, len(data)):
+        s = protocol.decode_spectrum(data[:cut], format_version)
+        assert s.truncated, f"unflagged truncation at byte {cut}"
+        assert s.counts == expected[:len(s.counts)]
+
+
+def test_decode_spectrum_signed_deltas_and_uint32_limit(protocol):
+    # Signed 24-bit extrema, zeros resetting the delta base, absolute uint8
+    # values, and additions reaching UINT32_MAX without wrapping or going negative.
+    body = bytes.fromhex(
+        "13 00 ff 7f 24 00 ff ff 7f 00 00 80 20 00 "
+        "11 00 ff 12 00 80 13 00 81 ff 25 00 ff ff ff 7f ff ff ff 7f "
+        "15 00 01 00 00 00 50 3f"
+    )
+    expected = [32767, 8421374, 32766, 0, 0, 255, 127, 0,
+                2147483647, 4294967294, 4294967295] + [0] * 1013
+    s = protocol.decode_spectrum(_spectrum_header() + body, 1)
+    assert s.counts == expected
+    assert not s.truncated
+
+
+@pytest.mark.parametrize("vlen", range(6, 16))
+def test_decode_spectrum_unknown_encoding_raises(protocol, vlen):
+    # Leading valid channels must not turn a malformed payload into success.
+    body = bytes.fromhex("11 00 2a") + bytes([0x10 | vlen, 0])
+    with pytest.raises(ValueError, match=f"vlen={vlen}"):
+        protocol.decode_spectrum(_spectrum_header() + body, 1)
+
+
+@pytest.mark.parametrize("body,message", [
+    (bytes.fromhex("00 00"), "zero channels"),
+    (bytes.fromhex("10 40"), "more than 1024"),
+    (bytes.fromhex("00 20 10 20"), "more than 1024"),
+    (bytes.fromhex("12 00 ff"), "uint32 range"),
+    (bytes.fromhex("25 00 ff ff ff 7f ff ff ff 7f 12 00 02"), "uint32 range"),
+    (bytes.fromhex("00 40 01"), "trailing data"),
+])
+def test_decode_spectrum_malformed_compressed_payload_raises(protocol, body, message):
+    with pytest.raises(ValueError, match=message):
+        protocol.decode_spectrum(_spectrum_header() + body, 1)
+
+
+def test_decode_spectrum_too_many_raw_channels_raises(protocol):
+    with pytest.raises(ValueError, match="more than 1024"):
+        protocol.decode_spectrum(_spectrum_header() + b"\x00" * 4100, 0)
+
+
+@pytest.mark.parametrize("format_version", [-1, 2, 99])
+def test_decode_spectrum_unknown_format_raises(protocol, format_version):
+    with pytest.raises(ValueError, match="format version"):
+        protocol.decode_spectrum(_spectrum_header() + _SPECTRUM_V1_BODY, format_version)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_decode_spectrum_nonfinite_calibration_raises(protocol, value):
+    with pytest.raises(ValueError, match="must be finite"):
+        protocol.decode_spectrum(_spectrum_header(a1=value) + _SPECTRUM_V1_BODY, 1)
 
 
 def test_decode_spectrum_header_too_short_raises(protocol):
@@ -519,6 +625,11 @@ def test_channel_to_kev(protocol):
 def test_parse_spec_format_version(protocol):
     assert protocol.parse_spec_format_version("Foo=1\nSpecFormatVersion=1\nBar=2") == 1
     assert protocol.parse_spec_format_version("SpecFormatVersion=0") == 0
-    # Absent or unparsable → default 1 (all supported firmware)
-    assert protocol.parse_spec_format_version("NoSuchKey=5") == 1
-    assert protocol.parse_spec_format_version("SpecFormatVersion=abc") == 1
+    assert protocol.parse_spec_format_version(" SpecFormatVersion = 1\r\n") == 1
+    # Absent or unparsable → upstream default 0; don't guess from firmware.
+    assert protocol.parse_spec_format_version("NoSuchKey=5") == 0
+    assert protocol.parse_spec_format_version("SpecFormatVersion=abc") == 0
+    assert protocol.parse_spec_format_version("SpecFormatVersion=") == 0
+    assert protocol.parse_spec_format_version("SpecFormatVersionHistory=1") == 0
+    # Preserve an explicit unknown version so decode_spectrum rejects it clearly.
+    assert protocol.parse_spec_format_version("SpecFormatVersion=2") == 2

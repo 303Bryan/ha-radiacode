@@ -339,14 +339,15 @@ def parse_response_body(raw: bytes, expected_cmd: int, expected_seq: int) -> byt
     if len(raw) < 4:
         raise ValueError(f"Response body too short: {len(raw)} bytes")
 
-    cmd_lo, cmd_hi, _zero, seq_byte = struct.unpack_from("<BBBB", raw, 0)
+    cmd_lo, cmd_hi, zero, seq_byte = struct.unpack_from("<BBBB", raw, 0)
     actual_cmd      = cmd_lo | (cmd_hi << 8)
     expected_seq_byte = 0x80 + (expected_seq % 32)
 
-    if actual_cmd != expected_cmd or seq_byte != expected_seq_byte:
+    if actual_cmd != expected_cmd or zero != 0 or seq_byte != expected_seq_byte:
         raise ValueError(
             f"Response echo header mismatch: "
             f"cmd={actual_cmd:#06x} (want {expected_cmd:#06x}), "
+            f"reserved={zero:#04x} (want 0x00), "
             f"seq={seq_byte:#04x} (want {expected_seq_byte:#04x})"
         )
 
@@ -359,6 +360,9 @@ def parse_vs_response(payload: bytes) -> bytes:
 
     After the 4-byte echo header (already stripped by parse_response_body):
       [uint32_le retcode] [uint32_le data_len] [data_len bytes]
+
+    The transport supplies a complete outer frame. A shorter inner virtual
+    string is malformed and must not be used as configuration or sensor data.
     """
     if len(payload) < 8:
         raise ValueError(f"VS response payload too short: {len(payload)} bytes")
@@ -373,16 +377,7 @@ def parse_vs_response(payload: bytes) -> bytes:
     if len(data) == data_len + 1 and data[-1] == 0x00:
         data = data[:-1]
 
-    if len(data) < data_len:
-        # Partial data — common when a large response is truncated by a
-        # BT proxy with a limited notification buffer. Return what we have;
-        # decode_data_buf handles truncated records gracefully.  Logged at
-        # debug: this is routine through ESPHome proxies (documented
-        # limitation) and would otherwise flood the HA log.
-        _LOGGER.debug(
-            "VS data truncated: received %d of %d bytes", len(data), data_len
-        )
-    elif len(data) > data_len:
+    if len(data) != data_len:
         raise ValueError(
             f"VS data length mismatch: got {len(data)} bytes, expected {data_len}"
         )
@@ -777,6 +772,11 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
 
 # ── Gamma spectrum ────────────────────────────────────────────────────────────
 
+# Firmware 4.00 and newer use 1024 channels for the 10x / 110 models.
+# https://radiacode.com/changelog?lang=en
+SPECTRUM_CHANNELS = 1024
+
+
 @dataclass
 class Spectrum:
     """A gamma spectrum snapshot.
@@ -789,7 +789,7 @@ class Spectrum:
     a1: float              # calibration: linear term, keV/channel
     a2: float              # calibration: quadratic term, keV/channel²
     counts: list[int] = field(default_factory=list)
-    truncated: bool = False  # True when the BLE transfer was cut short
+    truncated: bool = False  # True when fewer than all 1024 channels arrived
 
 
 def channel_to_kev(channel: int, a0: float, a1: float, a2: float) -> float:
@@ -800,18 +800,18 @@ def channel_to_kev(channel: int, a0: float, a1: float, a2: float) -> float:
 def parse_spec_format_version(config_text: str) -> int:
     """Extract SpecFormatVersion from the device configuration text.
 
-    Falls back to 1 when the line is absent — all firmware this
-    integration supports (≥4.8) uses format version 1, and the
-    configuration text can be truncated by BT-proxy transfers.
+    Falls back to 0 when the line is absent or malformed, matching the
+    upstream cdump/radiacode client. Firmware version alone does not
+    select the spectrum encoding.
     """
     for line in config_text.splitlines():
-        if line.startswith("SpecFormatVersion"):
-            _, _, value = line.partition("=")
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == "SpecFormatVersion":
             try:
                 return int(value.strip())
             except ValueError:
                 break
-    return 1
+    return 0
 
 
 def decode_spectrum(data: bytes, format_version: int) -> Spectrum:
@@ -824,52 +824,73 @@ def decode_spectrum(data: bytes, format_version: int) -> Spectrum:
                  `count` values encoded per vlen (0=zero, 1=uint8,
                  2/3/5=delta int8/int16/int32, 4=delta int24)
 
-    A transfer truncated by the BT-proxy notification buffer decodes
-    cleanly up to the cut and is flagged ``truncated`` — leading
-    channels (where most background counts live) are still usable.
+    Encoding follows cdump/radiacode's spectrum decoder. An incomplete
+    transfer retains complete leading channels and is flagged
+    ``truncated``, including a cut exactly between groups or values.
 
-    Raises ValueError if even the 16-byte header is incomplete.
+    Raises ValueError for an incomplete header, unknown format, invalid
+    groups, non-finite calibration, or impossible channel counts.
     """
+    if format_version not in (0, 1):
+        raise ValueError(f"Unsupported spectrum format version: {format_version}")
+
     buf = _Buf(data)
     duration_s, a0, a1, a2 = buf.unpack("<Ifff")
+    if not all(math.isfinite(value) for value in (a0, a1, a2)):
+        raise ValueError("Spectrum calibration coefficients must be finite")
 
     counts: list[int] = []
     truncated = False
 
     if format_version == 0:
+        if buf.remaining() > SPECTRUM_CHANNELS * 4:
+            raise ValueError("Spectrum contains more than 1024 channels")
         while buf.remaining() >= 4:
             counts.append(buf.unpack("<I")[0])
         truncated = buf.remaining() > 0
     else:
         last = 0
-        try:
-            while buf.remaining() > 0:
-                (group,) = buf.unpack("<H")
-                n_values = (group >> 4) & 0x0FFF
-                vlen = group & 0x0F
-                for _ in range(n_values):
-                    if vlen == 0:
-                        v = 0
-                    elif vlen == 1:
-                        (v,) = buf.unpack("<B")
-                    elif vlen == 2:
-                        v = last + buf.unpack("<b")[0]
-                    elif vlen == 3:
-                        v = last + buf.unpack("<h")[0]
-                    elif vlen == 4:
-                        lo, mid, hi = buf.unpack("<BBb")
-                        v = last + ((hi << 16) | (mid << 8) | lo)
-                    elif vlen == 5:
-                        v = last + buf.unpack("<i")[0]
-                    else:
-                        _LOGGER.warning(
-                            "Spectrum decode: unsupported vlen=%d; stopping", vlen
-                        )
-                        raise ValueError("unsupported vlen")
-                    last = v
-                    counts.append(v)
-        except ValueError:
-            truncated = True
+        value_sizes = (0, 1, 1, 2, 3, 4)
+        while buf.remaining() > 0:
+            if len(counts) == SPECTRUM_CHANNELS:
+                raise ValueError("Spectrum contains trailing data after 1024 channels")
+            if buf.remaining() < 2:
+                truncated = True
+                break
+            (group,) = buf.unpack("<H")
+            n_values = group >> 4
+            vlen = group & 0x0F
+            if vlen > 5:
+                raise ValueError(f"Unsupported spectrum value encoding: vlen={vlen}")
+            if n_values == 0:
+                raise ValueError("Spectrum group contains zero channels")
+            if len(counts) + n_values > SPECTRUM_CHANNELS:
+                raise ValueError("Spectrum contains more than 1024 channels")
+            for _ in range(n_values):
+                if buf.remaining() < value_sizes[vlen]:
+                    truncated = True
+                    break
+                if vlen == 0:
+                    v = 0
+                elif vlen == 1:
+                    (v,) = buf.unpack("<B")
+                elif vlen == 2:
+                    v = last + buf.unpack("<b")[0]
+                elif vlen == 3:
+                    v = last + buf.unpack("<h")[0]
+                elif vlen == 4:
+                    lo, mid, hi = buf.unpack("<BBb")
+                    v = last + ((hi << 16) | (mid << 8) | lo)
+                else:
+                    v = last + buf.unpack("<i")[0]
+                if not 0 <= v <= 0xFFFFFFFF:
+                    raise ValueError(f"Spectrum count outside uint32 range: {v}")
+                last = v
+                counts.append(v)
+            if truncated:
+                break
+
+    truncated = truncated or len(counts) < SPECTRUM_CHANNELS
 
     return Spectrum(
         duration_s=duration_s,

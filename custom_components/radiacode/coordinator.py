@@ -87,10 +87,14 @@ _LOGGER = logging.getLogger(__name__)
 _RETRY_DELAY = 2.0
 
 
-# Read the device-health diagnostics batch every N polls (~once per minute
-# at the default 5 s interval).  These values change slowly and each read
-# costs a BLE round-trip.
-_DIAG_POLL_EVERY = 12
+# Settings and device health change slowly. Keep these reads off the fast
+# radiation polling path; use elapsed time so changing the poll interval
+# doesn't inadvertently increase Bluetooth traffic.
+_SETTINGS_INTERVAL = 60.0
+_DIAGNOSTICS_INTERVAL = 60.0
+_IDENTITY_RETRY_INTERVAL = 60.0
+_SPECTRUM_RETRY_MIN = 300.0
+_SPECTRUM_RETRY_MAX = 3600.0
 
 
 @dataclass
@@ -119,15 +123,15 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             update_interval=timedelta(seconds=poll_interval),
         )
 
-        # Spectrum polling cadence, expressed in poll cycles.  0 disables.
+        self._entry_id = entry.entry_id
+        # Spectrum polling cadence in elapsed seconds. 0 disables.
         spectrum_interval = entry.options.get(
             CONF_SPECTRUM_INTERVAL, DEFAULT_SPECTRUM_INTERVAL
         )
-        self._spectrum_polls: Optional[int] = (
-            max(1, round(spectrum_interval / poll_interval))
-            if spectrum_interval > 0
-            else None
-        )
+        self._spectrum_interval = float(spectrum_interval)
+        self._next_spectrum_read = 0.0
+        self._spectrum_retry_delay = max(_SPECTRUM_RETRY_MIN, self._spectrum_interval)
+        self._last_spectrum_error: Optional[str] = None
         self._address: str = entry.data[CONF_ADDRESS]
         self._client = RadiaCodeBLEClient()
 
@@ -152,18 +156,17 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._dose_rate_filter = SpikeFilter(factor=50.0, pass_below=5.0)
         self._count_rate_filter = SpikeFilter(factor=50.0, pass_below=100.0)
 
-        # Cache device settings; updated every poll, kept on read failure.
+        # Cache device settings between minute reads and keep them on failure.
         self._last_settings: RadiaCodeSettings = RadiaCodeSettings()
+        self._next_settings_read = 0.0
 
-        # Device-health diagnostics; read every _DIAG_POLL_EVERY polls and
-        # cached in between (the values change slowly).
+        # Device-health diagnostics are cached between once-per-minute reads.
         self._last_diagnostics: RadiaCodeDiagnostics = RadiaCodeDiagnostics()
-        self._polls_since_diag: int = _DIAG_POLL_EVERY  # read on first poll
+        self._next_diagnostics_read = 0.0
 
-        # Gamma spectrum; read every _spectrum_polls polls (options-driven)
+        # Gamma spectrum; read on its own slower cadence (options-driven)
         # and cached in between — the heaviest BLE transfer we perform.
         self._last_spectrum: Optional[Spectrum] = None
-        self._polls_since_spectrum: int = 10**9  # read on first eligible poll
 
         # Set to True when the user explicitly disconnects via the connection
         # switch.  Polling is suspended until the user turns it back on.
@@ -172,6 +175,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # ── Device identity (fetched once on first successful connection) ──
         self._serial_number: Optional[str] = None
         self._fw_version: Optional[str] = None
+        self._next_identity_read = 0.0
 
         # Device's self-describing SFR register directory (fetched once,
         # alongside identity).  Logged at debug and exposed in diagnostics.
@@ -227,6 +231,20 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         """The device's SFR register directory text, or None if unread."""
         return self._sfr_file
 
+    @property
+    def spectrum_status(self) -> dict:
+        """Summarize spectrum polling without copying the large histogram."""
+        return {
+            "poll_interval": self._spectrum_interval,
+            "format_version": self._client.spectrum_format_version,
+            "last_error": self._last_spectrum_error,
+            "channel_count": len(self._last_spectrum.counts) if self._last_spectrum else 0,
+            "duration_s": self._last_spectrum.duration_s if self._last_spectrum else None,
+            "truncated": self._last_spectrum.truncated if self._last_spectrum else None,
+            "retry_in_seconds": max(0.0, self._next_spectrum_read - time.monotonic())
+            if self._spectrum_interval > 0 else None,
+        }
+
     async def async_shutdown(self) -> None:
         """Stop polling and tear down the BLE connection.
 
@@ -255,6 +273,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         which will re-establish the BLE connection on the next poll cycle.
         """
         self._user_disconnected = False
+        self._next_spectrum_read = 0.0
         await self.async_request_refresh()
 
     async def _async_update_data(self) -> RadiaCodeCoordinatorData:
@@ -364,49 +383,60 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             hardness=compute_hardness(dose_rate, count_rate),
         )
 
-        # Read device settings — small BLE response (~60 bytes).
-        # On failure, keep the last known values so entity states stay valid.
-        try:
-            self._last_settings = await self._client.get_settings()
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Settings read failed, using cached values: %s", err)
+        # Identity is fetched before the first spectrum. The client resolves
+        # the spectrum wire format before decoding its first histogram.
+        if (
+            self._serial_number is None
+            and self._client.is_connected
+            and time.monotonic() >= self._next_identity_read
+        ):
+            self._next_identity_read = time.monotonic() + _IDENTITY_RETRY_INTERVAL
+            await self._fetch_device_identity()
+        self._check_user_disconnected("after identity")
 
-        # Read device-health diagnostics roughly once per minute; the
-        # values change slowly and each read costs a BLE round-trip.
-        self._polls_since_diag += 1
-        if self._polls_since_diag >= _DIAG_POLL_EVERY:
+        # Refresh settings after an HA write, otherwise once per minute.
+        if self._client.is_connected and time.monotonic() >= self._next_settings_read:
+            self._next_settings_read = time.monotonic() + _SETTINGS_INTERVAL
+            try:
+                self._last_settings = await self._client.get_settings()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Settings read failed, using cached values: %s", err)
+        self._check_user_disconnected("after settings")
+
+        if self._client.is_connected and time.monotonic() >= self._next_diagnostics_read:
+            self._next_diagnostics_read = time.monotonic() + _DIAGNOSTICS_INTERVAL
             try:
                 self._last_diagnostics = await self._client.get_diagnostics()
-                self._polls_since_diag = 0
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Diagnostics read failed, using cached values: %s", err)
-                self._polls_since_diag = 0  # don't hammer a failing batch
+        self._check_user_disconnected("after diagnostics")
 
         # Read the gamma spectrum on its own (slower) cadence — the largest
         # BLE transfer we perform.  On failure, keep the previous snapshot.
-        if self._spectrum_polls is not None:
-            self._polls_since_spectrum += 1
-            if self._polls_since_spectrum >= self._spectrum_polls:
-                self._polls_since_spectrum = 0
-                try:
-                    self._last_spectrum = await self._client.get_spectrum()
-                    if self._last_spectrum.truncated:
-                        _LOGGER.debug(
-                            "Spectrum transfer truncated at %d channels "
-                            "(BT proxy notification buffer)",
-                            len(self._last_spectrum.counts),
-                        )
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.debug(
-                        "Spectrum read failed, keeping previous snapshot: %s", err
-                    )
-
-        # Fetch serial number and firmware version once per connection
-        # lifecycle.  These are static — they never change while the device
-        # is running — so we only read them on the first successful poll
-        # after a fresh connection and then update the HA device registry.
-        if self._serial_number is None and self._client.is_connected:
-            await self._fetch_device_identity()
+        if (
+            self._client.is_connected
+            and self._spectrum_interval > 0
+            and time.monotonic() >= self._next_spectrum_read
+        ):
+            try:
+                self._last_spectrum = await self._client.get_spectrum()
+            except Exception as err:  # noqa: BLE001
+                self._last_spectrum_error = str(err)
+                self._next_spectrum_read = time.monotonic() + self._spectrum_retry_delay
+                _LOGGER.warning(
+                    "Spectrum read failed; keeping previous snapshot and retrying "
+                    "in %.0f seconds: %s", self._spectrum_retry_delay, err,
+                )
+                self._spectrum_retry_delay = min(
+                    _SPECTRUM_RETRY_MAX, self._spectrum_retry_delay * 2
+                )
+            else:
+                self._last_spectrum_error = None
+                self._next_spectrum_read = time.monotonic() + self._spectrum_interval
+                self._spectrum_retry_delay = max(
+                    _SPECTRUM_RETRY_MIN, self._spectrum_interval
+                )
+        self._check_user_disconnected("after spectrum")
 
         self._last_error = None
         self._last_poll_duration = time.monotonic() - poll_start
@@ -422,27 +452,31 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         """Fetch serial number and firmware version, then update the registry.
 
         Called once after the first successful BLE poll.  On failure (e.g.
-        intermittent BLE glitch) the values stay None and we retry on the
-        next poll cycle.
+        intermittent BLE glitch) the values stay None and we retry after
+        the identity read cooldown.
         """
         try:
             self._serial_number = await self._client.get_serial_number()
+            self._check_user_disconnected("after serial number")
             self._fw_version = await self._client.get_firmware_version()
+            self._check_user_disconnected("after firmware version")
             _LOGGER.debug(
                 "Device identity: serial=%s  firmware=%s",
                 self._serial_number,
                 self._fw_version,
             )
+        except UpdateFailed:
+            raise
         except Exception:  # noqa: BLE001
-            _LOGGER.debug("Failed to fetch serial/firmware (will retry next poll)")
+            _LOGGER.debug("Failed to fetch serial/firmware (will retry after cooldown)")
             self._serial_number = None  # ensure we retry
             return
 
         # Read the device's self-describing SFR register directory — an
         # ASCII listing of every register with address, size, type, and
         # signedness.  One-time read; failure is non-fatal (the listing is
-        # informational).  Through a BT proxy the transfer may be truncated
-        # by the notification buffer; a partial listing is still useful.
+        # informational). A failed transfer releases its connection; no
+        # partial listing is accepted.
         if self._sfr_file is None:
             try:
                 self._sfr_file = await self._client.get_sfr_file()
@@ -465,15 +499,18 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("SFR directory read failed (non-fatal): %s", err)
-
-        # Refine the spectrum wire format from the device configuration
-        # (non-fatal; the client defaults to format 1 used by FW ≥4.8).
-        await self._client.refresh_spectrum_format()
+        self._check_user_disconnected("after register directory")
 
         # Push the serial number and firmware version into the HA device
         # registry so they appear on the device info card.
         registry = dr.async_get(self.hass)
-        device = registry.async_get_device(identifiers={(DOMAIN, self._address)})
+        if hasattr(registry, "async_get_device_by_identifier"):
+            device = registry.async_get_device_by_identifier(
+                (DOMAIN, self._address), self._entry_id
+            )
+        else:
+            # Compatibility with HA versions predating the 2026.8 registry API.
+            device = registry.async_get_device(identifiers={(DOMAIN, self._address)})
         if device is not None:
             registry.async_update_device(
                 device.id,
@@ -632,6 +669,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
 
         Raises UpdateFailed if the write fails or the device rejects the value.
         """
+        self._check_user_disconnected("write setting")
         if not self._client.is_connected:
             raise UpdateFailed("Cannot write setting: device not connected")
 
@@ -648,6 +686,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             )
 
         # Trigger an immediate refresh so the new value shows up in the UI.
+        self._next_settings_read = 0.0
         await self.async_request_refresh()
 
     async def async_reset_dose(self) -> None:
@@ -657,6 +696,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         to zero immediately instead of showing the stale pre-reset value
         until the next RareData record arrives (~1 minute later).
         """
+        self._check_user_disconnected("reset dose")
         if not self._client.is_connected:
             raise UpdateFailed("Cannot reset dose: device not connected")
 
@@ -677,6 +717,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         Clears the cached snapshot and schedules a fresh spectrum read on
         the next poll so the sensor reflects the reset promptly.
         """
+        self._check_user_disconnected("reset spectrum")
         if not self._client.is_connected:
             raise UpdateFailed("Cannot reset spectrum: device not connected")
 
@@ -689,7 +730,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             raise UpdateFailed("Device rejected the spectrum reset")
 
         self._last_spectrum = None
-        self._polls_since_spectrum = 10**9  # re-read on next poll
+        self._last_spectrum_error = None
+        self._next_spectrum_read = 0.0
         await self.async_request_refresh()
 
     async def async_get_spectrum(self, accumulated: bool = False) -> Spectrum:
@@ -698,6 +740,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         Raises UpdateFailed when the device is not connected or the read
         fails; the caller converts this into a service error.
         """
+        self._check_user_disconnected("read spectrum")
         if not self._client.is_connected:
             raise UpdateFailed("Cannot read spectrum: device not connected")
         try:

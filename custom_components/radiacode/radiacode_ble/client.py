@@ -19,7 +19,8 @@ BLE notification reassembly
 Responses arrive in one or more BLE notify packets. The first packet
 carries a 4-byte signed length prefix; subsequent packets are
 continuations. We accumulate packets into _resp_buf until the
-declared number of bytes is received, then set _notify_event.
+declared number of bytes is received.  _notify_event signals progress or a
+connection drop; no partial frame is returned as a successful reply.
 
 Command sequencing
 ──────────────────
@@ -40,7 +41,8 @@ Connection resilience
 ─────────────────────
 Reconnecting after a dropped BLE link requires careful teardown of
 the old BleakClient:
-  • stop_notify() on the old client prevents ghost _on_notify callbacks
+  • Callbacks are scoped to their originating client to ignore stale events
+  • Incomplete or cancelled exchanges retire the connection before reuse
   • Notification reassembly state (_resp_buf, _resp_total) is reset
   • _client is set to None *before* the slow disconnect() call so
     is_connected returns False immediately, avoiding rapid retry loops
@@ -107,16 +109,17 @@ _LOGGER = logging.getLogger(__name__)
 # Maximum bytes per write (BLE MTU constraint; both cdump and mkgeiger use 18)
 _WRITE_CHUNK = 18
 
-# Hard deadline — no single command should ever exceed this wall-clock time.
-# With response=False writes completing instantly, this timeout only applies
-# to waiting for notification replies.
+# One deadline covers all command writes and response notifications.
+# Failed transports are then disconnected with a separate bounded cleanup.
 _CMD_TIMEOUT = 10.0
 
-# If no new BLE notification arrives for this many seconds *after* the first
-# packet, assume the BT proxy notification buffer is exhausted and return
-# whatever partial data we have.  Typical inter-packet gaps are <300 ms, so
-# 2 s of silence is a clear stall signal.
+# A response that stops mid-frame cannot safely be followed by another
+# command: its late continuations have no framing header of their own.
+# Retire the connection after this much silence instead of returning a prefix.
 _STALL_TIMEOUT = 2.0
+
+_DISCONNECT_TIMEOUT = 5.0
+_TEMPERATURE_INTERVAL = 60.0
 
 # establish_connection() timeout per attempt.  15 s is generous for a BT
 # proxy hop; if the ESP32 can't connect in this window the slot is likely
@@ -135,15 +138,21 @@ class RadiaCodeBLEClient:
 
     def __init__(self) -> None:
         self._client: Optional[BleakClient] = None
+        # External disconnect invalidates reconnect work already queued or
+        # awaiting backend cleanup/establishment.  Internal cleanup does not.
+        self._disconnect_generation: int = 0
         self._seq: int = 0
         self._base_time: Optional[datetime.datetime] = None
 
         # Notification reassembly state
         self._resp_buf: bytearray = bytearray()
         # _resp_total tracks the total frame bytes still expected:
-        #   0 = idle (not waiting), >0 = bytes remaining
+        #   0 = idle or complete, >0 = bytes remaining
         self._resp_total: int = 0
         self._notify_event: asyncio.Event = asyncio.Event()
+        self._response_started: bool = False
+        self._response_error: Optional[Exception] = None
+        self._last_notification: Optional[float] = None
 
         # Guard: _on_notify ignores packets arriving when no command is in-flight.
         self._expecting_response: bool = False
@@ -157,17 +166,26 @@ class RadiaCodeBLEClient:
         # corrupting the shared notification reassembly state.
         self._cmd_lock: asyncio.Lock = asyncio.Lock()
 
-        # Spectrum wire format; all supported firmware (≥4.8) uses 1.
-        # Refined from the device configuration via refresh_spectrum_format().
-        self._spectrum_format_version: int = 1
+        # Upstream defaults to format 0 when the configuration omits the key.
+        # Discover the actual format before the first spectrum read per link.
+        self._spectrum_format_version: int = 0
+        self._spectrum_format_loaded: bool = False
+
+        # Temperature changes slowly; DATA_BUF also carries RareData samples.
+        # Avoid a separate register command on every regular sensor poll.
+        self._temperature: Optional[float] = None
+        self._last_temperature_read: Optional[float] = None
 
     # ── Connection management ─────────────────────────────────────────────────
 
     def _reset_notification_state(self) -> None:
-        """Clear all notification reassembly state.  Safe to call at any time."""
+        """Reset state for a new connection while holding the command lock."""
         self._resp_buf = bytearray()
         self._resp_total = 0
         self._notify_event.clear()
+        self._response_started = False
+        self._response_error = None
+        self._last_notification = None
         self._expecting_response = False
         self._disconnected_event.clear()
 
@@ -176,8 +194,8 @@ class RadiaCodeBLEClient:
         Connect to a RadiaCode device and run the required init sequence.
 
         If a previous BleakClient exists (stale connection), it is torn down
-        first — notifications are stopped and the client disconnected — to
-        prevent ghost _on_notify callbacks from a dead transport.
+        first.  Notifications from retired clients are ignored, including
+        callbacks already queued before the old transport disconnected.
 
         The init sequence (SET_EXCHANGE → SET_TIME → DEVICE_TIME=0) must be
         completed before the device streams data_buf records.
@@ -188,25 +206,37 @@ class RadiaCodeBLEClient:
                 ``step`` identifies which sub-step failed so the coordinator
                 can surface it to the user (issue #9: early RC-101 hardware).
         """
-        # ── Tear down any previous client to prevent double _on_notify ──────
-        old = self._client
-        self._client = None          # is_connected → False immediately
-        if old is not None:
+        # Keep reconnect/init separate from controls and polls.  Init calls
+        # the locked command helper because this lock is already held.
+        generation = self._disconnect_generation
+        async with self._cmd_lock:
+            self._check_connect_generation(generation)
             try:
-                await asyncio.wait_for(
-                    old.stop_notify(NOTIFY_CHAR_UUID), timeout=5.0
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                await asyncio.wait_for(old.disconnect(), timeout=5.0)
-            except Exception:  # noqa: BLE001
-                pass
-            _LOGGER.debug("Tore down previous BLE client before reconnect")
+                await self._connect_locked(ble_device, generation)
+            except BaseException:
+                # Failed or cancelled init must release the peripheral too.
+                await self._retire_current_client()
+                raise
 
-        # ── Reset all state for the new connection ──────────────────────────
+    def _check_connect_generation(self, generation: int) -> None:
+        """Abort connection work superseded by an explicit disconnect."""
+        if generation != self._disconnect_generation:
+            raise ConnectionError("BLE connection cancelled by disconnect")
+
+    async def _connect_locked(
+        self, ble_device: BLEDevice, generation: int
+    ) -> None:
+        """Connect and initialise while holding the command lock."""
+        await self._retire_current_client()
+        self._check_connect_generation(generation)
+
         self._seq = 0
         self._reset_notification_state()
+        self._spectrum_format_version = 0
+        self._spectrum_format_loaded = False
+        # Preserve the optional temperature deadline across reconnects.
+        # Repeated failed temperature reads must not force every poll to
+        # disconnect/reinitialise an otherwise usable radiation data stream.
 
         # Pass the disconnected callback via establish_connection.
         # ``BleakClient.set_disconnected_callback`` was deprecated in bleak
@@ -220,6 +250,7 @@ class RadiaCodeBLEClient:
             max_attempts=2,   # allow one internal retry; coordinator adds another layer
             timeout=_CONNECT_TIMEOUT,
         )
+        self._check_connect_generation(generation)
 
         # ── Verify the device exposes the expected RadiaCode service ────────
         # Early RC-101 hardware (~2019) sometimes connects but doesn't expose
@@ -246,17 +277,27 @@ class RadiaCodeBLEClient:
             ble_device.address, mtu, len(service_uuids),
         )
 
+        client = self._client
         try:
-            await self._client.start_notify(NOTIFY_CHAR_UUID, self._on_notify)
+            # Bind the originating client into the callback.  A callback
+            # already queued by a retired transport must not touch new state.
+            await asyncio.wait_for(
+                client.start_notify(
+                    NOTIFY_CHAR_UUID,
+                    lambda sender, data: self._on_client_notify(client, sender, data),
+                ),
+                timeout=_CMD_TIMEOUT,
+            )
         except Exception as err:
             raise RadiaCodeInitError("start_notify", err) from err
+        self._check_connect_generation(generation)
 
         # ── Init sequence (mirrors cdump RadiaCode.__init__) ──────────────────
         # Each step is wrapped so the coordinator can surface which part of
         # init failed (e.g. "RC-101 didn't reply to SET_EXCHANGE").
         # 1. Handshake — device expects this exact payload before responding to data
         try:
-            await self._execute(CMD.SET_EXCHANGE, b"\x01\xff\x12\xff")
+            await self._execute_locked(CMD.SET_EXCHANGE, b"\x01\xff\x12\xff")
         except Exception as err:
             raise RadiaCodeInitError("set_exchange", err) from err
 
@@ -268,13 +309,13 @@ class RadiaCodeBLEClient:
             now.second, now.minute, now.hour, 0,
         )
         try:
-            await self._execute(CMD.SET_TIME, time_payload)
+            await self._execute_locked(CMD.SET_TIME, time_payload)
         except Exception as err:
             raise RadiaCodeInitError("set_time", err) from err
 
         # 3. Zero out DEVICE_TIME VSFR
         try:
-            await self._execute(
+            await self._execute_locked(
                 CMD.WR_VIRT_SFR,
                 struct.pack("<II", int(VSFR.DEVICE_TIME), 0),
             )
@@ -285,64 +326,67 @@ class RadiaCodeBLEClient:
         # cdump sets this to now+128 s during init.
         self._base_time = datetime.datetime.now() + datetime.timedelta(seconds=128)
 
-        # Drain any stale data_buf records accumulated while disconnected.
-        # The first read after a fresh connection returns ALL records buffered
-        # on the device (often 1000+ bytes / 50+ notification packets), which
-        # overflows the ESPHome BT proxy's notification buffer.  By draining
-        # here, subsequent poll reads are small (5 s worth of data ≈ 5 records).
-        # A partial/truncated drain is fine — the device clears sent records.
+        # Drain stale records accumulated while disconnected.  The full
+        # framed response must arrive before another command can be sent.
         try:
-            await self._read_vs(VS.DATA_BUF)
+            await self._read_vs_locked(VS.DATA_BUF)
             _LOGGER.debug("Drained stale data_buf after init")
-        except Exception:  # noqa: BLE001
-            _LOGGER.debug("data_buf drain read failed (non-fatal)")
+        except Exception as err:
+            raise RadiaCodeInitError("data_buf", err) from err
 
         _LOGGER.debug(
             "RadiaCode connected and initialised (%s)", ble_device.address
         )
 
     async def disconnect(self) -> None:
-        """Disconnect from the device.  Safe to call even if not connected.
+        """Retire the connection immediately and release its BLE resources.
 
-        Sets _client = None *before* the potentially slow BleakClient.disconnect()
-        so that is_connected returns False immediately, preventing the coordinator
-        from trying to reuse a half-dead connection in a concurrent poll.
+        Wake an in-flight command before waiting for transport cleanup.
+        Notification callbacks from this client are ignored once retired.
+        Bleak automatically stops notifications when disconnecting.
         """
+        self._disconnect_generation += 1
+        await self._retire_current_client()
+
+    async def _retire_current_client(self) -> None:
+        """Clean up a transport without invalidating a queued reconnect."""
         client = self._client
-        self._client = None                     # is_connected → False immediately
-        self._reset_notification_state()
+        self._client = None
+        self._expecting_response = False
+        self._disconnected_event.set()
+        self._notify_event.set()
 
         if client is None:
             return
 
         try:
             await asyncio.wait_for(
-                client.stop_notify(NOTIFY_CHAR_UUID), timeout=5.0
+                client.disconnect(), timeout=_DISCONNECT_TIMEOUT
             )
-        except Exception:  # noqa: BLE001
-            pass
-
-        try:
-            await asyncio.wait_for(client.disconnect(), timeout=5.0)
         except asyncio.TimeoutError:
-            _LOGGER.debug("Disconnect timed out after 5s — forcing cleanup")
+            _LOGGER.debug("Disconnect timed out — client retired")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Ignored error during disconnect: %s", err)
 
     @property
     def is_connected(self) -> bool:
-        return self._client is not None and self._client.is_connected
+        return (
+            self._client is not None
+            and self._client.is_connected
+            and not self._disconnected_event.is_set()
+        )
 
-    def _on_ble_disconnect(self, _client: BleakClient) -> None:
-        """Called by bleak when the BLE transport disconnects.
+    @property
+    def spectrum_format_version(self) -> Optional[int]:
+        """Return the discovered format, or None before configuration is read."""
+        return self._spectrum_format_version if self._spectrum_format_loaded else None
 
-        Sets _disconnected_event so that any in-flight _execute() waiting for
-        notifications can bail out immediately instead of waiting for the full
-        CMD_TIMEOUT.
-        """
+    def _on_ble_disconnect(self, client: BleakClient) -> None:
+        """Wake the current command when its transport disconnects."""
+        if client is not self._client:
+            return
         _LOGGER.debug("BLE disconnect callback fired")
         self._disconnected_event.set()
-        # Also set the notify event so _execute() unblocks from its wait loop.
         self._notify_event.set()
 
     # ── High-level API ────────────────────────────────────────────────────────
@@ -364,36 +408,38 @@ class RadiaCodeBLEClient:
           count_rate       – CPS (from data_buf RealTimeData)
           accumulated_dose – µSv (from data_buf RareData)
           battery          – % (from data_buf RareData, None most polls)
-          temperature      – °C (from VSFR TEMP_degC, fallback to data_buf)
+          temperature      – °C (from RareData or a cached TEMP_degC read)
         """
-        # 1. VSFR batch read — only TEMP_degC works over BLE.
-        #    DR_uR_h and DS_uR are marked invalid in batch reads and return
-        #    retcode=0 for individual reads, so we get those from data_buf.
-        temperature: Optional[float] = None
-        try:
-            vsfr_ids = [VSFR.TEMP_degC]
-            values = await self._read_vsfr_batch(vsfr_ids)
-            if values[0] is not None:
-                temperature = values[0]               # already °C
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("VSFR batch read for TEMP failed: %s", err)
-
-        # 2. data_buf read — primary source for dose_rate, count_rate,
-        #    accumulated_dose, and battery.  The extract_sensor_values()
-        #    function pulls dose_rate from DoseRateDB/RawData/RealTimeData
-        #    records, preferring the first source with a non-zero value.
+        # Read the primary radiation stream first.  A failed optional
+        # temperature read must not discard a complete DATA_BUF sample.
         raw = await self._read_vs(VS.DATA_BUF)
         records = decode_data_buf(raw, self._base_time)
         buf_data = extract_sensor_values(records)
+        now = asyncio.get_running_loop().time()
+        if buf_data.temperature is not None:
+            self._temperature = buf_data.temperature
+            self._last_temperature_read = now
+        elif (
+            self._last_temperature_read is None
+            or now - self._last_temperature_read >= _TEMPERATURE_INTERVAL
+        ):
+            # Set the deadline before sending, including failed attempts.
+            # It survives reconnect so an optional transfer that consistently
+            # stalls is retried at most once a minute instead of every poll.
+            self._last_temperature_read = now
+            try:
+                values = await self._read_vsfr_batch([VSFR.TEMP_degC])
+                if values[0] is not None:
+                    self._temperature = values[0]
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("VSFR batch read for TEMP failed: %s", err)
 
         result = RadiaCodeData(
             dose_rate=buf_data.dose_rate,
             count_rate=buf_data.count_rate,
             accumulated_dose=buf_data.accumulated_dose,
             battery=buf_data.battery,
-            temperature=(
-                temperature if temperature is not None else buf_data.temperature
-            ),
+            temperature=self._temperature,
         )
 
         _LOGGER.debug(
@@ -421,8 +467,8 @@ class RadiaCodeBLEClient:
         """Read all device settings via a single VSFR batch read.
 
         Returns a RadiaCodeSettings with current display, sound, vibration,
-        and alarm threshold values.  The response is ~60 bytes (fits in one
-        BLE notification), so this never hits BT proxy buffer limits.
+        and alarm threshold values.  This is a small response compared
+        with the spectrum and configuration transfers.
         """
         values = await self._read_vsfr_batch(SETTINGS_VSFR_IDS)
         return decode_settings(values)
@@ -433,39 +479,44 @@ class RadiaCodeBLEClient:
         return raw.decode("cp1251", errors="replace")
 
     async def refresh_spectrum_format(self) -> None:
-        """Refine the spectrum format version from the device configuration.
+        """Read and validate the spectrum format from device configuration.
 
-        Non-fatal: on failure the default (format 1, used by all supported
-        firmware) is kept.
+        Transport errors propagate: a partial configuration response cannot
+        establish the format or safely precede another BLE command.
         """
-        try:
-            config = await self.get_configuration()
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug(
-                "Configuration read failed; keeping spectrum format %d: %s",
-                self._spectrum_format_version, err,
-            )
-            return
+        async with self._cmd_lock:
+            await self._refresh_spectrum_format_locked()
+
+    async def _refresh_spectrum_format_locked(self) -> None:
+        """Discover the format while holding the command lock."""
+        raw = await self._read_vs_locked(VS.CONFIGURATION)
+        config = raw.decode("cp1251", errors="replace")
         self._spectrum_format_version = parse_spec_format_version(config)
+        self._spectrum_format_loaded = True
         _LOGGER.debug(
             "Spectrum format version: %d", self._spectrum_format_version
         )
 
     async def get_spectrum(self, accumulated: bool = False) -> Spectrum:
-        """Read the gamma spectrum.
+        """Read a complete, 1024-channel gamma spectrum.
 
-        ``accumulated=False`` returns the current spectrum (since the last
-        spectrum reset); ``accumulated=True`` returns the device's separate
-        accumulated spectrum.
-
-        This is the largest BLE transfer the integration performs; through
-        an ESPHome BT proxy it may be truncated by the notification buffer,
-        in which case the returned Spectrum has ``truncated=True`` and
-        contains the leading channels only.
+        Discover the wire format once per BLE connection before decoding.
+        Keep configuration and spectrum reads on that same connection.
+        Reject an incomplete spectrum so callers can retain a previous
+        complete snapshot and report the transfer error.
         """
-        vs_id = VS.SPEC_ACCUM if accumulated else VS.SPECTRUM
-        raw = await self._read_vs(vs_id)
-        return decode_spectrum(raw, self._spectrum_format_version)
+        async with self._cmd_lock:
+            if not self._spectrum_format_loaded:
+                await self._refresh_spectrum_format_locked()
+            vs_id = VS.SPEC_ACCUM if accumulated else VS.SPECTRUM
+            raw = await self._read_vs_locked(vs_id)
+            spectrum = decode_spectrum(raw, self._spectrum_format_version)
+            if spectrum.truncated or len(spectrum.counts) != 1024:
+                raise ValueError(
+                    "Incomplete RadiaCode spectrum: "
+                    f"received {len(spectrum.counts)} of 1024 channels"
+                )
+            return spectrum
 
     async def reset_spectrum(self) -> bool:
         """Reset the current spectrum accumulation.  Returns True on success."""
@@ -479,9 +530,8 @@ class RadiaCodeBLEClient:
 
         Returns an ASCII listing of every Special Function Register the
         firmware supports — address, size, type, and signedness.  The
-        listing can be several KB; through an ESPHome BT proxy the
-        transfer may be truncated by the notification buffer limit, in
-        which case a partial listing is returned.
+        listing can be several KB.  Incomplete transfers raise an error
+        and retire the connection rather than returning a partial listing.
         """
         raw = await self._read_vs(VS.SFR_FILE)
         return decode_sfr_file(raw)
@@ -508,110 +558,80 @@ class RadiaCodeBLEClient:
 
     # ── Notification handler ──────────────────────────────────────────────────
 
-    def _on_notify(self, _sender: int, data: bytearray) -> None:
-        """
-        Accumulate BLE notification packets into a complete response.
+    def _on_client_notify(
+        self, client: BleakClient, sender: object, data: bytearray
+    ) -> None:
+        """Ignore callbacks queued by a transport that has been retired."""
+        if client is self._client:
+            self._on_notify(sender, data)
 
-        First packet format: [int32_le body_len] [body_len bytes... (partial)]
-        Subsequent packets:  continuation of the body.
+    def _on_notify(self, _sender: object, data: bytearray) -> None:
+        """Assemble one strictly framed reply and wake the command on progress.
 
-        Sets _notify_event when all expected bytes have arrived.
+        The first packet starts with an int32 little-endian body length;
+        continuation packets carry only body bytes.  Reject malformed
+        lengths and overflows instead of treating them as complete frames.
         """
-        # Guard: ignore notifications that arrive after the command has been
-        # completed/timed-out, or from a ghost callback of a dead BleakClient.
-        if not self._expecting_response:
-            _LOGGER.debug(
-                "_on_notify: ignoring %d bytes (no command in-flight)", len(data)
-            )
+        if not self._expecting_response or self._response_error is not None:
+            return
+        if self._response_started and self._resp_total == 0:
             return
 
-        _LOGGER.debug(
-            "_on_notify: %d bytes, resp_total_before=%d, buf_len=%d, data=%s",
-            len(data),
-            self._resp_total,
-            len(self._resp_buf),
-            data[:16].hex(),
-        )
-
-        if self._resp_total == 0:
-            # First packet — extract the declared body length
+        if not self._response_started:
             if len(data) < 4:
-                _LOGGER.warning(
-                    "Undersized first BLE notification: %d bytes, need ≥4", len(data)
+                self._response_error = ValueError(
+                    f"BLE response length header too short: {len(data)} bytes"
                 )
-                return
-
-            (body_len,) = struct.unpack_from("<i", data, 0)
-            if body_len < 0:
-                _LOGGER.warning(
-                    "Corrupt first BLE notification: negative body length %d; "
-                    "ignoring packet", body_len,
-                )
-                return
-            # Total frame = 4-byte header + body
-            self._resp_total = 4 + body_len
-            self._resp_buf = bytearray(data[4:])
-            _LOGGER.debug(
-                "_on_notify: first packet, body_len=%d, resp_total=%d",
-                body_len,
-                self._resp_total,
-            )
+            else:
+                (body_len,) = struct.unpack_from("<i", data, 0)
+                if body_len < 4:
+                    self._response_error = ValueError(
+                        f"Invalid BLE response body length: {body_len}"
+                    )
+                else:
+                    self._response_started = True
+                    self._resp_total = body_len
+                    self._resp_buf.extend(data[4:])
+                    self._resp_total -= len(data) - 4
         else:
-            # Continuation packet
             self._resp_buf.extend(data)
-
-        self._resp_total -= len(data)
+            self._resp_total -= len(data)
 
         if self._resp_total < 0:
-            _LOGGER.warning(
-                "BLE response overflow by %d bytes; clamping", -self._resp_total
+            self._response_error = ValueError(
+                f"BLE response overflow by {-self._resp_total} bytes"
             )
-            self._resp_total = 0
-
-        if self._resp_total == 0:
-            _LOGGER.debug("_on_notify: response complete, setting event")
-            self._notify_event.set()
+        self._last_notification = asyncio.get_running_loop().time()
+        self._notify_event.set()
 
     # ── Low-level command execution ───────────────────────────────────────────
 
     async def _execute(self, cmd: int, args: bytes = b"") -> bytes:
-        """
-        Send one command and return the response payload (echo header stripped).
-
-        The _cmd_lock ensures only one command is in-flight at a time.
-        Without this, a UI-triggered write (switch toggle, number change)
-        could overlap with a coordinator poll, corrupting the shared
-        notification reassembly state (_resp_buf / _notify_event).
-
-        Steps:
-          1. Acquire _cmd_lock (serialize with other commands).
-          2. Allocate the next sequence number.
-          3. Reset notification state.
-          4. Write the framed packet in _WRITE_CHUNK-byte pieces.
-          5. Await the notify event (up to _CMD_TIMEOUT seconds).
-          6. Verify the echo header and return the payload.
-        """
+        """Serialize commands, then return one complete validated reply."""
         async with self._cmd_lock:
             return await self._execute_locked(cmd, args)
 
     async def _execute_locked(self, cmd: int, args: bytes = b"") -> bytes:
-        """Inner _execute body, called with _cmd_lock held."""
-        # Capture the client reference once — disconnect() can set
-        # self._client = None at any await point while we hold the lock.
+        """Run one command while holding the lock, retiring unsafe transports.
+
+        Write failures, cancellations and incomplete responses leave the
+        stream position unknown.  Disconnect before the lock is released so
+        a late continuation cannot be interpreted as another frame header.
+        """
         client = self._client
-        if client is None:
+        if client is None or not self.is_connected:
             raise ConnectionError(
                 f"Not connected — cannot send command {cmd:#06x}"
             )
 
         seq = self._seq
         self._seq = (self._seq + 1) % 32
-
         packet = build_command(cmd, seq, args)
-
-        # Reset reassembly state before writing (no race — same event loop)
         self._resp_buf = bytearray()
         self._resp_total = 0
+        self._response_started = False
+        self._response_error = None
+        self._last_notification = None
         self._notify_event.clear()
         self._expecting_response = True
 
@@ -620,96 +640,76 @@ class RadiaCodeBLEClient:
             cmd, seq, packet.hex(), len(packet),
         )
 
-        # Write in chunks to respect BLE MTU.
-        # Use response=False (ATT Write Command / Write Without Response).
-        # Through ESPHome BT proxies, ATT Write Requests (response=True)
-        # can hang for 10+ seconds because the Write Response from the
-        # device doesn't reliably traverse the proxy relay — even while
-        # the device successfully processes the command and sends
-        # notification data.  Write Without Response is fire-and-forget;
-        # we verify the command was processed by the notification reply.
-        for offset in range(0, len(packet), _WRITE_CHUNK):
-            chunk = packet[offset: offset + _WRITE_CHUNK]
-            _LOGGER.debug("_execute: writing chunk offset=%d len=%d", offset, len(chunk))
-            if self._disconnected_event.is_set():
-                raise ConnectionError(
-                    f"BLE disconnected before write for cmd {cmd:#06x} (seq={seq})"
-                )
-            await client.write_gatt_char(WRITE_CHAR_UUID, chunk, response=False)
-            _LOGGER.debug("_execute: chunk write complete")
+        try:
+            # This includes writes: even a Write Without Response operation
+            # can stall in the host/proxy backend before it queues the bytes.
+            async with asyncio.timeout(_CMD_TIMEOUT):
+                for offset in range(0, len(packet), _WRITE_CHUNK):
+                    if self._disconnected_event.is_set() or self._client is not client:
+                        raise ConnectionError(
+                            f"BLE disconnected during command {cmd:#06x} (seq={seq})"
+                        )
+                    await client.write_gatt_char(
+                        WRITE_CHAR_UUID,
+                        packet[offset: offset + _WRITE_CHUNK],
+                        response=False,
+                    )
 
-        _LOGGER.debug("_execute: all chunks written, waiting for notify")
+                while True:
+                    if self._disconnected_event.is_set() or self._client is not client:
+                        raise ConnectionError(
+                            f"BLE connection lost during command {cmd:#06x} (seq={seq})"
+                        )
+                    if self._response_error is not None:
+                        raise self._response_error
+                    if self._response_started and self._resp_total == 0:
+                        return parse_response_body(bytes(self._resp_buf), cmd, seq)
 
-        # Wait for the complete response with stall detection.
-        # ESPHome BT proxies can only forward ~28 BLE notification packets
-        # before their buffer fills. For large DATA_BUF responses (50+
-        # packets), notifications stop mid-stream. Instead of waiting the
-        # full hard timeout, we detect the stall (no new data for
-        # _STALL_TIMEOUT seconds) and return what we have.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _CMD_TIMEOUT
-        last_buf_len = 0
-        last_growth = loop.time()
-
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            if self._disconnected_event.is_set():
-                _LOGGER.debug(
-                    "_execute: BLE disconnected while waiting for notify "
-                    "(cmd=%#06x, seq=%d)", cmd, seq,
-                )
-                break
-            try:
-                await asyncio.wait_for(
-                    self._notify_event.wait(),
-                    timeout=min(0.5, remaining),
-                )
-                break  # Complete response received
-            except asyncio.TimeoutError:
-                now = loop.time()
-                current_len = len(self._resp_buf)
-                if current_len > last_buf_len:
-                    last_buf_len = current_len
-                    last_growth = now
-                elif current_len > 0 and (now - last_growth) >= _STALL_TIMEOUT:
-                    # Notifications stopped flowing — BT proxy buffer exhausted
-                    break
-
-        # Command done — stop accepting notifications for this round.
-        self._expecting_response = False
-
-        # If the disconnect callback set _notify_event, distinguish from
-        # a genuine complete response by checking _disconnected_event.
-        if self._notify_event.is_set() and not self._disconnected_event.is_set():
-            body = bytes(self._resp_buf)
-            return parse_response_body(body, cmd, seq)
-
-        if self._disconnected_event.is_set() and len(self._resp_buf) < 4:
-            raise ConnectionError(
-                f"BLE connection lost during command {cmd:#06x} (seq={seq})"
-            )
-
-        if len(self._resp_buf) >= 4:
-            # Routine through ESPHome BT proxies (notification buffer limit,
-            # documented README limitation) — debug, not warning, to avoid
-            # flooding the HA log on every large data_buf read.
-            _LOGGER.debug(
-                "Partial response for cmd %#06x (seq=%d): "
-                "received %d bytes, still missing %d; using partial data",
-                cmd, seq, len(self._resp_buf), self._resp_total,
-            )
-            body = bytes(self._resp_buf)
-            return parse_response_body(body, cmd, seq)
-
-        raise TimeoutError(
-            f"No response to RadiaCode command {cmd:#06x} (seq={seq})"
-        )
+                    self._notify_event.clear()
+                    if self._last_notification is None:
+                        await self._notify_event.wait()
+                    else:
+                        stall_remaining = (
+                            self._last_notification + _STALL_TIMEOUT
+                            - asyncio.get_running_loop().time()
+                        )
+                        if stall_remaining > 0:
+                            try:
+                                await asyncio.wait_for(
+                                    self._notify_event.wait(), timeout=stall_remaining
+                                )
+                                continue
+                            except asyncio.TimeoutError:
+                                pass
+                        raise TimeoutError(
+                            f"Incomplete response to RadiaCode command {cmd:#06x} "
+                            f"(seq={seq}): received {len(self._resp_buf)} bytes, "
+                            f"missing {self._resp_total}"
+                        )
+        except BaseException as err:
+            # Retiring also wakes waiters immediately and filters ghost
+            # callbacks.  If a user disconnect already retired this client,
+            # that caller owns its cleanup.
+            if self._client is client:
+                await self._retire_current_client()
+            if isinstance(err, TimeoutError) and not str(err):
+                raise TimeoutError(
+                    f"Timed out during RadiaCode command {cmd:#06x} "
+                    f"(seq={seq}): received {len(self._resp_buf)} bytes, "
+                    f"missing {self._resp_total}"
+                ) from err
+            raise
+        finally:
+            self._expecting_response = False
 
     async def _read_vs(self, vs_id: int) -> bytes:
         """Execute a RD_VIRT_STRING command and return the VS data bytes."""
-        payload = await self._execute(
+        async with self._cmd_lock:
+            return await self._read_vs_locked(vs_id)
+
+    async def _read_vs_locked(self, vs_id: int) -> bytes:
+        """Read a complete virtual string while holding the command lock."""
+        payload = await self._execute_locked(
             CMD.RD_VIRT_STRING, struct.pack("<I", int(vs_id))
         )
         return parse_vs_response(payload)
@@ -719,8 +719,8 @@ class RadiaCodeBLEClient:
 
         Returns decoded values in the same order as *vsfr_ids*.  Values
         for registers the device marks as invalid are returned as None.
-        The response is very small (~20 bytes for 3 registers), so it
-        never hits BT proxy notification buffer limits.
+        The response contains a validity bitmask followed by one value
+        for each accepted register.
         """
         args = struct.pack("<I", len(vsfr_ids))
         for vid in vsfr_ids:
