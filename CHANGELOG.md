@@ -11,6 +11,19 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.1rc2] — 2026-10-03
+
+### Fixed
+- **Measurement buffer alignment after alarms** — consume the confirmed count-rate and dose-rate payloads carried by Event records. RC1's four-byte Event assumption left six bytes unread on the captured count-alarm event and stopped decoding later measurements. Unverified channel masks stop conservatively.
+
+### Added
+- Regression coverage using the exact captured 17-byte count-alarm Event followed by a synthetic measurement record, plus legacy, dose-alarm, truncated and unsupported-mask cases.
+
+### Validation limits
+- RC1 hardware testing confirmed that spectrum transfers still lose notification packets through the installed proxy, despite bypassing configuration acquisition. RC2 corrects an additional decoder defect; proxy transport reliability and physical display behavior remain under investigation. Do not promote to production until hardware acceptance passes.
+
+---
+
 ## [2.0.1rc1] — 2026-10-03
 
 ### Fixed

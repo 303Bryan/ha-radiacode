@@ -59,4 +59,14 @@ The candidate requires Home Assistant 2026.9.4 or newer, matching the validated 
 
 Physical acceptance requires repeated complete 1,024-channel snapshots through the actual proxy, a populated chart, responsive device readings/LCD, timely HA readings, and a soak beyond the previously problematic connected duration. Test results from synthetic transports alone cannot establish these outcomes.
 
+## RC1 hardware follow-up
+
+The installed RC1 made direct SPECTRUM requests through the user's proxy, but two observed transfers were incomplete. One expected 1,010 body bytes and received 336; another expected 1,009, received 929, and included the final 13-byte fragment. The latter lost four complete 20-byte notifications from the middle. This confirms that bypassing configuration acquisition did not repair the relay path. Keep the candidate unpromoted while investigating the transport.
+
+The added stop-reason logs also exposed an independent Event alignment defect. A complete captured Event record is `5d00077b0c0000140340110b67a0413100`: sequence 93, group 7, event 20, channel mask 3, flags 0x1140, then a float count rate and uint16 error. That six-byte tail was omitted by the inherited four-byte Event parser. The header boundary is corroborated by the decoder's expected sequence 93. The fixture uses this exact event followed by a synthetic measurement; it is not a captured whole response.
+
+[Upstream issue 45](https://github.com/cdump/radiacode/issues/45) reproduces Android-decoded count alarms with mask 3 and dose alarms with mask 12 and lists their configuration fields. RC2 consumes the known six-byte tails for those masks, retains legacy mask 0, and stops on other masks. The general eight-bit field mapping remains unverified.
+
+The user reports sluggish CPS numerals with responsive buttons/menus. The manufacturer specifies a [0.5-second LCD period](https://radiacode.com/docs/en/100-series/device/tech-specs), but [Monitor mode](https://radiacode.com/docs/en/100-series/display-modes/monitor-mode) averages stable measurements. Compare the [Search graph](https://radiacode.com/docs/en/100-series/display-modes/search-mode) at 0.5 seconds per bar with HA connected and disconnected before treating a slowly changing numeral as proof of stalled measurement or display processing. No reviewed source establishes that DATA_BUF reads or time initialization reset LCD averaging.
+
 Capture bounded command/target histories with sequence, link generation, declared/received bytes, fragment count/sizes, first-response latency, largest gap, total and lock-wait duration, timeout classification and disconnect reason. Keep measurement type/time/raw flags and fresh-sample age separate from request success. Keep spectrum format provenance and retry/snapshot ages. Routine debug output should summarize these values without repeatedly printing the histogram or full device configuration.

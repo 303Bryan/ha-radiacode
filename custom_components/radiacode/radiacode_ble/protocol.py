@@ -593,7 +593,32 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
                 buf.unpack("<HHH")
 
             elif eid == 0 and gid == 7:     # GRP_Event (skip)
-                buf.unpack("<BBH")
+                event_code, channel_mask, flags = buf.unpack("<BBH")
+                # A captured count alarm (mask 3) and documented dose alarms
+                # (mask 12) carry a float reading plus a uint16 error after
+                # the fixed fields. See cdump/radiacode issue #45. Other mask
+                # layouts remain unverified; never guess their byte lengths.
+                if channel_mask not in (0, 3, 12):
+                    _LOGGER.debug(
+                        "DATA_BUF Event: code=%d mask=0x%02x flags=0x%04x "
+                        "payload_bytes=unknown outcome=unsupported_mask",
+                        event_code, channel_mask, flags,
+                    )
+                    stop_reason = (
+                        f"unsupported_event_mask(event={event_code},"
+                        f"mask=0x{channel_mask:02x},flags=0x{flags:04x})"
+                    )
+                    stop_offset = record_offset
+                    break
+                payload_bytes = 4 if channel_mask == 0 else 10
+                _LOGGER.debug(
+                    "DATA_BUF Event: code=%d mask=0x%02x flags=0x%04x "
+                    "payload_bytes=%d record_bytes=%d",
+                    event_code, channel_mask, flags, payload_bytes,
+                    7 + payload_bytes,
+                )
+                if channel_mask in (3, 12):
+                    buf.unpack("<fH")
 
             elif eid == 0 and gid == 8:     # GRP_RawCountRate (skip)
                 buf.unpack("<fH")

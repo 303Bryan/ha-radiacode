@@ -250,6 +250,78 @@ def test_decode_multiple_records_sequential(protocol):
     assert len(records) == 2
 
 
+def test_captured_count_alarm_event_preserves_following_record(protocol, caplog):
+    # Exact 17-byte Event from the 103G/FW 4.14 RC1 capture. The following
+    # 22-byte RTD is synthetic; its sequence tests the captured boundary.
+    event = bytes.fromhex("5d00077b0c0000140340110b67a0413100")
+    assert len(event) == 17
+    seq, eid, gid, offset, code, mask, flags, reading, error = struct.unpack(
+        "<BBBiBBHfH", event
+    )
+    assert (seq, eid, gid, offset, code, mask, flags) == (
+        93, 0, 7, 3195, 20, 3, 0x1140,
+    )
+    assert reading == pytest.approx(20.05, abs=0.001)
+    assert error == 49
+
+    following = _real_time_record(94, ts_offset=3200, count_rate=12.5, dose_rate=2e-5)
+    with caplog.at_level("DEBUG", logger=protocol.__name__):
+        records = protocol.decode_data_buf(event + following, BASE_TIME)
+    assert len(records) == 1
+    assert isinstance(records[0], protocol.RealTimeData)
+    assert records[0].dt == BASE_TIME + datetime.timedelta(seconds=32)
+    assert records[0].count_rate == pytest.approx(12.5)
+    assert records[0].dose_rate == pytest.approx(2e-5)
+    assert "code=20 mask=0x03 flags=0x1140 payload_bytes=10 record_bytes=17" in caplog.text
+    assert "stop_reason=complete" in caplog.text
+
+
+@pytest.mark.parametrize("code,mask", [(0, 0), (21, 3), (9, 12), (10, 12)])
+def test_supported_event_masks_preserve_record_alignment(protocol, code, mask):
+    fixed = struct.pack("<BBBiBBH", 1, 0, 7, 50, code, mask, 0x1242)
+    body = b"" if mask == 0 else struct.pack("<fH", 0.0001, 103)
+    records = protocol.decode_data_buf(
+        _real_time_record(0) + fixed + body + _real_time_record(2, count_rate=17),
+        BASE_TIME,
+    )
+    assert len(records) == 2
+    assert all(isinstance(record, protocol.RealTimeData) for record in records)
+    assert records[-1].count_rate == pytest.approx(17)
+
+
+@pytest.mark.parametrize(
+    "mask,body_length",
+    [(mask,cut) for mask,size in ((0,4),(3,10),(12,10)) for cut in range(size)],
+)
+def test_truncated_event_body_retains_only_prior_records(protocol, caplog, mask, body_length):
+    header = struct.pack("<BBBi", 1, 0, 7, 50)
+    body = struct.pack("<BBH", 20, mask, 0x1140)
+    if mask:
+        body += struct.pack("<fH", 20.05, 49)
+    with caplog.at_level("DEBUG", logger=protocol.__name__):
+        records = protocol.decode_data_buf(
+            _real_time_record(0) + header + body[:body_length], BASE_TIME
+        )
+    assert len(records) == 1
+    assert records[0].count_rate == pytest.approx(10.5)
+    assert "incomplete_record(eid=0,gid=7" in caplog.text
+
+
+@pytest.mark.parametrize("mask", [1, 2, 4, 8, 15, 16, 255])
+def test_unknown_event_mask_stops_before_apparent_following_record(protocol, caplog, mask):
+    # A plausible next header cannot make an unverified Event length safe.
+    event = struct.pack("<BBBiBBH", 1, 0, 7, 50, 20, mask, 0x1140)
+    with caplog.at_level("DEBUG", logger=protocol.__name__):
+        records = protocol.decode_data_buf(
+            _real_time_record(0) + event + _real_time_record(2, count_rate=17),
+            BASE_TIME,
+        )
+    assert len(records) == 1
+    assert records[0].count_rate == pytest.approx(10.5)
+    assert "unsupported_event_mask(event=20" in caplog.text
+    assert "payload_bytes=unknown outcome=unsupported_mask" in caplog.text
+
+
 def test_decode_stops_on_sequence_jump(protocol):
     data = _real_time_record(0) + _rare_data_record(5)  # expected seq 1, got 5
     records = protocol.decode_data_buf(data, BASE_TIME)
