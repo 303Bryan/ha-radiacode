@@ -11,6 +11,30 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.1] — 2026-10-03
+
+### Fixed
+- **Spectrum acquisition and decoding** — request the histogram directly, accept compressed empty groups, and correctly decode absolute uint32 values and wrapping deltas. Publish only a complete, uniquely valid 1,024-channel spectrum; a successful manual current-spectrum action also updates the dashboard entity.
+- **Spectrum chart example** — quote the Plotly `"y"` key so the count array remains assigned to the correct axis. Check the saved card configuration if its key was converted to `true`.
+- **Delayed HA readings** — publish radiation measurements before optional identity, temperature, settings, health and spectrum requests. One managed maintenance task handles optional work and is cancelled on disconnect, unload and shutdown.
+- **Measurement freshness** — keep dose and count paired, accept genuine zero readings, and expire cached radiation after three poll intervals (at least 15 seconds) without an advancing accepted measurement. Empty buffers, replays and suppressed outliers cannot renew freshness.
+- **Alarm record alignment** — consume confirmed count-rate and dose-rate Event payloads so their extra bytes do not prevent decoding subsequent measurements. Unsupported masks stop conservatively.
+
+### Added
+- **Transfer diagnostics** — bounded command histories report targets, sequences, link generations, declared/received bytes, notification sizes, latency/gaps, errors and disconnect reasons. Diagnostics also expose measurement freshness, optional-operation status and spectrum attempt/success ages, with source identifiers redacted.
+- **Protocol research and regression coverage** — captured-record and synthetic decoder cases, fake BLE transport tests, and coordinator/entity lifecycle tests using Home Assistant 2026.9.4 and Python 3.14.
+- **Proxy troubleshooting** — guidance for correlating incomplete HA transfers with ESPHome notification-forwarding warnings and checking the age of the retained spectrum.
+
+### Changed
+- **HA requirement** — Home Assistant 2026.9.4 or newer, matching the validated background-task lifecycle.
+
+### Hardware validation and remaining limitations
+- RC-103G firmware 4.14 produced complete automatic and manual 1,024-channel spectra and a populated Home Assistant chart. Search mode at 0.5 seconds per bar scrolled steadily. Primary measurements updated at the configured five-second cadence, and one failed spectrum test recovered fresh readings within seven seconds.
+- Some spectrum transfers still lose notifications through Bluetooth proxies. An ESPHome `Failed to send notify data response` warning was captured during an incomplete transfer. The integration rejects that transfer, retains the last complete spectrum, releases the affected connection and backs off automatic retries. This release improves decoding and recovery; proxy forwarding loss remains unresolved.
+- The previously reported device error code was not captured, and prolonged connection stability has not been established. No proxy firmware or TCP-buffer change is part of this integration release.
+
+---
+
 ## [2.0.1rc3] — 2026-10-03
 
 ### Fixed
