@@ -15,7 +15,7 @@ entities:
         return (a.channels || []).map((_, ch) =>
           a.calibration_a0 + a.calibration_a1 * ch + a.calibration_a2 * ch * ch);
       }
-    y: |
+    "y": |
       $fn ({ hass, getFromConfig }) => {
         const sensor = hass.states[getFromConfig('.entity')];
         if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];

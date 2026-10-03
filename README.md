@@ -78,7 +78,7 @@ entities:
         return (a.channels || []).map((_, ch) =>
           a.calibration_a0 + a.calibration_a1 * ch + a.calibration_a2 * ch * ch);
       }
-    y: |
+    "y": |
       $fn ({ hass, getFromConfig }) => {
         const sensor = hass.states[getFromConfig('.entity')];
         if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
@@ -94,6 +94,8 @@ layout:
     title: Counts
     rangemode: tozero
 ```
+
+> Keep the `"y"` key quoted when copying or editing the card. If a saved card contains a `true` key in its place, rename it to `"y"`; Plotly needs both `x` and `y` arrays when `raw_plotly_config` is enabled.
 
 > **BT proxy note:** spectrum acquisition reads the histogram directly and selects an encoding only after complete validation; a configuration download is no longer a prerequisite. Incomplete or incorrectly framed Bluetooth responses cause the affected connection to be released before another command can reuse it. Invalid spectra are rejected and the last complete snapshot is kept; failed automatic reads retry after 5 minutes, then 10 minutes, up to 1 hour (or your configured interval if longer). Radiation readings publish before optional maintenance starts. The device still handles one BLE command at a time, so a stalled bulk request can delay the next acquisition until its bounded timeout releases the link. Download diagnostics to see format provenance, errors, transfer sizes/timing and snapshot age. Set the spectrum interval to 0 to disable automatic spectrum reads; the on-demand action remains available and updates the current-spectrum entity.
 
