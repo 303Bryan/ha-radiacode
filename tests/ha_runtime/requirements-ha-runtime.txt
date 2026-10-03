@@ -1,0 +1,11 @@
+# Match the supplied HA2026.9.4 environment; use Python3.14.
+homeassistant==2026.9.4
+pytest==9.1.1
+pytest-asyncio==1.4.0
+bleak==3.0.2
+bleak-retry-connector==4.7.0
+habluetooth==6.26.11
+dbus-fast==5.0.22
+aiousbwatcher==1.1.2
+serialx==1.10.0
+aiohasupervisor==0.6.0

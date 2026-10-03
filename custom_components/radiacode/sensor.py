@@ -417,7 +417,7 @@ class RadiaCodeSpectrumSensor(
 
     State is the total count across all channels; the full per-channel
     histogram and the channel→keV calibration live in attributes, ready
-    for charting (e.g. an ApexCharts card — see the README for a
+    for charting (e.g. a Plotly Graph Card — see the README for a
     copy-paste example) or for the ``radiacode.get_spectrum`` action.
 
     The ``channels`` attribute (1024 integers) is excluded from the

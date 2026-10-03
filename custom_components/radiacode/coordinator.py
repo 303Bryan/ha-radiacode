@@ -1,6 +1,6 @@
 """DataUpdateCoordinator for the RadiaCode integration.
 
-Poll cycle (every 5 seconds):
+Primary poll cycle (every 5 seconds by default):
   1. If already connected, skip BLE device lookup and poll directly.
   2. If not connected, locate the BLE device via HA's Bluetooth manager
      and connect + run the device init sequence.
@@ -9,6 +9,13 @@ Poll cycle (every 5 seconds):
   5. Merge results with cached RareData values (battery, accumulated_dose appear
      only ~once per minute in RareData records, so we must cache them across
      poll cycles where no RareData is present).
+  6. Return the radiation snapshot to HA before starting optional maintenance.
+
+One managed background task reads identity, settings, health, temperature and
+spectrum on independent elapsed-time cadences. Maintenance updates cached
+fields/listeners without resetting the primary timer or radiation availability.
+Repeated/empty buffers only retain a paired radiation sample for a bounded grace
+period; they never renew its freshness.
 
 The BLE connection is kept open between polls to avoid the expensive
 connect + init round-trip (~7-15 s through ESPHome BT proxies). This
@@ -48,8 +55,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
-from datetime import timedelta
+from collections import deque
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from typing import Optional
 
 from bleak.backends.device import BLEDevice
@@ -93,8 +101,10 @@ _RETRY_DELAY = 2.0
 _SETTINGS_INTERVAL = 60.0
 _DIAGNOSTICS_INTERVAL = 60.0
 _IDENTITY_RETRY_INTERVAL = 60.0
+_TEMPERATURE_INTERVAL = 60.0
 _SPECTRUM_RETRY_MIN = 300.0
 _SPECTRUM_RETRY_MAX = 3600.0
+_PHASE_HISTORY_LIMIT = 20
 
 
 @dataclass
@@ -120,6 +130,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             hass,
             _LOGGER,
             name=DOMAIN,
+            config_entry=entry,
             update_interval=timedelta(seconds=poll_interval),
         )
 
@@ -141,12 +152,20 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._last_accumulated_dose: Optional[float] = None
         self._last_temperature: Optional[float] = None
 
-        # Cache dose_rate/count_rate to smooth over reconnection transitions.
-        # After a reconnect, the first poll often returns dose_rate=0.0 because
-        # the data buffer was just cleared.  We keep the last non-zero values
-        # and use them until the device reports real readings.
+        # Keep one accepted measurement pair across brief record-less polls.
+        # A valid zero is a fresh measurement, not a reconnect placeholder.
         self._last_dose_rate: Optional[float] = None
         self._last_count_rate: Optional[float] = None
+        self._last_measurement_time: Optional[datetime] = None
+        self._last_measurement_type: Optional[str] = None
+        self._last_measurement_flags: Optional[int] = None
+        self._last_fresh_monotonic: Optional[float] = None
+        self._last_measurement_connection = 0
+        # Three normal polling opportunities, with a 15-second minimum,
+        # tolerate a reconnect/empty buffer without hiding a stalled stream.
+        self._freshness_grace = max(15.0, float(poll_interval) * 3)
+        self._using_cached_measurement = False
+        self._last_sample_progress: dict = {}
 
         # Outlier suppression: truncated BT-proxy transfers can occasionally
         # yield a misparsed record with an absurd value (e.g. 40 000 µSv/h at
@@ -163,6 +182,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # Device-health diagnostics are cached between once-per-minute reads.
         self._last_diagnostics: RadiaCodeDiagnostics = RadiaCodeDiagnostics()
         self._next_diagnostics_read = 0.0
+        self._next_temperature_read = 0.0
 
         # Gamma spectrum; read on its own slower cadence (options-driven)
         # and cached in between — the heaviest BLE transfer we perform.
@@ -185,6 +205,17 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._last_error: Optional[str] = None
         self._last_poll_duration: Optional[float] = None
         self._connection_count: int = 0
+        self._connection_source: Optional[str] = None
+        self._connection_rssi: Optional[int] = None
+        self._maintenance_task: Optional[asyncio.Task] = None
+        self._maintenance_phase: Optional[str] = None
+        self._stopping = False
+        self._primary_idle = asyncio.Event()
+        self._primary_idle.set()
+        self._optional_errors: dict[str, str] = {}
+        self._phase_history: deque[dict] = deque(maxlen=_PHASE_HISTORY_LIMIT)
+        self._last_spectrum_attempt: Optional[float] = None
+        self._last_spectrum_success: Optional[float] = None
 
     @property
     def address(self) -> str:
@@ -203,7 +234,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
 
     @property
     def last_error(self) -> Optional[str]:
-        """The last error message, or None if the last poll succeeded."""
+        """Primary acquisition status; optional failures are reported separately."""
         return self._last_error
 
     @property
@@ -237,13 +268,55 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         return {
             "poll_interval": self._spectrum_interval,
             "format_version": self._client.spectrum_format_version,
+            "format_source": getattr(self._client, "spectrum_format_source", None),
             "last_error": self._last_spectrum_error,
             "channel_count": len(self._last_spectrum.counts) if self._last_spectrum else 0,
             "duration_s": self._last_spectrum.duration_s if self._last_spectrum else None,
             "truncated": self._last_spectrum.truncated if self._last_spectrum else None,
             "retry_in_seconds": max(0.0, self._next_spectrum_read - time.monotonic())
             if self._spectrum_interval > 0 else None,
+            "last_attempt_age_seconds": self._age(self._last_spectrum_attempt),
+            "last_success_age_seconds": self._age(self._last_spectrum_success),
         }
+
+    @staticmethod
+    def _age(timestamp: Optional[float]) -> Optional[float]:
+        """Return an elapsed age without depending on the device/host clock."""
+        return max(0.0, time.monotonic() - timestamp) if timestamp is not None else None
+
+    @property
+    def runtime_status(self) -> dict:
+        """Bounded polling/maintenance diagnostics, without histogram copies."""
+        age = self._age(self._last_fresh_monotonic)
+        return {
+            "freshness": {
+                "age_seconds": age,
+                "grace_seconds": self._freshness_grace,
+                "fresh": age is not None and age <= self._freshness_grace,
+                "using_cached_measurement": self._using_cached_measurement,
+                "measurement_time": self._last_measurement_time.isoformat()
+                if self._last_measurement_time is not None else None,
+                "measurement_type": self._last_measurement_type,
+                "measurement_flags": self._last_measurement_flags,
+                "sample_progress": dict(self._last_sample_progress),
+            },
+            "bluetooth": {
+                "advertisement_source_at_connect": self._connection_source,
+                "advertisement_rssi_at_connect": self._connection_rssi,
+            },
+            "maintenance": {
+                "running": self._maintenance_task is not None
+                and not self._maintenance_task.done(),
+                "phase": self._maintenance_phase,
+                "errors": dict(self._optional_errors),
+            },
+            "recent_phases": list(self._phase_history),
+        }
+
+    @property
+    def transport_status(self) -> dict:
+        """Expose the client's bounded transport diagnostics for downloads."""
+        return self._client.transport_diagnostics
 
     async def async_shutdown(self) -> None:
         """Stop polling and tear down the BLE connection.
@@ -251,7 +324,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         Called on config entry unload and on Home Assistant shutdown so
         the device is released for other BLE clients (e.g. the mobile app).
         """
+        self._stopping = True
         await super().async_shutdown()
+        await self._cancel_maintenance()
         await self._client.disconnect()
 
     async def async_user_disconnect(self) -> None:
@@ -262,6 +337,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         their last known values; the connection switch shows OFF.
         """
         self._user_disconnected = True
+        await self._cancel_maintenance()
         await self._client.disconnect()
         # Notify listeners immediately so the switch state updates in the UI.
         self.async_update_listeners()
@@ -276,176 +352,323 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._next_spectrum_read = 0.0
         await self.async_request_refresh()
 
-    async def _async_update_data(self) -> RadiaCodeCoordinatorData:
-        """Fetch data_buf from device, reconnecting only when needed.
-
-        If the existing connection turns out to be stale (get_data fails),
-        we tear it down and retry once with a fresh connection in the same
-        poll cycle.  This prevents the sensor from going unavailable for
-        an entire poll interval whenever the BLE link drops silently.
-        """
-
-        # When the user has explicitly disabled the connection, skip polling
-        # and let UpdateFailed mark all sensor entities unavailable — the
-        # data is intentionally stale and should not be shown as current.
-        if self._user_disconnected:
-            self._last_error = "BLE connection disabled by user"
-            raise UpdateFailed(self._last_error)
-
-        poll_start = time.monotonic()
-
-        # Only look up the BLE device when we need to establish a new
-        # connection.  When already connected, skip the lookup — it can
-        # return None if the HA scanner hasn't received a recent
-        # advertisement, which would falsely mark the sensor unavailable
-        # even though we have a healthy active connection.
-        ble_device = None
-        if not self._client.is_connected:
-            ble_device = bluetooth.async_ble_device_from_address(
-                self.hass, self._address, connectable=True
-            )
-            if ble_device is None:
-                self._last_error = (
-                    f"RadiaCode {self._address} not found — "
-                    f"is the device on and in range?"
-                )
-                raise UpdateFailed(self._last_error)
-
+    async def _cancel_maintenance(self) -> None:
+        """Cancel and await the only maintenance task before releasing BLE."""
+        task = self._maintenance_task
+        if task is None:
+            return
+        task.cancel()
         try:
-            data = await self._poll_with_retry(ble_device)
-        except UpdateFailed:
-            self._last_poll_duration = time.monotonic() - poll_start
-            raise
+            await task
+        except asyncio.CancelledError:
+            # Awaiting a cancelled child normally raises CancelledError. If
+            # our caller was cancelled as well, preserve that cancellation.
+            if (caller := asyncio.current_task()) is not None and caller.cancelling():
+                raise
+        finally:
+            if self._maintenance_task is task:
+                self._maintenance_task = None
+            self._maintenance_phase = None
 
-        # If the user toggled the connection switch OFF during the poll
-        # (and the poll still succeeded), tear down the connection now
-        # rather than keeping it alive for another 5-second cycle.
-        if self._user_disconnected:
-            await self._client.disconnect()
-            self._last_error = "BLE connection disabled by user"
-            self._last_poll_duration = time.monotonic() - poll_start
-            raise UpdateFailed(self._last_error)
-
-        # Update cache when fresh RareData arrived in this batch.
-        if data.battery is not None:
-            self._last_battery = data.battery
-        if data.accumulated_dose is not None:
-            self._last_accumulated_dose = data.accumulated_dose
-        if data.temperature is not None:
-            self._last_temperature = data.temperature
-
-        # Run dose_rate/count_rate through the spike filters.  A suspected
-        # outlier is suppressed for one poll (the cached value is shown
-        # instead); a genuine event is confirmed by the next poll and passes.
-        dose_rate = self._dose_rate_filter.filter(data.dose_rate)
-        if self._dose_rate_filter.last_suppressed is not None:
-            _LOGGER.warning(
-                "Suppressed suspected dose rate outlier: %.4g µSv/h "
-                "(awaiting confirmation on next poll)",
-                self._dose_rate_filter.last_suppressed,
-            )
-        count_rate = self._count_rate_filter.filter(data.count_rate)
-        if self._count_rate_filter.last_suppressed is not None:
-            _LOGGER.warning(
-                "Suppressed suspected count rate outlier: %.4g CPS "
-                "(awaiting confirmation on next poll)",
-                self._count_rate_filter.last_suppressed,
-            )
-
-        # Update dose_rate/count_rate cache.  After a reconnect, the first
-        # poll yields dose_rate=0.0 because the device's buffer was cleared
-        # by the init sequence.  We keep the last meaningful values until
-        # the device starts streaming real data again.
-        if dose_rate is not None and dose_rate > 0:
-            self._last_dose_rate = dose_rate
-        if count_rate is not None and count_rate > 0:
-            self._last_count_rate = count_rate
-
-        # Determine the best dose_rate/count_rate to expose.  Use fresh
-        # values when available; fall back to cache for the post-reconnect
-        # zero-value transition, for polls whose transfer contained no
-        # decodable records (None), and for suppressed-outlier polls.
-        if not dose_rate and self._last_dose_rate is not None:
-            dose_rate = self._last_dose_rate
-        if not count_rate and self._last_count_rate is not None:
-            count_rate = self._last_count_rate
-
-        # Build sensor snapshot with cached fallbacks.  Hardness (µR/h per
-        # cps, the coefficient shown by the Radiacode app) is derived from
-        # the same dose/count values exposed to HA so the three sensors
-        # always stay mutually consistent.
-        sensors = RadiaCodeData(
-            dose_rate=dose_rate,
-            count_rate=count_rate,
-            accumulated_dose=self._last_accumulated_dose,
-            battery=self._last_battery,
-            temperature=self._last_temperature,
-            hardness=compute_hardness(dose_rate, count_rate),
+    def _record_phase(
+        self, phase: str, started: float, error: Optional[str] = None
+    ) -> None:
+        duration = time.monotonic() - started
+        self._phase_history.append({
+            "phase": phase,
+            "duration_seconds": round(duration, 3),
+            "error": error,
+        })
+        _LOGGER.debug(
+            "Poll phase %s completed in %.3fs (error=%s, connected=%s)",
+            phase, duration, error, self._client.is_connected,
         )
 
-        # Identity is fetched before the first spectrum. The client resolves
-        # the spectrum wire format before decoding its first histogram.
+    def _remember_connection_source(self) -> None:
+        """Remember public advertisement metadata, not selected connection route."""
+        service_info = bluetooth.async_last_service_info(
+            self.hass, self._address, connectable=True
+        )
+        self._connection_source = service_info.source if service_info else None
+        self._connection_rssi = service_info.rssi if service_info else None
+        _LOGGER.debug(
+            "Connection lookup source=%s rssi=%s",
+            self._connection_source, self._connection_rssi,
+        )
+
+    async def _async_update_data(self) -> RadiaCodeCoordinatorData:
+        """Publish radiation promptly; slow reads run in one managed task."""
+        poll_start = time.monotonic()
+        phase_error = None
+        self._primary_idle.clear()
+        try:
+            self._check_user_disconnected("before radiation poll")
+            ble_device = None
+            if not self._client.is_connected:
+                ble_device = bluetooth.async_ble_device_from_address(
+                    self.hass, self._address, connectable=True
+                )
+                if ble_device is None:
+                    raise UpdateFailed(
+                        "RadiaCode not found — is the device on and in range?"
+                    )
+
+            data = await self._poll_with_retry(ble_device)
+            self._check_user_disconnected("after radiation poll")
+            now = time.monotonic()
+            if data.battery is not None:
+                self._last_battery = data.battery
+            if data.accumulated_dose is not None:
+                self._last_accumulated_dose = data.accumulated_dose
+            if data.temperature is not None:
+                self._last_temperature = data.temperature
+                self._next_temperature_read = now + _TEMPERATURE_INTERVAL
+
+            # Empty buffers, repeated timestamps and filtered samples must
+            # never reset freshness. Keep both values from one accepted record.
+            fresh = (
+                data.dose_rate is not None and data.count_rate is not None
+                and data.measurement_time is not None
+                and (
+                    self._last_measurement_time is None
+                    or self._last_measurement_connection != self._connection_count
+                    or data.measurement_time > self._last_measurement_time
+                )
+            )
+            if fresh:
+                dose_rate = self._dose_rate_filter.filter(data.dose_rate)
+                count_rate = self._count_rate_filter.filter(data.count_rate)
+                for label, filter_ in (
+                    ("dose rate", self._dose_rate_filter),
+                    ("count rate", self._count_rate_filter),
+                ):
+                    if filter_.last_suppressed is not None:
+                        _LOGGER.warning(
+                            "Suppressed suspected %s outlier: %.4g "
+                            "(awaiting a subsequent measurement)",
+                            label, filter_.last_suppressed,
+                        )
+                fresh = dose_rate is not None and count_rate is not None
+                if fresh:
+                    same_connection = (
+                        self._last_measurement_connection == self._connection_count
+                    )
+                    self._last_sample_progress = {
+                        "device_seconds": (
+                            data.measurement_time - self._last_measurement_time
+                        ).total_seconds()
+                        if self._last_measurement_time is not None and same_connection
+                        else None,
+                        "receipt_seconds": self._age(self._last_fresh_monotonic)
+                        if same_connection else None,
+                    }
+                    self._last_dose_rate = dose_rate
+                    self._last_count_rate = count_rate
+                    self._last_measurement_time = data.measurement_time
+                    self._last_measurement_type = data.measurement_type
+                    self._last_measurement_flags = data.measurement_flags
+                    self._last_measurement_connection = self._connection_count
+                    self._last_fresh_monotonic = now
+
+            self._using_cached_measurement = not fresh
+            # Even an initial empty buffer is a complete transport response.
+            # Identity/spectrum discovery may proceed while radiation warms up.
+            self._schedule_maintenance()
+            age = self._age(self._last_fresh_monotonic)
+            if age is None:
+                raise UpdateFailed("Waiting for a fresh radiation measurement")
+            if age > self._freshness_grace:
+                raise UpdateFailed(
+                    f"Radiation measurements are stale ({age:.1f}s since "
+                    f"the last fresh sample; grace {self._freshness_grace:.0f}s)"
+                )
+
+            self._last_error = None if fresh else "No new radiation measurement"
+            sensors = RadiaCodeData(
+                dose_rate=self._last_dose_rate,
+                count_rate=self._last_count_rate,
+                accumulated_dose=self._last_accumulated_dose,
+                battery=self._last_battery,
+                temperature=self._last_temperature,
+                hardness=compute_hardness(
+                    self._last_dose_rate, self._last_count_rate
+                ),
+                measurement_time=self._last_measurement_time,
+                measurement_type=self._last_measurement_type,
+                measurement_flags=self._last_measurement_flags,
+            )
+            _LOGGER.debug(
+                "Radiation ready: fresh=%s age=%.3fs type=%s timestamp=%s "
+                "flags=%s dose_rate=%s count_rate=%s progress=%s",
+                fresh, age, self._last_measurement_type,
+                self._last_measurement_time, self._last_measurement_flags,
+                sensors.dose_rate, sensors.count_rate, self._last_sample_progress,
+            )
+            return RadiaCodeCoordinatorData(
+                sensors=sensors,
+                settings=self._last_settings,
+                diagnostics=self._last_diagnostics,
+                spectrum=self._last_spectrum,
+            )
+        except asyncio.CancelledError:
+            phase_error = "cancelled"
+            raise
+        except UpdateFailed as err:
+            self._last_error = str(err)
+            phase_error = self._last_error
+            raise
+        finally:
+            self._last_poll_duration = time.monotonic() - poll_start
+            self._record_phase("radiation", poll_start, phase_error)
+            self._primary_idle.set()
+
+    def _schedule_maintenance(self) -> None:
+        """Start at most one task, after the current radiation poll returns."""
         if (
-            self._serial_number is None
-            and self._client.is_connected
-            and time.monotonic() >= self._next_identity_read
+            self._stopping or self._user_disconnected
+            or not self._client.is_connected
+            or (
+                self._maintenance_task is not None
+                and not self._maintenance_task.done()
+            )
         ):
-            self._next_identity_read = time.monotonic() + _IDENTITY_RETRY_INTERVAL
-            await self._fetch_device_identity()
-        self._check_user_disconnected("after identity")
-
-        # Refresh settings after an HA write, otherwise once per minute.
-        if self._client.is_connected and time.monotonic() >= self._next_settings_read:
-            self._next_settings_read = time.monotonic() + _SETTINGS_INTERVAL
-            try:
-                self._last_settings = await self._client.get_settings()
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Settings read failed, using cached values: %s", err)
-        self._check_user_disconnected("after settings")
-
-        if self._client.is_connected and time.monotonic() >= self._next_diagnostics_read:
-            self._next_diagnostics_read = time.monotonic() + _DIAGNOSTICS_INTERVAL
-            try:
-                self._last_diagnostics = await self._client.get_diagnostics()
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Diagnostics read failed, using cached values: %s", err)
-        self._check_user_disconnected("after diagnostics")
-
-        # Read the gamma spectrum on its own (slower) cadence — the largest
-        # BLE transfer we perform.  On failure, keep the previous snapshot.
-        if (
-            self._client.is_connected
-            and self._spectrum_interval > 0
-            and time.monotonic() >= self._next_spectrum_read
+            return
+        now = time.monotonic()
+        if not (
+            (self._serial_number is None and now >= self._next_identity_read)
+            or now >= self._next_settings_read
+            or now >= self._next_diagnostics_read
+            or now >= self._next_temperature_read
+            or (
+                self._spectrum_interval > 0 and now >= self._next_spectrum_read
+            )
         ):
-            try:
-                self._last_spectrum = await self._client.get_spectrum()
-            except Exception as err:  # noqa: BLE001
-                self._last_spectrum_error = str(err)
-                self._next_spectrum_read = time.monotonic() + self._spectrum_retry_delay
-                _LOGGER.warning(
-                    "Spectrum read failed; keeping previous snapshot and retrying "
-                    "in %.0f seconds: %s", self._spectrum_retry_delay, err,
-                )
-                self._spectrum_retry_delay = min(
-                    _SPECTRUM_RETRY_MAX, self._spectrum_retry_delay * 2
-                )
-            else:
-                self._last_spectrum_error = None
-                self._next_spectrum_read = time.monotonic() + self._spectrum_interval
-                self._spectrum_retry_delay = max(
-                    _SPECTRUM_RETRY_MIN, self._spectrum_interval
-                )
-        self._check_user_disconnected("after spectrum")
+            return
+        # Non-eager start ensures HA can publish the returned primary snapshot
+        # before any optional operation begins waiting for its BLE reply.
+        self._maintenance_task = self.hass.async_create_background_task(
+            self._async_run_maintenance(),
+            name=f"Radiacode maintenance {self._entry_id}",
+            eager_start=False,
+        )
+        self._maintenance_task.add_done_callback(self._maintenance_done)
 
-        self._last_error = None
-        self._last_poll_duration = time.monotonic() - poll_start
+    def _maintenance_done(self, task: asyncio.Task) -> None:
+        if self._maintenance_task is task:
+            self._maintenance_task = None
+            self._maintenance_phase = None
+        if not task.cancelled() and (error := task.exception()) is not None:
+            _LOGGER.error(
+                "Unexpected maintenance failure",
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
-        return RadiaCodeCoordinatorData(
-            sensors=sensors,
-            settings=self._last_settings,
-            diagnostics=self._last_diagnostics,
-            spectrum=self._last_spectrum,
+    async def _async_run_maintenance(self) -> None:
+        """Run due operations sequentially, yielding to primary polls."""
+        operations = (
+            ("identity", "_next_identity_read", _IDENTITY_RETRY_INTERVAL,
+             self._fetch_device_identity, None),
+            ("settings", "_next_settings_read", _SETTINGS_INTERVAL,
+             self._client.get_settings, "_last_settings"),
+            ("health", "_next_diagnostics_read", _DIAGNOSTICS_INTERVAL,
+             self._client.get_diagnostics, "_last_diagnostics"),
+            ("temperature", "_next_temperature_read", _TEMPERATURE_INTERVAL,
+             self._client.get_temperature, "_last_temperature"),
+            ("spectrum", "_next_spectrum_read", self._spectrum_interval,
+             self._client.get_spectrum, "_last_spectrum"),
+        )
+        try:
+            for phase, deadline, interval, operation, cache_attribute in operations:
+                # Yield between commands. A scheduled radiation poll gets the
+                # next opportunity; the client's lock also serializes controls.
+                await asyncio.sleep(0)
+                await self._primary_idle.wait()
+                if (
+                    self._stopping or self._user_disconnected
+                    or not self._client.is_connected
+                ):
+                    return
+                now = time.monotonic()
+                if now < getattr(self, deadline):
+                    continue
+                if phase == "identity" and self._serial_number is not None:
+                    continue
+                if phase == "spectrum" and self._spectrum_interval <= 0:
+                    continue
+                setattr(self, deadline, now + interval)
+                self._maintenance_phase = phase
+                started = now
+                error = None
+                if phase == "spectrum":
+                    self._last_spectrum_attempt = now
+                try:
+                    result = await operation()
+                    if self._stopping or self._user_disconnected:
+                        return
+                    if cache_attribute is not None and result is not None:
+                        setattr(self, cache_attribute, result)
+                    self._optional_errors.pop(phase, None)
+                    if phase == "spectrum":
+                        self._record_spectrum_success(result)
+                except asyncio.CancelledError:
+                    error = "cancelled"
+                    raise
+                except Exception as err:  # noqa: BLE001
+                    error = str(err)
+                    self._optional_errors[phase] = error
+                    if phase == "spectrum":
+                        self._record_spectrum_failure(error)
+                    else:
+                        _LOGGER.debug(
+                            "Maintenance %s failed; retaining cached values: %s",
+                            phase, err,
+                        )
+                finally:
+                    self._record_phase(phase, started, error)
+                    self._maintenance_phase = None
+                self._publish_maintenance_cache()
+        finally:
+            self._maintenance_phase = None
+
+    def _publish_maintenance_cache(self) -> None:
+        """Notify optional changes without rewriting radiation freshness/cadence."""
+        if self._stopping or self._user_disconnected:
+            return
+        if self.data is not None:
+            # Use the latest primary snapshot. A newer primary poll may have
+            # completed while this task awaited a BLE response.
+            self.data = replace(
+                self.data,
+                sensors=replace(
+                    self.data.sensors, temperature=self._last_temperature
+                ),
+                settings=self._last_settings,
+                diagnostics=self._last_diagnostics,
+                spectrum=self._last_spectrum,
+            )
+        # Do not call async_set_updated_data(): it resets the primary timer and
+        # marks a failed/stale radiation poll successful.
+        self.async_update_listeners()
+
+    def _record_spectrum_success(self, spectrum: Spectrum) -> None:
+        self._last_spectrum = spectrum
+        self._last_spectrum_error = None
+        self._optional_errors.pop("spectrum", None)
+        self._last_spectrum_success = time.monotonic()
+        self._next_spectrum_read = time.monotonic() + self._spectrum_interval
+        self._spectrum_retry_delay = max(
+            _SPECTRUM_RETRY_MIN, self._spectrum_interval
+        )
+
+    def _record_spectrum_failure(self, error: str) -> None:
+        self._last_spectrum_error = error
+        self._next_spectrum_read = time.monotonic() + self._spectrum_retry_delay
+        _LOGGER.warning(
+            "Spectrum read failed; retaining previous snapshot, retry in %.0fs: %s",
+            self._spectrum_retry_delay, error,
+        )
+        self._spectrum_retry_delay = min(
+            _SPECTRUM_RETRY_MAX, self._spectrum_retry_delay * 2
         )
 
     async def _fetch_device_identity(self) -> None:
@@ -470,7 +693,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Failed to fetch serial/firmware (will retry after cooldown)")
             self._serial_number = None  # ensure we retry
-            return
+            raise
 
         # Read the device's self-describing SFR register directory — an
         # ASCII listing of every register with address, size, type, and
@@ -480,6 +703,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         if self._sfr_file is None:
             try:
                 self._sfr_file = await self._client.get_sfr_file()
+                self._optional_errors.pop("register_directory", None)
                 if self._sfr_file:
                     _LOGGER.info(
                         "Read device SFR register directory: %d bytes, %d entries "
@@ -498,6 +722,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                         "(not provided over BLE on this firmware)"
                     )
             except Exception as err:  # noqa: BLE001
+                self._optional_errors["register_directory"] = str(err)
                 _LOGGER.debug("SFR directory read failed (non-fatal): %s", err)
         self._check_user_disconnected("after register directory")
 
@@ -529,6 +754,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             _LOGGER.debug("User disabled BLE — aborting poll (%s)", context)
             self._last_error = "BLE connection disabled by user"
             raise UpdateFailed(self._last_error)
+        if self._stopping:
+            raise UpdateFailed("Radiacode integration is shutting down")
 
     async def _poll_with_retry(
         self, ble_device: Optional[BLEDevice]
@@ -564,6 +791,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     )
                     raise UpdateFailed(self._last_error)
                 _LOGGER.debug("RadiaCode not connected, establishing connection")
+                self._remember_connection_source()
                 await self._client.connect(ble_device)
                 self._connection_count += 1
 
@@ -631,6 +859,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
 
         try:
             _LOGGER.debug("Retry: establishing fresh connection to RadiaCode")
+            self._remember_connection_source()
             await self._client.connect(ble_device)
             self._connection_count += 1
 
@@ -709,6 +938,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             raise UpdateFailed("Device rejected the accumulated dose reset")
 
         self._last_accumulated_dose = 0.0
+        if self.data is not None:
+            self.data = replace(
+                self.data, sensors=replace(self.data.sensors, accumulated_dose=0.0)
+            )
+            self.async_update_listeners()
         await self.async_request_refresh()
 
     async def async_reset_spectrum(self) -> None:
@@ -731,7 +965,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
 
         self._last_spectrum = None
         self._last_spectrum_error = None
+        self._last_spectrum_success = None
+        self._optional_errors.pop("spectrum", None)
         self._next_spectrum_read = 0.0
+        self._publish_maintenance_cache()
         await self.async_request_refresh()
 
     async def async_get_spectrum(self, accumulated: bool = False) -> Spectrum:
@@ -743,7 +980,24 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._check_user_disconnected("read spectrum")
         if not self._client.is_connected:
             raise UpdateFailed("Cannot read spectrum: device not connected")
+        started = time.monotonic()
+        error = None
+        phase = "accumulated_spectrum" if accumulated else "spectrum"
+        if not accumulated:
+            self._last_spectrum_attempt = started
         try:
-            return await self._client.get_spectrum(accumulated=accumulated)
+            spectrum = await self._client.get_spectrum(accumulated=accumulated)
+            self._check_user_disconnected("after requested spectrum")
+            self._optional_errors.pop(phase, None)
+            if not accumulated:
+                self._record_spectrum_success(spectrum)
+                self._publish_maintenance_cache()
+            return spectrum
         except Exception as err:
+            error = str(err)
+            self._optional_errors[phase] = error
+            if not accumulated:
+                self._record_spectrum_failure(error)
             raise UpdateFailed(f"Spectrum read failed: {err}") from err
+        finally:
+            self._record_phase(f"{phase}_action", started, error)

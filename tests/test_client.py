@@ -7,6 +7,7 @@ simulate detector firmware load or validate a physical Bluetooth radio.
 import asyncio
 import datetime
 import importlib.util
+import logging
 import struct
 import sys
 import types
@@ -184,6 +185,39 @@ def test_stalled_partial_frame_is_rejected_and_transport_retired(client_module):
     asyncio.run(scenario())
 
 
+def test_dropped_middle_notification_with_final_tail_is_rejected(client_module):
+    async def scenario():
+        payload = bytes(range(256)) * 2
+        expected_body = 4 + len(payload)
+
+        async def missing_middle(transport, request):
+            frame = struct.pack("<i", expected_body) + request[4:8] + payload
+            for index, offset in enumerate(range(0, len(frame), 20)):
+                if index == 8:
+                    continue
+                if index == 9:
+                    await asyncio.sleep(0.003)
+                transport.notify(frame[offset:offset + 20])
+
+        client, transport = attached_client(client_module, missing_middle)
+        with pytest.raises(TimeoutError, match="missing 20"):
+            await client._read_vs(client_module.VS.CONFIGURATION)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["virtual_string"] == "CONFIGURATION"
+        assert stats["declared_body_bytes"] == expected_body
+        assert stats["received_body_bytes"] == expected_body - 20
+        assert stats["missing_body_bytes"] == 20
+        assert stats["notification_count"] == 25
+        assert stats["notification_sizes"] == {"20": 25}
+        assert stats["first_byte_s"] is not None
+        assert stats["max_notification_gap_s"] >= 0.003
+        assert stats["error_category"] == "incomplete_response"
+        assert client.transport_diagnostics["last_disconnect_reason"] == "command:incomplete_response"
+        assert transport.disconnect_count == 1
+
+    asyncio.run(scenario())
+
+
 def test_disconnected_partial_frame_cannot_be_success(client_module):
     async def scenario():
         def partial_then_drop(transport, request):
@@ -220,6 +254,39 @@ def test_bad_frames_retire_transport(client_module, bad_frame, match):
         assert transport.disconnect_count == 1
         assert not client.is_connected
         assert not client._expecting_response
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("target", ["SERIAL_NUMBER", "CONFIGURATION", "SFR_FILE"])
+def test_failure_previews_suppress_identity_and_configuration(client_module, caplog, target):
+    async def scenario():
+        secret = b"private-device-identifier"
+
+        def invalid_echo(transport, request):
+            body = b"\x00\x00\x00\x80" + secret
+            transport.notify(struct.pack("<i", len(body)) + body)
+
+        caplog.set_level(logging.DEBUG, logger=client_module.__name__)
+        client, _ = attached_client(client_module, invalid_echo)
+        with pytest.raises(ValueError, match="echo header mismatch"):
+            await client._read_vs(getattr(client_module.VS, target))
+        assert "body_prefix=<suppressed>" in caplog.text
+        assert secret.hex() not in caplog.text
+        assert secret.decode() not in caplog.text
+
+    asyncio.run(scenario())
+
+
+def test_numeric_failure_preview_is_bounded(client_module, caplog):
+    async def scenario():
+        body = b"\x00\x00\x00\x80" + bytes(range(100))
+        caplog.set_level(logging.DEBUG, logger=client_module.__name__)
+        client, _ = attached_client(client_module, lambda transport, request: transport.notify(struct.pack("<i", len(body)) + body))
+        with pytest.raises(ValueError):
+            await client._read_vs(client_module.VS.DATA_BUF)
+        assert f"body_prefix={body[:32].hex()} " in caplog.text
+        assert body[32:40].hex() not in caplog.text
 
     asyncio.run(scenario())
 
@@ -401,6 +468,13 @@ def test_repeated_commands_wrap_sequence_without_reconnecting(client_module):
         ]
         assert client.is_connected
         assert transport.disconnect_count == 0
+        history = client.transport_diagnostics["recent_commands"]
+        assert len(history) == client_module._COMMAND_HISTORY_LIMIT
+        assert history[-1]["sequence"] == 319 % 32
+        assert history[-1]["error_category"] is None
+        assert "_started" not in history[-1]
+        history[-1]["notification_sizes"]["20"] = -1
+        assert -1 not in client.transport_diagnostics["recent_commands"][-1]["notification_sizes"].values()
 
     asyncio.run(scenario())
 
@@ -425,7 +499,7 @@ def test_concurrent_controls_and_poll_commands_are_serialized(client_module):
     asyncio.run(scenario())
 
 
-def test_spectrum_reads_configuration_once_per_connection(client_module, monkeypatch):
+def test_spectrum_reads_directly_and_keeps_observed_encoding_across_reconnect(client_module, monkeypatch):
     async def scenario():
         calls = []
         spectrum = struct.pack("<Ifff", 120, 0.0, 3.0, 0.0) + struct.pack("<1024I", *range(1024))
@@ -438,8 +512,8 @@ def test_spectrum_reads_configuration_once_per_connection(client_module, monkeyp
             vs_id = struct.unpack_from("<I", request, 8)[0]
             calls.append(vs_id)
             if vs_id == client_module.VS.CONFIGURATION:
-                data = b"Firmware=4.14\n"  # upstream default when key is absent
-            elif vs_id == client_module.VS.DATA_BUF:
+                raise AssertionError("Configuration must not gate spectrum reads")
+            if vs_id == client_module.VS.DATA_BUF:
                 data = b""
             else:
                 data = spectrum
@@ -447,11 +521,14 @@ def test_spectrum_reads_configuration_once_per_connection(client_module, monkeyp
 
         client, transport = attached_client(client_module, handler)
         assert client.spectrum_format_version is None
+        assert client.spectrum_format_source is None
         assert len((await client.get_spectrum()).counts) == 1024
+        assert client.spectrum_format_source == "complete_payload"
+        with pytest.raises(AttributeError):
+            client.spectrum_format_source = "configuration"
         assert len((await client.get_spectrum(accumulated=True)).counts) == 1024
         assert client.spectrum_format_version == 0
         assert calls == [
-            client_module.VS.CONFIGURATION,
             client_module.VS.SPECTRUM,
             client_module.VS.SPEC_ACCUM,
         ]
@@ -459,10 +536,10 @@ def test_spectrum_reads_configuration_once_per_connection(client_module, monkeyp
         device = supply_connection(monkeypatch, client_module, fresh)
         await client.connect(device)
         assert transport.disconnect_count == 1
-        assert client.spectrum_format_version is None
-        assert not client._spectrum_format_loaded
+        assert client.spectrum_format_version == 0
+        assert client._spectrum_format_loaded
         assert len((await client.get_spectrum()).counts) == 1024
-        assert calls.count(client_module.VS.CONFIGURATION) == 2
+        assert calls.count(client_module.VS.CONFIGURATION) == 0
 
     asyncio.run(scenario())
 
@@ -477,21 +554,171 @@ def test_full_frame_with_incomplete_spectrum_is_rejected(client_module):
         client, _ = attached_client(client_module, handler)
         client._spectrum_format_loaded = True
         client._spectrum_format_version = 0
-        with pytest.raises(ValueError, match="512 of 1024"):
+        with pytest.raises(ValueError, match="incomplete .512 channels"):
             await client.get_spectrum()
         assert client.is_connected  # complete frame; invalid spectrum payload
 
     asyncio.run(scenario())
 
 
-def test_configuration_transport_error_prevents_spectrum_command(client_module):
+def test_each_spectrum_validates_encoding_even_after_a_format_is_learned(client_module):
+    async def scenario():
+        header = struct.pack("<Ifff", 120, 0.0, 3.0, 0.0)
+        spectra = [header + struct.pack("<1024I", *range(1024)), header + b"\x00\x40"]
+
+        def handler(transport, request):
+            data = spectra.pop(0)
+            transport.reply(request, struct.pack("<II", 1, len(data)) + data)
+
+        client, transport = attached_client(client_module, handler)
+        assert (await client.get_spectrum()).counts == list(range(1024))
+        assert client.spectrum_format_version == 0
+        assert (await client.get_spectrum()).counts == [0] * 1024
+        assert client.spectrum_format_version == 1
+        assert len(transport.requests) == 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("authoritative", [False, True])
+def test_ambiguous_spectrum_requires_authoritative_configuration(client_module, authoritative):
+    async def scenario():
+        body = b"\xf5\x3f" + struct.pack("<1023I", *([100] * 1023)) + b"\x10\x00"
+        data = struct.pack("<Ifff", 120, 0.0, 3.0, 0.0) + body
+
+        def handler(transport, request):
+            transport.reply(request, struct.pack("<II", 1, len(data)) + data)
+
+        client, transport = attached_client(client_module, handler)
+        client._spectrum_format_version = 1
+        client._spectrum_format_loaded = True
+        client._spectrum_format_authoritative = authoritative
+        if authoritative:
+            assert (await client.get_spectrum()).counts == [100] * 1023 + [0]
+        else:
+            with pytest.raises(ValueError, match="Ambiguous spectrum encoding"):
+                await client.get_spectrum()
+            assert client.transport_diagnostics["recent_commands"][-1]["error_category"] == "invalid_payload"
+        assert len(transport.requests) == 1
+        assert client.is_connected
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("configuration", [
+    b"SpecFormatVersion=abc\n", b"SpecFormatVersion=\n", b"SpecFormatVersion=2\n",
+    b"SpecFormatVersion=0\nSpecFormatVersion=1\n",
+])
+def test_malformed_configuration_cannot_authorize_ambiguous_spectrum(client_module, configuration):
+    async def scenario():
+        body = b"\xf5\x3f" + struct.pack("<1023I", *([100] * 1023)) + b"\x10\x00"
+        spectrum = struct.pack("<Ifff", 120, 0.0, 3.0, 0.0) + body
+
+        def handler(transport, request):
+            target = struct.unpack_from("<I", request, 8)[0]
+            data = configuration if target == client_module.VS.CONFIGURATION else spectrum
+            transport.reply(request, struct.pack("<II", 1, len(data)) + data)
+
+        client, _ = attached_client(client_module, handler)
+        client._spectrum_format_version = 1
+        client._spectrum_format_loaded = True  # previously uniquely validated
+        with pytest.raises(ValueError, match="SpecFormatVersion declaration"):
+            await client.refresh_spectrum_format()
+        assert client.spectrum_format_version == 1
+        assert not client._spectrum_format_authoritative
+        with pytest.raises(ValueError, match="Ambiguous spectrum encoding"):
+            await client.get_spectrum()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("configuration,authoritative", [
+    (b"Firmware=4.14\n", False), (b" SpecFormatVersion = 1\n", True),
+])
+def test_configuration_default_does_not_disambiguate_spectrum(client_module, configuration, authoritative):
+    async def scenario():
+        body = b"\xf5\x3f" + struct.pack("<1023I", *([100] * 1023)) + b"\x10\x00"
+        spectrum = struct.pack("<Ifff", 120, 0.0, 3.0, 0.0) + body
+
+        def handler(transport, request):
+            target = struct.unpack_from("<I", request, 8)[0]
+            data = configuration if target == client_module.VS.CONFIGURATION else spectrum
+            transport.reply(request, struct.pack("<II", 1, len(data)) + data)
+
+        client, _ = attached_client(client_module, handler)
+        await client.refresh_spectrum_format()
+        assert client._spectrum_format_authoritative is authoritative
+        assert client.transport_diagnostics["spectrum_format_source"] == (
+            "configuration" if authoritative else "configuration_default"
+        )
+        assert client.spectrum_format_source == (
+            "configuration" if authoritative else "configuration_default"
+        )
+        if authoritative:
+            assert (await client.get_spectrum()).counts == [100] * 1023 + [0]
+        else:
+            assert client.spectrum_format_version == 0
+            with pytest.raises(ValueError, match="Ambiguous spectrum encoding"):
+                await client.get_spectrum()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("queued_operation", ["command", "data_buf", "spectrum", "format"])
+def test_transport_history_separates_command_lock_wait_from_round_trip(client_module, queued_operation):
+    async def scenario():
+        first_started = asyncio.Event()
+        finish_first = asyncio.Event()
+        spectrum = struct.pack("<Ifff", 120, 0.0, 3.0, 0.0) + struct.pack("<1024I", *range(1024))
+
+        async def handler(transport, request):
+            command = struct.unpack_from("<H", request, 4)[0]
+            if command == client_module.CMD.GET_VERSION:
+                if len(transport.requests) == 1:
+                    first_started.set()
+                    await finish_first.wait()
+                transport.reply(request, b"complete")
+                return
+            target = struct.unpack_from("<I", request, 8)[0]
+            data = (
+                spectrum if target == client_module.VS.SPECTRUM else
+                b"SpecFormatVersion=1\n" if target == client_module.VS.CONFIGURATION else b""
+            )
+            transport.reply(request, struct.pack("<II", 1, len(data)) + data)
+
+        client, _ = attached_client(client_module, handler)
+        first = asyncio.create_task(client._execute(client_module.CMD.GET_VERSION))
+        await first_started.wait()
+        if queued_operation == "command":
+            operation = client._execute(client_module.CMD.GET_VERSION)
+        elif queued_operation == "data_buf":
+            operation = client.get_data()
+        elif queued_operation == "spectrum":
+            operation = client.get_spectrum()
+        else:
+            operation = client.refresh_spectrum_format()
+        second = asyncio.create_task(operation)
+        await asyncio.sleep(0.025)
+        finish_first.set()
+        await asyncio.gather(first, second)
+        history = client.transport_diagnostics["recent_commands"]
+        assert len(history) == 2
+        assert history[0]["lock_wait_s"] < 0.01
+        assert history[1]["lock_wait_s"] >= 0.02
+        assert history[1]["elapsed_s"] < history[1]["lock_wait_s"]
+        assert all(command["outcome"] == "success" for command in history)
+
+    asyncio.run(scenario())
+
+
+def test_direct_spectrum_transport_failure_is_strict_and_has_no_configuration_gate(client_module):
     async def scenario():
         client, transport = attached_client(client_module, lambda *_: None)
         with pytest.raises(TimeoutError):
             await client.get_spectrum()
         assert not client._spectrum_format_loaded
         assert len(transport.requests) == 1
-        assert struct.unpack_from("<I", transport.requests[0], 8)[0] == client_module.VS.CONFIGURATION
+        assert struct.unpack_from("<I", transport.requests[0], 8)[0] == client_module.VS.SPECTRUM
         assert not client.is_connected
 
     asyncio.run(scenario())
@@ -514,12 +741,17 @@ def test_temperature_register_is_cached_between_sensor_polls(client_module, monk
 
         monkeypatch.setattr(client, "_read_vsfr_batch", temperature)
         monkeypatch.setattr(client, "_read_vs", data)
+        assert (await client.get_data()).temperature is None
+        assert not temperature_reads
+        assert await client.get_temperature() == 22.5
         for _ in range(30):
-            assert (await client.get_data()).temperature == 22.5
+            assert (await client.get_data()).temperature is None
+            assert await client.get_temperature() == 22.5
         assert len(temperature_reads) == 1
-        assert len(primary_reads) == 30
+        assert len(primary_reads) == 31
         client._last_temperature_read -= 60
-        assert (await client.get_data()).temperature == 22.5
+        assert await client.get_temperature() == 22.5
+        assert (await client.get_data()).temperature is None
         assert len(temperature_reads) == 2
 
     asyncio.run(scenario())
@@ -571,6 +803,14 @@ def test_failed_optional_temperature_keeps_radiation_and_deadline_across_reconne
         first = await client.get_data()
         assert first.count_rate == 12.5
         assert first.dose_rate == pytest.approx(1.23)
+        assert first.measurement_time == datetime.datetime(2026, 1, 1)
+        assert first.measurement_type == "RealTimeData"
+        assert first.measurement_flags == 0
+        assert not temperature_attempts
+        assert client.is_connected
+        with pytest.raises(TimeoutError):
+            await client.get_temperature()
+        assert first.count_rate == 12.5  # already delivered primary reading
         assert len(temperature_attempts) == 1
         assert not client.is_connected
         deadline = client._last_temperature_read
@@ -581,10 +821,13 @@ def test_failed_optional_temperature_keeps_radiation_and_deadline_across_reconne
         assert client._last_temperature_read == deadline
         for _ in range(20):
             assert (await client.get_data()).count_rate == 12.5
+            await client.get_temperature()
         assert len(temperature_attempts) == 1
         assert client.is_connected
         client._last_temperature_read -= 60
         assert (await client.get_data()).count_rate == 12.5
+        with pytest.raises(TimeoutError):
+            await client.get_temperature()
         assert len(temperature_attempts) == 2
         assert not client.is_connected
 
