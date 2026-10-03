@@ -11,6 +11,25 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.0] — 2026-10-03
+
+### Fixed
+- **Spectrum format selection** — read the device configuration before the first spectrum and use the upstream format-0 default when `SpecFormatVersion` is absent. Treat unsupported encodings and malformed spectra as failures instead of publishing an empty or incomplete histogram. Covers a regression vector that previously produced `unsupported vlen=6`.
+- **Spectrum dashboard example** — replace the time-based ApexCharts example with a Plotly card using a numeric energy axis. Copy-paste YAML is also provided in `examples/spectrum-card.yaml`.
+- **Bluetooth response integrity** — require complete, correctly framed replies; release failed connections on timeout, cancellation, malformed replies or write failures. The command deadline includes writes, and callbacks from retired connections cannot corrupt a new session.
+- **Spectrum update overhead** — cache totals and attributes per spectrum snapshot and skip repeated state writes between spectrum reads while preserving availability transitions.
+- **HA device registry warning** — use a lookup scoped to the integration's config entry on HA 2026.8+, with compatibility for older HA versions.
+
+### Changed
+- **Lower device workload** — settings, device-health diagnostics and the temperature register are read at most once per minute during normal polling. HA setting writes still trigger an immediate settings refresh.
+- **Spectrum recovery** — preserve the last complete histogram on failure and back off automatic retries from 5 minutes to 1 hour to avoid repeated heavy transfers. Spectrum polling can still be disabled with interval 0.
+- **Diagnostics** — include spectrum format, last spectrum error, channel count and time until the next automatic read.
+
+### Validation limits
+- Regression tests cover protocol decoding, repeated BLE commands, failures/cancellation, coordinator scheduling and spectrum entity updates. A prolonged RC-103G FW 4.14 hardware test and confirmation of the reported device error remain outstanding; this release does not claim to diagnose that uncaptured error.
+
+---
+
 ## [2.0.0b1] — 2026-07-05
 
 First 2.0 beta: **gamma spectrum support**.
@@ -273,7 +292,8 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v2.0.0b1...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.0
 [2.0.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.0b1
 [1.3.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0
 [1.3.0b2]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0b2

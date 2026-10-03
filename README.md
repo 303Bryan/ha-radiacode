@@ -54,41 +54,50 @@ The **Spectrum** sensor exposes the device's gamma spectrum (default: refreshed 
 | `channels` | Per-channel counts (1024 bins; excluded from the recorder database) |
 | `calibration_a0/a1/a2` | Energy calibration: E(ch) = a0 + a1·ch + a2·ch² keV |
 | `duration_s` | Spectrum accumulation time in seconds |
-| `truncated` | True when a BT-proxy transfer was cut short (leading channels still valid) |
+| `truncated` | False for published snapshots; incomplete reads keep the previous complete snapshot |
 
 A **Spectrum Reset** button clears the accumulation, and the **`radiacode.get_spectrum` action** returns the spectrum as response data (`accumulated: true` for the device's long-term accumulated spectrum) for use in scripts and automations.
 
-**Plotting the spectrum** — with the community [ApexCharts card](https://github.com/RomRider/apexcharts-card):
+**Plotting the spectrum** — install [Plotly Graph Card](https://github.com/dbuezas/lovelace-plotly-graph-card) from HACS, then add a Manual card using the YAML below. Replace `sensor.radiacode_spectrum` with your device's actual Spectrum entity ID (shown in Settings → Devices & Services → Entities). The same example is available in [examples/spectrum-card.yaml](examples/spectrum-card.yaml).
+
+The energy axis must be numeric. The previous ApexCharts example applied a time range to keV values, leaving the plot empty.
 
 ```yaml
-type: custom:apexcharts-card
-header:
-  show: true
-  title: Gamma Spectrum
-graph_span: 1h
-update_interval: 60s
-series:
+type: custom:plotly-graph
+title: Gamma Spectrum
+refresh_interval: 60
+raw_plotly_config: true
+entities:
   - entity: sensor.radiacode_spectrum
     name: Counts
-    data_generator: |
-      const a0 = entity.attributes.calibration_a0;
-      const a1 = entity.attributes.calibration_a1;
-      const a2 = entity.attributes.calibration_a2;
-      return (entity.attributes.channels || []).map((count, ch) =>
-        [a0 + a1 * ch + a2 * ch * ch, count]);
-yaxis:
-  - min: 0
-apex_config:
+    type: scatter
+    mode: lines
+    x: |
+      $fn ({ hass, getFromConfig }) => {
+        const sensor = hass.states[getFromConfig('.entity')];
+        if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
+        const a = sensor.attributes;
+        return (a.channels || []).map((_, ch) =>
+          a.calibration_a0 + a.calibration_a1 * ch + a.calibration_a2 * ch * ch);
+      }
+    y: |
+      $fn ({ hass, getFromConfig }) => {
+        const sensor = hass.states[getFromConfig('.entity')];
+        if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
+        return sensor.attributes.channels || [];
+      }
+    hovertemplate: '%{x:.1f} keV<br>%{y} counts<extra></extra>'
+layout:
   xaxis:
-    type: numeric
-    title:
-      text: Energy (keV)
-  chart:
-    zoom:
-      enabled: true
+    type: linear
+    title: Energy (keV)
+    autorange: true
+  yaxis:
+    title: Counts
+    rangemode: tozero
 ```
 
-> **BT proxy note:** the spectrum is the largest BLE transfer this integration performs. Through an ESPHome proxy it may be truncated by the notification buffer — the decoded leading channels (where most background counts live) are kept and `truncated: true` is set. A direct Bluetooth adapter receives full spectra. Set the spectrum interval option to 0 to disable spectrum polling.
+> **BT proxy note:** the spectrum is the largest BLE transfer this integration performs. Incomplete or incorrectly framed Bluetooth responses cause the affected connection to be released before another command can reuse it. Invalid spectra are rejected and the last complete snapshot is kept; failed automatic reads retry after 5 minutes, then 10 minutes, up to 1 hour (or your configured interval if longer). Normal radiation polling continues. Download diagnostics to see the spectrum format, last error, channel count and next read time. Set the spectrum interval to 0 to disable automatic spectrum reads; the on-demand action remains available.
 
 ### Binary Sensors
 
@@ -217,7 +226,7 @@ For the best results with BT proxies:
 
 ## Known Limitations
 
-- **BT proxy notification buffer** — ESPHome proxies can forward approximately 28 BLE notification packets per transfer. For large data buffers (accumulated while the device was disconnected), the integration automatically uses whatever data arrived before the buffer filled. No data is lost; the next poll will catch up.
+- **Large Bluetooth transfers** — weak links or busy proxies can stall spectrum/configuration transfers. The integration rejects incomplete responses, reconnects for subsequent polls, and backs off failed automatic spectrum reads. A stale data-buffer drain failure aborts initialization instead of continuing on a damaged stream; records sent during an interrupted read may be lost.
 - **Outlier suppression delay** — a dose/count rate reading more than 50× above the current baseline is held back for one poll and shown only if the next poll confirms it. Genuine radiation events (which are sustained) appear at most one poll interval late; one-off corrupt values from truncated BLE transfers never reach the graph. Suppressed values are logged as warnings.
 - **Signal Strength while connected** — a connected BLE peripheral stops advertising, so no fresh RSSI is available during an active connection; the sensor holds the last observed value until the next advertisement.
 - **RareData update rate** — Battery, Temperature, and Accumulated Dose are updated by the device approximately once per minute, regardless of the poll interval.
