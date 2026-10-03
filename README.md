@@ -95,7 +95,7 @@ layout:
     rangemode: tozero
 ```
 
-> **BT proxy note:** the spectrum is the largest BLE transfer this integration performs. Incomplete or incorrectly framed Bluetooth responses cause the affected connection to be released before another command can reuse it. Invalid spectra are rejected and the last complete snapshot is kept; failed automatic reads retry after 5 minutes, then 10 minutes, up to 1 hour (or your configured interval if longer). Normal radiation polling continues. Download diagnostics to see the spectrum format, last error, channel count and next read time. Set the spectrum interval to 0 to disable automatic spectrum reads; the on-demand action remains available.
+> **BT proxy note:** spectrum acquisition reads the histogram directly and selects an encoding only after complete validation; a configuration download is no longer a prerequisite. Incomplete or incorrectly framed Bluetooth responses cause the affected connection to be released before another command can reuse it. Invalid spectra are rejected and the last complete snapshot is kept; failed automatic reads retry after 5 minutes, then 10 minutes, up to 1 hour (or your configured interval if longer). Radiation readings publish before optional maintenance starts. The device still handles one BLE command at a time, so a stalled bulk request can delay the next acquisition until its bounded timeout releases the link. Download diagnostics to see format provenance, errors, transfer sizes/timing and snapshot age. Set the spectrum interval to 0 to disable automatic spectrum reads; the on-demand action remains available and updates the current-spectrum entity.
 
 ### Binary Sensors
 
@@ -150,7 +150,7 @@ The integration exposes the full Radiacode configuration as writable HA entities
 
 ## Requirements
 
-- **Home Assistant**
+- **Home Assistant 2026.9.4 or newer**
 - **Radiacode** RC-102, RC-103, or RC-110 (tested with firmware 4.8 and 4.14)
 - **Bluetooth** — one of:
   - A Bluetooth adapter on your HA host (USB dongle or built-in), **or**
@@ -225,7 +225,8 @@ For the best results with BT proxies:
 ## Known Limitations
 
 - **Large Bluetooth transfers** — weak links or busy proxies can stall spectrum/configuration transfers. The integration rejects incomplete responses, reconnects for subsequent polls, and backs off failed automatic spectrum reads. A stale data-buffer drain failure aborts initialization instead of continuing on a damaged stream; records sent during an interrupted read may be lost.
-- **Outlier suppression delay** — a dose/count rate reading more than 50× above the current baseline is held back for one poll and shown only if the next poll confirms it. Genuine radiation events (which are sustained) appear at most one poll interval late; one-off corrupt values from truncated BLE transfers never reach the graph. Suppressed values are logged as warnings.
+- **Measurement freshness** — dose and count remain paired from the same sample. Empty buffers, repeated device timestamps and suppressed outliers do not renew freshness; after three poll intervals (at least 15 seconds) without a new accepted sample, radiation entities become unavailable. Diagnostics distinguish measurement age from a successful Bluetooth request.
+- **Outlier suppression delay** — a dose/count rate reading more than 50× above the current baseline is held for confirmation by a subsequent measurement. Suppressed values are logged as warnings; interrupted transfers and stale readings can extend the interval before confirmation.
 - **Signal Strength while connected** — a connected BLE peripheral stops advertising, so no fresh RSSI is available during an active connection; the sensor holds the last observed value until the next advertisement.
 - **RareData update rate** — Battery, Temperature, and Accumulated Dose are updated by the device approximately once per minute, regardless of the poll interval.
 - **Single connection** — The Radiacode can only maintain one BLE connection at a time. While this integration is connected, the Radiacode mobile app will not be able to connect to the device (and vice versa).
@@ -260,9 +261,15 @@ logger:
 
 Debug logs include per-poll timings, BLE notification reassembly details, and decoded record distributions — include them when filing an issue.
 
+The command summaries identify the virtual string/register target, response sizes, notification count and size distribution, first-byte latency, maximum gap, lock wait, connection generation and failure category. Radiation logs identify the selected sample type/time, opaque flags and device-versus-receipt progression. Optional-operation errors remain separate from the primary polling result. Histories are bounded; routine logs do not print full spectra or configuration contents.
+
+On the proxy, look for notification-forwarding failures, dropped BLE events, TCP congestion and poor reception. An advertisement's source/RSSI can differ from the connected proxy and can be stale while connected. Record both the proxy project version and ESPHome build version; they are separate versions. [ESPHome's proxy documentation](https://esphome.io/components/bluetooth_proxy/) explains reception and shared-radio constraints.
+
 ### Downloading diagnostics
 
 From the device page, click the three-dot menu → **Download diagnostics** to get a JSON dump of connection statistics, the latest sensor/settings snapshot, device-health readings, and the device's self-describing **SFR register directory** — a listing of every register the firmware supports with its address, size, type, and signedness (Bluetooth address and device name are redacted).
+
+The download also includes bounded transport history, maintenance status, measurement freshness and spectrum attempt/success ages. Device and proxy identifiers are redacted. Full research, primary references and hardware acceptance criteria are in [protocol and stability research](docs/protocol-and-stability-research.md).
 
 ---
 

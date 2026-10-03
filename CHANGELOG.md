@@ -11,6 +11,27 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.1rc1] — 2026-10-03
+
+### Fixed
+- **Spectrum acquisition** — request the histogram directly instead of requiring a large configuration download first. Validate both supported encodings and accept only a complete, uniquely valid 1,024-channel spectrum. Correct absolute uint32 and wrapping-delta decoding in compressed spectra.
+- **Delayed HA readings** — publish DATA_BUF radiation readings before optional identity, temperature, settings, health and spectrum requests. One managed maintenance task handles those requests and is cancelled on disconnect, unload and shutdown.
+- **Stale or mismatched measurements** — keep dose and count from the same latest valid record, accept genuine zero readings, and expire cached radiation after three poll intervals (at least 15 seconds) without an advancing measurement. Optional results cannot mark a stale or failed primary poll successful.
+- **Manual spectrum action** — successful current-spectrum action results update the Spectrum entity used by dashboard cards.
+
+### Added
+- **Transfer diagnostics** — bounded command histories with targets, sequences, link generations, byte/fragment counts, latency/gaps, error categories and disconnect reasons; measurement freshness/provenance, optional-operation status and spectrum attempt/success ages. Source identifiers are redacted in downloadable diagnostics.
+- **Research notes** — device/library/proxy evidence and unresolved protocol questions in `docs/protocol-and-stability-research.md`.
+- **Real HA regression coverage** — test publication and cancellation using Home Assistant 2026.9.4 and Python 3.14, alongside decoder, fake-transport and captured-record regression tests.
+
+### Changed
+- **HA requirement** — Home Assistant 2026.9.4 or newer. The managed background task lifecycle is validated against that runtime; HACS no longer advertises incompatible HA 2024.1 support.
+
+### Validation limits
+- Release candidate for RC-103G firmware 4.14 and Bluetooth-proxy validation. Missing notification packets remain a transport failure; incomplete histograms are rejected. Repeated complete spectra, a populated physical dashboard, responsive device/LCD readings, and prolonged connection stability must be verified before promoting this candidate to production.
+
+---
+
 ## [2.0.0] — 2026-10-03
 
 ### Fixed

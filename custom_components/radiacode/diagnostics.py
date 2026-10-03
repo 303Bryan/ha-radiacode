@@ -18,7 +18,16 @@ from homeassistant.core import HomeAssistant
 from .const import CONF_ADDRESS, CONF_NAME, DOMAIN
 from .coordinator import RadiaCodeCoordinator
 
-TO_REDACT = {CONF_ADDRESS, CONF_NAME}
+TO_REDACT = {
+    CONF_ADDRESS,
+    CONF_NAME,
+    "source",
+    "serial_number",
+    "advertisement_source_at_connect",
+    "connection_request_source",
+    "connection_request_source_name",
+    "connection_request_scanner_source",
+}
 
 
 async def async_get_config_entry_diagnostics(
@@ -27,6 +36,9 @@ async def async_get_config_entry_diagnostics(
     """Return diagnostics for a config entry."""
     coordinator: RadiaCodeCoordinator = hass.data[DOMAIN][entry.entry_id]
     data = coordinator.data
+    sensors = asdict(data.sensors) if data is not None else None
+    if sensors is not None and sensors.get("measurement_time") is not None:
+        sensors["measurement_time"] = sensors["measurement_time"].isoformat()
 
     return {
         "entry": {
@@ -54,8 +66,12 @@ async def async_get_config_entry_diagnostics(
             "last_poll_duration": coordinator.last_poll_duration,
             "last_update_success": coordinator.last_update_success,
         },
-        "sensors": asdict(data.sensors) if data is not None else None,
+        "sensors": sensors,
         "settings": asdict(data.settings) if data is not None else None,
         "device_health": asdict(data.diagnostics) if data is not None else None,
         "spectrum": coordinator.spectrum_status,
+        "runtime": async_redact_data(coordinator.runtime_status, TO_REDACT),
+        "transport": async_redact_data(
+            coordinator.transport_status, TO_REDACT
+        ),
     }

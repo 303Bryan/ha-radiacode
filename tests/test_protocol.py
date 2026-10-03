@@ -188,6 +188,50 @@ def test_decode_real_time_data(protocol):
     assert rec.dt == BASE_TIME
 
 
+@pytest.mark.parametrize(
+    "wire_hex,offset,flags,count_rate,dose_rate,count_err,dose_err",
+    [
+        (
+            "fd000078dfffff8fb83b41e56989372b009600400000",
+            -8328, 0x0040, 11.732558250427246, 1.6380983652197756e-5, 4.3, 15.0,
+        ),
+        (
+            "0b00007dfeffff6666464144dd8737b2009902404000",
+            -387, 0x4040, 12.399999618530273, 1.619628892512992e-5, 17.8, 66.5,
+        ),
+        (
+            "780000e74800007ae838413f918e372a009600404000",
+            18663, 0x4040, 11.556756973266602, 1.6995354599202983e-5, 4.2, 15.0,
+        ),
+    ],
+)
+def test_captured_real_time_records_preserve_offsets_flags_and_rates(
+    protocol, wire_hex, offset, flags, count_rate, dose_rate, count_err, dose_err
+):
+    # Exact 22-byte records from a 103G/FW 4.14 diagnostic capture. Only
+    # measurement wire fields are retained; the time anchor below is synthetic.
+    wire = bytes.fromhex(wire_hex)
+    assert len(wire) == 22
+    records = protocol.decode_data_buf(wire, BASE_TIME)
+    assert len(records) == 1
+    record = records[0]
+    assert isinstance(record, protocol.RealTimeData)
+    assert record.dt == BASE_TIME + datetime.timedelta(milliseconds=offset * 10)
+    assert record.flags == flags
+    assert record.real_time_flags == 0
+    assert record.count_rate == pytest.approx(count_rate)
+    assert record.dose_rate == pytest.approx(dose_rate)
+    assert record.count_rate_err == pytest.approx(count_err)
+    assert record.dose_rate_err == pytest.approx(dose_err)
+
+    data = protocol.extract_sensor_values(records)
+    assert data.count_rate == pytest.approx(count_rate)
+    assert data.dose_rate == pytest.approx(dose_rate * 10000)
+    assert data.measurement_time == record.dt
+    assert data.measurement_type == "RealTimeData"
+    assert data.measurement_flags == flags
+
+
 def test_decode_rare_data(protocol):
     records = protocol.decode_data_buf(_rare_data_record(0, ts_offset=100), BASE_TIME)
     assert len(records) == 1
@@ -251,6 +295,9 @@ def test_extract_sensor_values_empty(protocol):
     assert data.accumulated_dose is None
     assert data.battery is None
     assert data.temperature is None
+    assert data.measurement_time is None
+    assert data.measurement_type is None
+    assert data.measurement_flags is None
 
 
 def test_extract_sensor_values_uses_most_recent(protocol):
@@ -260,6 +307,63 @@ def test_extract_sensor_values_uses_most_recent(protocol):
     )
     data = protocol.extract_sensor_values(records)
     assert data.dose_rate == pytest.approx(2.0, rel=1e-4)
+
+
+def test_extract_pairs_rates_from_newest_timestamp_not_arrival_order(protocol):
+    # A buffered DB record can follow a newer live reading in the same response.
+    # Mixing its dose with the live count would also corrupt derived hardness.
+    live = protocol.RealTimeData(
+        dt=BASE_TIME + datetime.timedelta(seconds=10),
+        count_rate=12, count_rate_err=1, dose_rate=0.0002, dose_rate_err=1,
+        flags=0x4000,
+    )
+    history = protocol.DoseRateDB(
+        dt=BASE_TIME, count=60, count_rate=6, dose_rate=0.0001, dose_rate_err=1,
+        flags=0x2000,
+    )
+    data = protocol.extract_sensor_values([live, history])
+    assert data.count_rate == 12
+    assert data.dose_rate == 2
+    assert data.measurement_time == live.dt
+    assert data.measurement_type == "RealTimeData"
+    assert data.measurement_flags == 0x4000
+
+
+@pytest.mark.parametrize("kind", ["RawData", "DoseRateDB", "RealTimeData"])
+def test_extract_valid_zero_replaces_previous_rates(protocol, kind):
+    previous = protocol.RawData(BASE_TIME, count_rate=12, dose_rate=0.0002)
+    common = dict(dt=BASE_TIME + datetime.timedelta(seconds=1), count_rate=0, dose_rate=0)
+    if kind == "RealTimeData":
+        latest = protocol.RealTimeData(**common, count_rate_err=0, dose_rate_err=0)
+    elif kind == "DoseRateDB":
+        latest = protocol.DoseRateDB(**common, count=0, dose_rate_err=0)
+    else:
+        latest = protocol.RawData(**common)
+    data = protocol.extract_sensor_values([previous, latest])
+    assert data.dose_rate == 0
+    assert data.count_rate == 0
+    assert data.measurement_time == latest.dt
+    assert data.measurement_type == kind
+
+
+def test_extract_live_pair_wins_equal_timestamp_in_either_arrival_order(protocol):
+    raw = protocol.RawData(BASE_TIME, count_rate=6, dose_rate=0.0001)
+    live = protocol.RealTimeData(BASE_TIME, 12, 1, 0.0002, 1)
+    for records in ([raw, live], [live, raw]):
+        data = protocol.extract_sensor_values(records)
+        assert data.count_rate == 12
+        assert data.dose_rate == 2
+        assert data.measurement_type == "RealTimeData"
+
+
+def test_extract_rejects_invalid_latest_pair_without_changing_provenance(protocol):
+    valid = protocol.RawData(BASE_TIME, count_rate=6, dose_rate=0.0001)
+    invalid = protocol.RawData(BASE_TIME + datetime.timedelta(seconds=1), 20, float("nan"))
+    data = protocol.extract_sensor_values([valid, invalid])
+    assert data.count_rate == 6
+    assert data.dose_rate == 1
+    assert data.measurement_time == valid.dt
+    assert data.measurement_type == "RawData"
 
 
 # ── Settings decoding ─────────────────────────────────────────────────────────
@@ -502,13 +606,13 @@ def test_decode_spectrum_v0(protocol):
 
 
 # Manually encoded wire vector, independent of decoder implementation. The
-# upstream decoder at cdump/radiacode commit 2b217916f49f5eedddf8f0d9116fcfd3c6b8832e
-# documents this format in src/radiacode/decoders/spectrum.py. This is a synthetic
+# maintained decoder at Am6er/BecqMoni commit 11c4235f060873b910d7e5f36275e933f21939da
+# defines vlen=5 as absolute uint32 in BecquerelMonitor/RadiaCodeIn.cs. This is a synthetic
 # complete 1024-channel payload, not a claimed hardware capture:
-#   2 zeros; absolute 200; deltas +5, -10, +1000, +65536, -66731; 1016 zeros.
+#   2 zeros; absolute 200; deltas +5, -10, +1000, +65536; absolute 0; 1016 zeros.
 _SPECTRUM_V1_BODY = bytes.fromhex(
     "20 00 11 00 c8 22 00 05 f6 13 00 e8 03 "
-    "14 00 00 00 01 15 00 55 fb fe ff 80 3f"
+    "14 00 00 00 01 15 00 00 00 00 00 80 3f"
 )
 _SPECTRUM_V1_COUNTS = [0, 0, 200, 205, 195, 1195, 66731, 0] + [0] * 1016
 
@@ -560,17 +664,40 @@ def test_decode_spectrum_every_byte_cut_is_flagged(protocol, format_version):
 
 def test_decode_spectrum_signed_deltas_and_uint32_limit(protocol):
     # Signed 24-bit extrema, zeros resetting the delta base, absolute uint8
-    # values, and additions reaching UINT32_MAX without wrapping or going negative.
+    # values, and large absolute uint32 values that must not be treated as deltas.
     body = bytes.fromhex(
         "13 00 ff 7f 24 00 ff ff 7f 00 00 80 20 00 "
-        "11 00 ff 12 00 80 13 00 81 ff 25 00 ff ff ff 7f ff ff ff 7f "
-        "15 00 01 00 00 00 50 3f"
+        "11 00 ff 12 00 80 13 00 81 ff 25 00 ff ff ff 7f fe ff ff ff "
+        "12 00 01 50 3f"
     )
     expected = [32767, 8421374, 32766, 0, 0, 255, 127, 0,
                 2147483647, 4294967294, 4294967295] + [0] * 1013
     s = protocol.decode_spectrum(_spectrum_header() + body, 1)
     assert s.counts == expected
     assert not s.truncated
+
+
+@pytest.mark.parametrize("vlen,value_bytes", [
+    (2, bytes.fromhex("01 ff")),
+    (3, bytes.fromhex("01 00 ff ff")),
+    (4, bytes.fromhex("01 00 00 ff ff ff")),
+])
+def test_decode_spectrum_signed_delta_wrap_matches_uint32(protocol, vlen, value_bytes):
+    # Start at UINT32_MAX, +1 wraps to 0; -1 wraps back. The next group must
+    # start immediately after the vlen4 values, without a padding skip.
+    body = bytes.fromhex("15 00 ff ff ff ff")
+    body += struct.pack("<H", (2 << 4) | vlen) + value_bytes
+    body += bytes.fromhex("d0 3f")  # 1021 zero channels
+    spectrum = protocol.decode_spectrum(_spectrum_header() + body, 1)
+    assert spectrum.counts == [0xFFFFFFFF, 0, 0xFFFFFFFF] + [0] * 1021
+    assert not spectrum.truncated
+
+
+def test_decode_spectrum_vlen5_is_absolute_after_nonzero_count(protocol):
+    body = bytes.fromhex("11 00 64 15 00 ff ff ff ff e0 3f")
+    spectrum = protocol.decode_spectrum(_spectrum_header() + body, 1)
+    assert spectrum.counts == [100, 0xFFFFFFFF] + [0] * 1022
+    assert not spectrum.truncated
 
 
 @pytest.mark.parametrize("vlen", range(6, 16))
@@ -585,8 +712,6 @@ def test_decode_spectrum_unknown_encoding_raises(protocol, vlen):
     (bytes.fromhex("00 00"), "zero channels"),
     (bytes.fromhex("10 40"), "more than 1024"),
     (bytes.fromhex("00 20 10 20"), "more than 1024"),
-    (bytes.fromhex("12 00 ff"), "uint32 range"),
-    (bytes.fromhex("25 00 ff ff ff 7f ff ff ff 7f 12 00 02"), "uint32 range"),
     (bytes.fromhex("00 40 01"), "trailing data"),
 ])
 def test_decode_spectrum_malformed_compressed_payload_raises(protocol, body, message):
@@ -614,6 +739,53 @@ def test_decode_spectrum_nonfinite_calibration_raises(protocol, value):
 def test_decode_spectrum_header_too_short_raises(protocol):
     with pytest.raises(ValueError):
         protocol.decode_spectrum(b"\x00\x01", 1)
+
+
+def test_detect_spectrum_uncompressed_without_configuration(protocol):
+    counts = [102] + [0] * 1023
+    data = _spectrum_header() + struct.pack("<1024I", *counts)
+    version, spectrum = protocol.detect_spectrum_format(data)
+    assert version == 0
+    assert spectrum.counts == counts
+    assert not spectrum.truncated
+
+
+def test_detect_spectrum_compressed_without_configuration(protocol):
+    version, spectrum = protocol.detect_spectrum_format(_spectrum_header() + _SPECTRUM_V1_BODY)
+    assert version == 1
+    assert spectrum.counts == _SPECTRUM_V1_COUNTS
+    assert not spectrum.truncated
+
+
+def test_detect_spectrum_rejects_ambiguous_raw_length(protocol):
+    # A compressed spectrum can be exactly the raw payload size: 1023 uint32
+    # values plus one zero channel. Both decoders consume all 4096 body bytes
+    # and produce 1024 channels, so choosing by length silently guesses.
+    body = bytes.fromhex("f5 3f") + struct.pack("<1023I", *([100] * 1023))
+    body += bytes.fromhex("10 00")
+    assert len(body) == 4096
+    assert not protocol.decode_spectrum(_spectrum_header() + body, 0).truncated
+    assert not protocol.decode_spectrum(_spectrum_header() + body, 1).truncated
+    with pytest.raises(ValueError, match="Ambiguous spectrum encoding"):
+        protocol.detect_spectrum_format(_spectrum_header() + body)
+
+
+def test_detect_spectrum_every_byte_cut_rejects_incomplete_payload(protocol):
+    data = _spectrum_header() + _SPECTRUM_V1_BODY
+    for cut in range(len(data)):
+        with pytest.raises(ValueError, match="No complete supported spectrum encoding"):
+            protocol.detect_spectrum_format(data[:cut])
+
+
+@pytest.mark.parametrize("data", [
+    _spectrum_header() + bytes.fromhex("00 40 ff"),  # complete channels, trailing byte
+    _spectrum_header() + bytes.fromhex("00 00"),  # zero channel group
+    _spectrum_header() + bytes.fromhex("16 00"),  # unsupported encoding
+    _spectrum_header(a1=float("nan")) + _SPECTRUM_V1_BODY,
+])
+def test_detect_spectrum_rejects_invalid_payload(protocol, data):
+    with pytest.raises(ValueError, match="No complete supported spectrum encoding"):
+        protocol.detect_spectrum_format(data)
 
 
 def test_channel_to_kev(protocol):

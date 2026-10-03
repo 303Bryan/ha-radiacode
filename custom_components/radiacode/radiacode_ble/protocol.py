@@ -176,6 +176,8 @@ class RealTimeData:
     count_rate_err: float  # error, percent
     dose_rate: float       # dose rate (float, units vary by firmware)
     dose_rate_err: float   # error, percent
+    flags: int = 0         # opaque device measurement flags
+    real_time_flags: int = 0  # opaque real-time flags, retained for diagnostics
 
 
 @dataclass
@@ -186,6 +188,7 @@ class DoseRateDB:
     count_rate: float      # counts per second (CPS)
     dose_rate: float       # dose rate (float, units vary by firmware)
     dose_rate_err: float   # error, percent
+    flags: int = 0         # opaque device measurement flags
 
 
 @dataclass
@@ -203,6 +206,7 @@ class RareData:
     dose: float            # accumulated dose, µSv
     charge_level: float    # battery, 0–100 percent
     temperature: float     # device temperature, °C
+    flags: int = 0         # opaque device status flags
 
 
 @dataclass
@@ -213,11 +217,14 @@ class RadiaCodeData:
     extract_sensor_values (raw data_buf values are in Roentgen).
     """
     dose_rate: Optional[float]         # µSv/h   (converted from R/h)
-    count_rate: Optional[float]        # CPS      (from RealTimeData)
+    count_rate: Optional[float]        # CPS      (paired with dose-rate sample)
     accumulated_dose: Optional[float]  # µSv      (converted from R)
     battery: Optional[float]           # percent  (from RareData)
     temperature: Optional[float]       # °C       (from RareData)
     hardness: Optional[float] = None   # dimensionless (µR/h per cps), derived
+    measurement_time: Optional[datetime.datetime] = None
+    measurement_type: Optional[str] = None
+    measurement_flags: Optional[int] = None
 
 
 def compute_hardness(
@@ -518,16 +525,17 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
     # Diagnostic counters for record types
     gid_counts: dict[int, int] = {}
 
-    _LOGGER.debug(
-        "decode_data_buf: %d bytes, first_hex=%s",
-        len(data), data[:60].hex() if data else "",
-    )
+    stop_reason = "complete"
+    stop_offset = len(data)
 
     while buf.remaining() >= 7:
+        record_offset = len(data) - buf.remaining()
         seq, eid, gid, ts_offset = buf.unpack("<BBBi")
         dt = base_time + datetime.timedelta(milliseconds=ts_offset * 10)
 
         if next_seq is not None and next_seq != seq:
+            stop_reason = f"sequence_jump(expected={next_seq},received={seq})"
+            stop_offset = record_offset
             break  # sequence jump — stop decoding
 
         next_seq = (seq + 1) % 256
@@ -535,13 +543,15 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
 
         try:
             if eid == 0 and gid == 0:       # GRP_RealTimeData
-                count_rate, dose_rate, cps_err, dr_err, _flags, _rt = buf.unpack("<ffHHHB")
+                count_rate, dose_rate, cps_err, dr_err, flags, rt_flags = buf.unpack("<ffHHHB")
                 records.append(RealTimeData(
                     dt=dt,
                     count_rate=count_rate,
                     count_rate_err=cps_err / 10,
                     dose_rate=dose_rate,
                     dose_rate_err=dr_err / 10,
+                    flags=flags,
+                    real_time_flags=rt_flags,
                 ))
 
             elif eid == 0 and gid == 1:     # GRP_RawData
@@ -553,22 +563,24 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
                 ))
 
             elif eid == 0 and gid == 2:     # GRP_DoseRateDB
-                count, count_rate, dose_rate, dr_err, _flags = buf.unpack("<IffHH")
+                count, count_rate, dose_rate, dr_err, flags = buf.unpack("<IffHH")
                 records.append(DoseRateDB(
                     dt=dt,
                     count=count,
                     count_rate=count_rate,
                     dose_rate=dose_rate,
                     dose_rate_err=dr_err / 10,
+                    flags=flags,
                 ))
 
             elif eid == 0 and gid == 3:     # GRP_RareData
-                _dur, dose, temperature, charge_level, _flags = buf.unpack("<IfHHH")
+                _dur, dose, temperature, charge_level, flags = buf.unpack("<IfHHH")
                 records.append(RareData(
                     dt=dt,
                     dose=dose,
                     charge_level=charge_level / 100,         # → 0–100 percent
                     temperature=(temperature - 2000) / 100,  # → °C
+                    flags=flags,
                 ))
 
             elif eid == 0 and gid == 4:     # GRP_UserData (skip)
@@ -595,14 +607,30 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
                 buf.skip(samples_num * _SAMPLE_SIZES[gid])
 
             else:
+                stop_reason = f"unknown_record(eid={eid},gid={gid})"
+                stop_offset = record_offset
                 break  # unknown record type; stop rather than misparse
 
-        except ValueError:
+        except ValueError as err:
+            stop_reason = f"incomplete_record(eid={eid},gid={gid},error={err})"
+            stop_offset = record_offset
             break  # truncated record; stop cleanly
 
+    if stop_reason == "complete" and buf.remaining():
+        stop_reason = "incomplete_header"
+        stop_offset = len(data) - buf.remaining()
+    if stop_reason != "complete" and _LOGGER.isEnabledFor(logging.DEBUG):
+        _LOGGER.debug(
+            "DATA_BUF decode stopped: reason=%s offset=%d unread_bytes=%d prefix=%s",
+            stop_reason, stop_offset, len(data) - stop_offset,
+            data[stop_offset:stop_offset + 32].hex(),
+        )
     # Log record type distribution and dose_rate values for diagnostics.
     # Raw dose_rate is in R/h; show converted µSv/h (×10000) for readability.
-    _LOGGER.debug("decode_data_buf: gid_counts=%s, total_records=%d", gid_counts, len(records))
+    _LOGGER.debug(
+        "decode_data_buf: bytes=%d gid_counts=%s total_records=%d stop_reason=%s",
+        len(data), gid_counts, len(records), stop_reason,
+    )
     for r in records:
         if isinstance(r, RealTimeData):
             _LOGGER.debug(
@@ -710,13 +738,17 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     Reference: cdump narodmon.py uses ``1_000_000 * dose_rate`` → µR/h;
                cdump webserver.py uses ``10_000 * dose_rate`` → µSv/h.
 
-    Dose rate and count rate are extracted from all record types that carry
-    them (RealTimeData, DoseRateDB, RawData), preferring the most recent
-    non-zero value.  RareData appears ~once per minute, so battery and
+    Dose rate and count rate always come from the same most recent valid
+    measurement (RealTimeData, DoseRateDB, RawData), including zero values.
+    Device timestamps select the newest record even when database history
+    follows live measurements in the buffer. Equal timestamps prefer live
+    RealTimeData, then RawData, then DoseRateDB; equal type/time uses the last
+    received record. RareData appears ~once per minute, so battery and
     accumulated_dose may be None if no RareData was in this batch.
 
-    Records are iterated in arrival order; each match overwrites the previous,
-    so the final values reflect the *last* (most recent) record of each type.
+    The selected timestamp and record type are retained for diagnostics;
+    timestamps are device offsets anchored at connection initialization,
+    not independently verified wall-clock freshness measurements.
     """
     # Conversion factor: R/h → µSv/h  (and R → µSv).
     _R_TO_uSv = 10_000
@@ -726,28 +758,23 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     accumulated_dose: Optional[float] = None
     battery: Optional[float] = None
     temperature: Optional[float] = None
+    measurement: Optional[RealTimeData | RawData | DoseRateDB] = None
+    measurement_priority = -1
+    priorities = {RealTimeData: 2, RawData: 1, DoseRateDB: 0}
 
     for r in records:
-        if isinstance(r, RealTimeData):
+        if isinstance(r, (RealTimeData, DoseRateDB, RawData)):
             if not (_valid_reading(r.dose_rate) and _valid_reading(r.count_rate)):
-                _LOGGER.debug("Skipping implausible RealTimeData record: %s", r)
+                _LOGGER.debug("Skipping implausible %s record: %s", type(r).__name__, r)
                 continue
-            count_rate = r.count_rate
-            dose_rate = r.dose_rate * _R_TO_uSv  # R/h → µSv/h
-        elif isinstance(r, DoseRateDB):
-            if not (_valid_reading(r.dose_rate) and _valid_reading(r.count_rate)):
-                _LOGGER.debug("Skipping implausible DoseRateDB record: %s", r)
-                continue
-            dose_rate = r.dose_rate * _R_TO_uSv  # R/h → µSv/h
-            if count_rate is None:
-                count_rate = r.count_rate
-        elif isinstance(r, RawData):
-            if not (_valid_reading(r.dose_rate) and _valid_reading(r.count_rate)):
-                _LOGGER.debug("Skipping implausible RawData record: %s", r)
-                continue
-            dose_rate = r.dose_rate * _R_TO_uSv  # R/h → µSv/h
-            if count_rate is None:
-                count_rate = r.count_rate
+            priority = priorities[type(r)]
+            if (
+                measurement is None
+                or r.dt > measurement.dt
+                or (r.dt == measurement.dt and priority >= measurement_priority)
+            ):
+                measurement = r
+                measurement_priority = priority
         elif isinstance(r, RareData):
             if (
                 not _valid_reading(r.dose)
@@ -761,12 +788,19 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
             battery = r.charge_level           # already 0–100 percent
             temperature = r.temperature      # °C, already converted in decoder
 
+    if measurement is not None:
+        dose_rate = measurement.dose_rate * _R_TO_uSv  # R/h → µSv/h
+        count_rate = measurement.count_rate
+
     return RadiaCodeData(
         dose_rate=dose_rate,
         count_rate=count_rate,
         accumulated_dose=accumulated_dose,
         battery=battery,
         temperature=temperature,
+        measurement_time=measurement.dt if measurement is not None else None,
+        measurement_type=type(measurement).__name__ if measurement is not None else None,
+        measurement_flags=getattr(measurement, "flags", None),
     )
 
 
@@ -822,9 +856,12 @@ def decode_spectrum(data: bytes, format_version: int) -> Spectrum:
       format 0 — one uint32 per channel
       format 1 — run-length groups: [uint16: count<<4 | vlen] then
                  `count` values encoded per vlen (0=zero, 1=uint8,
-                 2/3/5=delta int8/int16/int32, 4=delta int24)
+                 2/3=delta int8/int16, 4=delta int24, 5=absolute uint32)
 
-    Encoding follows cdump/radiacode's spectrum decoder. An incomplete
+    Signed deltas wrap at 32 bits, matching device count arithmetic. The
+    vlen=4 encoding has no padding. These rare branches follow the maintained
+    BecqMoni decoder; older cdump-derived implementations use a signed delta
+    for vlen=5 and can decode large absolute counts incorrectly. An incomplete
     transfer retains complete leading channels and is flagged
     ``truncated``, including a cut exactly between groups or values.
 
@@ -875,16 +912,14 @@ def decode_spectrum(data: bytes, format_version: int) -> Spectrum:
                 elif vlen == 1:
                     (v,) = buf.unpack("<B")
                 elif vlen == 2:
-                    v = last + buf.unpack("<b")[0]
+                    v = (last + buf.unpack("<b")[0]) & 0xFFFFFFFF
                 elif vlen == 3:
-                    v = last + buf.unpack("<h")[0]
+                    v = (last + buf.unpack("<h")[0]) & 0xFFFFFFFF
                 elif vlen == 4:
                     lo, mid, hi = buf.unpack("<BBb")
-                    v = last + ((hi << 16) | (mid << 8) | lo)
+                    v = (last + ((hi << 16) | (mid << 8) | lo)) & 0xFFFFFFFF
                 else:
-                    v = last + buf.unpack("<i")[0]
-                if not 0 <= v <= 0xFFFFFFFF:
-                    raise ValueError(f"Spectrum count outside uint32 range: {v}")
+                    v = buf.unpack("<I")[0]
                 last = v
                 counts.append(v)
             if truncated:
@@ -900,6 +935,36 @@ def decode_spectrum(data: bytes, format_version: int) -> Spectrum:
         counts=counts,
         truncated=truncated,
     )
+
+
+def detect_spectrum_format(data: bytes) -> tuple[int, Spectrum]:
+    """Infer an encoding only from a complete, uniquely valid spectrum.
+
+    Callers must first validate the complete transport frame and virtual
+    string length. Both supported decoders must consume the entire payload
+    and produce exactly 1024 channels. Payload length alone cannot identify
+    a format: a compressed spectrum can have the same size as a raw spectrum.
+    Ambiguous data must use an authoritative format or be rejected, never
+    guessed. The inferred encoding is not a firmware-version declaration.
+    """
+    candidates: list[tuple[int, Spectrum]] = []
+    errors: list[str] = []
+    for version in (0, 1):
+        try:
+            spectrum = decode_spectrum(data, version)
+        except ValueError as err:
+            errors.append(f"format {version}: {err}")
+            continue
+        if spectrum.truncated or len(spectrum.counts) != SPECTRUM_CHANNELS:
+            errors.append(f"format {version}: incomplete ({len(spectrum.counts)} channels)")
+            continue
+        candidates.append((version, spectrum))
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise ValueError("Ambiguous spectrum encoding: both formats decode 1024 channels")
+    raise ValueError("No complete supported spectrum encoding: " + "; ".join(errors))
 
 
 # ── Serial number decoder ─────────────────────────────────────────────────────

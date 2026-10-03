@@ -1,0 +1,62 @@
+# Protocol and stability research
+
+Reviewed October 3, 2026 before the revision following 2.0.0. This document records evidence, unresolved protocol questions, and the reason for the acquisition architecture. It is not a claim of physical device validation.
+
+## Scope and sources
+
+The review covered every integration Python module, all tests, services, configuration and translations, workflows, README, changelog, original project specification, relevant Git history, and all repository issues and pull requests. It also compared the manufacturer documentation, independent clients, maintained spectrum decoders, Home Assistant's coordinator, and ESPHome's relay implementation.
+
+The original `PROJECT_SPEC.md` describes an earlier proposed implementation. Its disconnect-per-poll lifecycle and some command identifiers conflict with subsequent accepted code and observed wire messages. The implemented protocol and the evidence below take precedence for understanding current behavior.
+
+| Source | What it establishes |
+| --- | --- |
+| [Radiacode hardware](https://www.radiacode.com/100-series?lang=en), [manual](https://downloads.radiacode.com/EN/RC-10x_Device_Manual.pdf) | Scintillator/photomultiplier signal processing, onboard measurement and LCD, and the different record-storage path while connected to an application. |
+| [Manufacturer spectrum documentation](https://radiacode.com/docs/en/100-series/software/android/spectrum/spectrum-channels), [changelog](https://radiacode.com/changelog/?lang=en) | Firmware 4+ uses 1,024 channels. The published 4.14 fix concerns dose calculation; it does not identify the reported uncaptured error or an LCD freeze fix. |
+| [cdump client](https://github.com/cdump/radiacode/blob/2b217916f49f5eedddf8f0d9116fcfd3c6b8832e/src/radiacode/radiacode.py), [transport](https://github.com/cdump/radiacode/blob/2b217916f49f5eedddf8f0d9116fcfd3c6b8832e/src/radiacode/transports/bluetooth.py) | Initialization and length-prefixed BLE framing, 18-byte request chunks, writes without response, command serialization, and the conventional configuration lookup. |
+| [mkgeiger client](https://github.com/mkgeiger/RadiaCode), [Qt client](https://github.com/petriska/qtradiacode/tree/e71f13e23a01c2ba5ca6ab5167de06d88e2d741b), [radiacode-tools](https://github.com/ckuethe/radiacode-tools) | Independent transport comparisons and separate acquisition workers. None supplies a supported paged spectrum/configuration request. Their assumptions and size limits require review rather than wholesale adoption. |
+| [Steaeavean fork](https://github.com/Steaeavean/radiacode_stuff) | Bleak experiments and a reported RC-101/FW4.14 soak. Its rare encoding branches were not captured in that soak, and its vlen4 padding workaround was subsequently withdrawn elsewhere. |
+| [BecqMoni decoder](https://github.com/Am6er/BecqMoni/blob/11c4235f060873b910d7e5f36275e933f21939da/BecquerelMonitor/RadiaCodeIn.cs#L1511), [releases](https://github.com/Am6er/BecqMoni/releases) | Newer reverse-engineering evidence: vlen5 is absolute uint32; signed deltas wrap modulo 2^32; vlen4 uses three bytes per value without an extra padding byte. This is not a manufacturer-certified protocol specification. |
+| [HA coordinator](https://github.com/home-assistant/core/blob/2026.9.4/homeassistant/helpers/update_coordinator.py), [fetching-data guidance](https://developers.home-assistant.io/docs/integration_fetching_data/) | Entities are notified after the awaited update returns. `async_set_updated_data()` also resets the polling schedule. Optional acquisition therefore needs its own managed task and listener publication. |
+| [ESPHome notification relay](https://github.com/esphome/esphome/blob/2d56559f04d43095467c4a37c46ad5a97e471f18/esphome/components/bluetooth_connection/bluetooth_connection_hub.cpp#L360), [proxy guidance](https://esphome.io/components/bluetooth_proxy/) | A full API TCP buffer can cause notification loss without replay. BLE event-queue pressure can also lose events. Shared Wi-Fi/Bluetooth radio use and reception matter independently of the decoder. |
+
+## Captured failures
+
+The supplied October 3 log and matching diagnostics identify integration 2.0.0, Home Assistant 2026.9.4, device firmware 4.14, and default five-second radiation / sixty-second spectrum intervals.
+
+Both log entries labeled `Spectrum read failed` were actually reads of CONFIGURATION (virtual string `0x02`). Each expected a 3,268-byte response body, but only 1,948 or 596 bytes arrived. There was no read of SPECTRUM (`0x200`) in that capture. Format discovery was preventing the histogram request, so the empty chart was not evidence of a chart-rendering defect.
+
+A July trace contains a stronger transport finding: a spectrum response expected 1,254 body bytes, received 754, and still received the final short fragment. Twenty-five whole 20-byte packets were absent from the middle. Partial bytes cannot safely be treated as contiguous leading channels. The trace's logged packet prefixes are incomplete, so they cannot be represented as an exact full spectrum fixture.
+
+Normal DATA_BUF responses were mostly quick: median 0.286 seconds across 106 successful replies. The longest complete coordinator cycle took about 31 seconds during initialization/recovery/optional acquisition. Radiation was obtained before optional operations, but HA publication still awaited them. Two complete empty replies followed reconnect/draining; they represent absent measurements, not zero radiation.
+
+One disconnect was followed by missing advertisements before recovery. This is distinct from decoding and can make immediate retries fail despite a previously visible device. Prior [issue #9](https://github.com/303Bryan/ha-radiacode/issues/9) also contains a direct-adapter versus proxy comparison. [Issue #21](https://github.com/303Bryan/ha-radiacode/issues/21) remains hardware-validation evidence, not a confirmed decoder-only root cause.
+
+Live inspection identified a stock proxy release 26.8.2 built with ESPHome 2026.7.4. That was the latest published stock proxy release at review time, even though newer ESPHome source existed. Project version and ESPHome build version must be recorded separately when investigating transport problems. Advertisement RSSI may come from a different proxy than the active connection and becomes stale while the device stops advertising.
+
+## Architecture and protocol decisions
+
+- Keep one serialized physical BLE command and persistent links. History commit `3c96b85` adopted persistent links after repeated 7–15 second proxy initialization allowed DATA_BUF to accumulate; short sessions can reproduce that backlog.
+- Publish primary radiation after DATA_BUF decoding. Run due identity, temperature, settings, health and spectrum acquisition in one managed maintenance task. Cancel and await it during disconnect, unload and shutdown.
+- Optional publication updates the latest cached snapshot and listeners without marking radiation fresh, clearing a primary failure, or resetting its schedule.
+- Select dose and count together from the latest valid measurement. Zero is a valid measurement; `None` means absent. Track sample timestamp, record type, flags, receipt age and repeated timestamps separately.
+- Reject incomplete transport frames and retire the stream. Continuations have no independent command framing, and increasing the timeout cannot restore dropped packets.
+- Read the spectrum directly and validate both known encodings. Accept only a complete, uniquely valid 1,024-channel interpretation, or an authoritative format where needed. A raw-format payload is 4,112 bytes, but compressed format can also have that size; length alone is not sufficient.
+- Publish successful current-spectrum service reads to the same entity cache. Accumulated-spectrum requests remain separate snapshots.
+
+## Unresolved device questions
+
+The captured real-time flags changed from `0x0040` to `0x4040` after a disconnect, and measurement uncertainty restarted at a larger value. Device timestamp offsets then advanced about 190.5 seconds over 279 seconds of host wall time. This records an acquisition/state change, but does not establish whether the cause was a firmware state, queued samples, or processor slowdown.
+
+The public clients convert a signed timestamp offset in ten-millisecond units relative to the initialization time anchor. The meaning of flag `0x4000` and the trailing real-time byte remains unverified. Preserve these raw fields rather than inventing a semantic label. A possible alternate gid4 record layout in another client also remains unverified for this device; it is not grounds to silently change record sizes.
+
+The SET_EXCHANGE payload `01 ff 12 ff` is shared by reference clients but its flow-control semantics are undocumented. Do not tune its bytes as a proxy fix without independent protocol evidence. No supported partial/paged configuration or spectrum retrieval was found.
+
+## Verification and future captures
+
+Pure decoder and fake-transport tests establish framing, known encodings, zero readings, paired samples, and lifecycle behavior. Real Home Assistant tests must additionally establish that a blocked maintenance read does not delay the already acquired radiation state, optional updates preserve primary failure/freshness, and shutdown leaves no maintenance task running.
+
+The candidate requires Home Assistant 2026.9.4 or newer, matching the validated runtime and supplied installation. The previous HACS minimum of 2024.1.0 was incompatible with the coordinator config-entry argument and managed background-task API used here.
+
+Physical acceptance requires repeated complete 1,024-channel snapshots through the actual proxy, a populated chart, responsive device readings/LCD, timely HA readings, and a soak beyond the previously problematic connected duration. Test results from synthetic transports alone cannot establish these outcomes.
+
+Capture bounded command/target histories with sequence, link generation, declared/received bytes, fragment count/sizes, first-response latency, largest gap, total and lock-wait duration, timeout classification and disconnect reason. Keep measurement type/time/raw flags and fresh-sample age separate from request success. Keep spectrum format provenance and retry/snapshot ages. Routine debug output should summarize these values without repeatedly printing the histogram or full device configuration.
