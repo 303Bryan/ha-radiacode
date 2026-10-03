@@ -60,8 +60,6 @@ A **Spectrum Reset** button clears the accumulation, and the **`radiacode.get_sp
 
 **Plotting the spectrum** — install [Plotly Graph Card](https://github.com/dbuezas/lovelace-plotly-graph-card) from HACS, then add a Manual card using the YAML below. Replace `sensor.radiacode_spectrum` with your device's actual Spectrum entity ID (shown in Settings → Devices & Services → Entities). The same example is available in [examples/spectrum-card.yaml](examples/spectrum-card.yaml).
 
-The energy axis must be numeric. The previous ApexCharts example applied a time range to keV values, leaving the plot empty.
-
 ```yaml
 type: custom:plotly-graph
 title: Gamma Spectrum
