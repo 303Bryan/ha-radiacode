@@ -11,6 +11,16 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.1rc3] — 2026-10-03
+
+### Fixed
+- **Compressed spectra with empty groups** — accept zero-count groups as no-ops, matching the reference clients. A fully received firmware 4.14 spectrum began with two empty groups that RC1 and RC2 rejected. Each group still consumes its header; unsupported encodings, excess channels and incomplete histograms remain rejected.
+
+### Validation limits
+- Close-range tests reproduced missing notifications through two different proxies. One subsequent AIR-1 transfer arrived completely and exposed this decoder defect. RC3 still requires repeated complete spectra, a populated dashboard, device-display checks and prolonged connection testing before production promotion.
+
+---
+
 ## [2.0.1rc2] — 2026-10-03
 
 ### Fixed

@@ -696,6 +696,79 @@ def test_decode_spectrum_v1_all_encodings(protocol):
     assert s.truncated is False
 
 
+@pytest.mark.parametrize("vlen", range(6))
+@pytest.mark.parametrize("position", ["leading", "interspersed", "trailing"])
+def test_decode_spectrum_zero_count_groups_are_noops(protocol, vlen, position):
+    # A no-op between an absolute reading and a delta must retain its base.
+    groups = [bytes.fromhex("11 00 2a"), bytes.fromhex("12 00 01"), bytes.fromhex("e0 3f")]
+    noop = struct.pack("<H", vlen)  # zero count, supported value encoding
+    index = {"leading": 0, "interspersed": 1, "trailing": 3}[position]
+    groups.insert(index, noop)
+    data = _spectrum_header() + b"".join(groups)
+    version, spectrum = protocol.detect_spectrum_format(data)
+    assert version == 1
+    assert spectrum.counts == [42, 43] + [0] * 1022
+    assert not spectrum.truncated
+
+
+def test_decode_spectrum_only_zero_count_groups_is_incomplete(protocol):
+    # All six supported no-op headers consume bytes but produce no channels.
+    data = _spectrum_header() + struct.pack("<6H", *range(6))
+    spectrum = protocol.decode_spectrum(data, 1)
+    assert spectrum.counts == []
+    assert spectrum.truncated
+    with pytest.raises(ValueError, match="No complete supported spectrum encoding"):
+        protocol.detect_spectrum_format(data)
+
+
+@pytest.mark.parametrize("vlen", range(6, 16))
+@pytest.mark.parametrize("position", ["leading", "trailing"])
+def test_zero_count_group_still_rejects_unknown_encoding(protocol, vlen, position):
+    unknown = struct.pack("<H", vlen)
+    body = unknown + _SPECTRUM_V1_BODY if position == "leading" else _SPECTRUM_V1_BODY + unknown
+    with pytest.raises(ValueError, match=f"vlen={vlen}"):
+        protocol.decode_spectrum(_spectrum_header() + body, 1)
+
+
+def test_zero_count_groups_do_not_hide_extra_channels(protocol):
+    body = bytes.fromhex("00 00 00 40 05 00 11 00 2a")
+    with pytest.raises(ValueError, match="more than 1024"):
+        protocol.decode_spectrum(_spectrum_header() + body, 1)
+
+
+def test_partial_zero_count_group_header_is_incomplete(protocol):
+    data = _spectrum_header() + bytes.fromhex("11 00 2a 00")
+    spectrum = protocol.decode_spectrum(data, 1)
+    assert spectrum.counts == [42]
+    assert spectrum.truncated
+    with pytest.raises(ValueError, match="No complete supported spectrum encoding"):
+        protocol.detect_spectrum_format(data)
+
+
+def test_captured_spectrum_prefix_with_synthetic_remainder(protocol):
+    # Exact first 32 payload bytes from a fully framed 103G/FW 4.14 transfer.
+    # The full captured payload was not logged. Everything appended below is
+    # synthetic, completing the partial delta group and adding zero channels.
+    prefix = bytes.fromhex(
+        "74190000a6958d40db03184034f5b43900000000510011081e7df44201464108"
+    )
+    assert len(prefix) == 32
+    leading_counts = [17, 8, 30, 125, 244, 314, 379, 387]
+    partial = protocol.decode_spectrum(prefix, 1)
+    assert partial.counts == leading_counts
+    assert partial.truncated
+
+    remainder = b"\x00" * 17 + struct.pack("<H", 999 << 4)
+    version, spectrum = protocol.detect_spectrum_format(prefix + remainder)
+    assert version == 1
+    assert spectrum.duration_s == 6516
+    assert spectrum.a0 == pytest.approx(4.424517631530762)
+    assert spectrum.a1 == pytest.approx(2.3752353191375732)
+    assert spectrum.a2 == pytest.approx(0.0003451496595516801)
+    assert spectrum.counts == leading_counts + [387] * 17 + [0] * 999
+    assert not spectrum.truncated
+
+
 def test_absent_format_uses_uncompressed_1024_channel_payload(protocol):
     # A perfectly valid raw count of 102 has low nibble 6. Guessing compressed
     # format 1 interprets that as the unsupported vlen=6 reported in issue #21.
@@ -781,7 +854,6 @@ def test_decode_spectrum_unknown_encoding_raises(protocol, vlen):
 
 
 @pytest.mark.parametrize("body,message", [
-    (bytes.fromhex("00 00"), "zero channels"),
     (bytes.fromhex("10 40"), "more than 1024"),
     (bytes.fromhex("00 20 10 20"), "more than 1024"),
     (bytes.fromhex("00 40 01"), "trailing data"),
@@ -851,11 +923,11 @@ def test_detect_spectrum_every_byte_cut_rejects_incomplete_payload(protocol):
 
 @pytest.mark.parametrize("data", [
     _spectrum_header() + bytes.fromhex("00 40 ff"),  # complete channels, trailing byte
-    _spectrum_header() + bytes.fromhex("00 00"),  # zero channel group
+    _spectrum_header() + bytes.fromhex("00 00"),  # legal no-op, no channels supplied
     _spectrum_header() + bytes.fromhex("16 00"),  # unsupported encoding
     _spectrum_header(a1=float("nan")) + _SPECTRUM_V1_BODY,
 ])
-def test_detect_spectrum_rejects_invalid_payload(protocol, data):
+def test_detect_spectrum_rejects_incomplete_or_invalid_payload(protocol, data):
     with pytest.raises(ValueError, match="No complete supported spectrum encoding"):
         protocol.detect_spectrum_format(data)
 

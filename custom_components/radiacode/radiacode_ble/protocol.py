@@ -882,6 +882,7 @@ def decode_spectrum(data: bytes, format_version: int) -> Spectrum:
       format 1 — run-length groups: [uint16: count<<4 | vlen] then
                  `count` values encoded per vlen (0=zero, 1=uint8,
                  2/3=delta int8/int16, 4=delta int24, 5=absolute uint32)
+                 A zero-count group is a no-op and consumes its two-byte header.
 
     Signed deltas wrap at 32 bits, matching device count arithmetic. The
     vlen=4 encoding has no padding. These rare branches follow the maintained
@@ -914,9 +915,9 @@ def decode_spectrum(data: bytes, format_version: int) -> Spectrum:
         last = 0
         value_sizes = (0, 1, 1, 2, 3, 4)
         while buf.remaining() > 0:
-            if len(counts) == SPECTRUM_CHANNELS:
-                raise ValueError("Spectrum contains trailing data after 1024 channels")
             if buf.remaining() < 2:
+                if len(counts) == SPECTRUM_CHANNELS:
+                    raise ValueError("Spectrum contains trailing data after 1024 channels")
                 truncated = True
                 break
             (group,) = buf.unpack("<H")
@@ -924,8 +925,9 @@ def decode_spectrum(data: bytes, format_version: int) -> Spectrum:
             vlen = group & 0x0F
             if vlen > 5:
                 raise ValueError(f"Unsupported spectrum value encoding: vlen={vlen}")
-            if n_values == 0:
-                raise ValueError("Spectrum group contains zero channels")
+            # Upstream cdump and BecqMoni consume empty groups normally. Each
+            # header advances two bytes, even when no channels are produced;
+            # empty groups do not alter the previous value used by deltas.
             if len(counts) + n_values > SPECTRUM_CHANNELS:
                 raise ValueError("Spectrum contains more than 1024 channels")
             for _ in range(n_values):
