@@ -149,6 +149,7 @@ async def test_optional_publication_preserves_failed_primary(runtime):
     assert hass.states.get(dose.entity_id).state == "0.12"
     assert hass.states.get(dose.entity_id).attributes["using_cached_measurement"]
     coordinator._last_fresh_monotonic -= coordinator._freshness_grace
+    coordinator._cancel_measurement_expiry()
     coordinator._expire_measurement()
     assert hass.states.get(dose.entity_id).state == "unavailable"
     release.set()

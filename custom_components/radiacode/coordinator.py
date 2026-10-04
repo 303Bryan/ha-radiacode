@@ -405,6 +405,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         which will re-establish the BLE connection on the next poll cycle.
         """
         self._user_disconnected = False
+        # OFF cancels expiry. ON restores only the remaining lifetime of an
+        # existing sample, so a failed reconnect cannot strand it as available.
+        self._schedule_measurement_expiry()
         self._next_spectrum_read = 0.0
         await self.async_request_refresh()
 

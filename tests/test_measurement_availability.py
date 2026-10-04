@@ -109,3 +109,29 @@ def test_user_off_invalidates_before_slow_disconnect(make_coordinator):
         assert coordinator.listener_updates == updates + 2
         await coordinator.async_shutdown()
     asyncio.run(scenario())
+
+
+def test_failed_user_reconnect_rearms_remaining_lease(
+    make_coordinator, coordinator_module, clock,
+):
+    async def scenario():
+        coordinator = make_coordinator(spectrum_interval=0)
+        await refresh_and_settle(coordinator)
+        await coordinator.async_user_disconnect()
+        assert coordinator._measurement_expiry_handle is None
+        assert not coordinator.measurement_available
+        clock.now = 1005
+        coordinator._poll_with_retry = AsyncMock(
+            side_effect=coordinator_module.UpdateFailed("reconnect failed")
+        )
+        await coordinator.async_user_reconnect()
+        assert coordinator._measurement_expiry_handle is not None
+        assert coordinator.measurement_available
+        assert not coordinator.last_update_success
+        assert coordinator._last_fresh_monotonic == 1000
+        clock.now = 1060
+        coordinator._cancel_measurement_expiry()
+        coordinator._expire_measurement()
+        assert not coordinator.measurement_available
+        await coordinator.async_shutdown()
+    asyncio.run(scenario())

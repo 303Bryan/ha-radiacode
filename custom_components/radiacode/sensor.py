@@ -180,6 +180,7 @@ class RadiaCodeSensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
     """A single RadiaCode sensor entity backed by the polling coordinator."""
 
     _attr_has_entity_name = True
+    _unrecorded_attributes = frozenset({"measurement_age_seconds"})
 
     def __init__(
         self,
