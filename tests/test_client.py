@@ -164,6 +164,178 @@ def test_complete_fragmented_reply_and_chunked_write(client_module):
     asyncio.run(scenario())
 
 
+def progressive_reply_handler(payload, tasks, delay=0.01):
+    """Deliver fragments independently of completion of the backend write."""
+    def handler(transport, request):
+        async def deliver():
+            body = request[4:8] + payload
+            frame = struct.pack("<i", len(body)) + body
+            for offset in range(0, len(frame), 20):
+                if not transport.is_connected:
+                    return
+                transport.notify(frame[offset:offset + 20])
+                await asyncio.sleep(delay)
+        tasks.append(asyncio.create_task(deliver()))
+    return handler
+
+
+@pytest.mark.parametrize("target", ["SPECTRUM", "SPEC_ACCUM", "CONFIGURATION", "SFR_FILE"])
+def test_progressing_bulk_reply_outlives_ordinary_deadline(client_module, target):
+    async def scenario():
+        client_module._CMD_TIMEOUT = 0.04
+        client_module._BULK_CMD_TIMEOUT = 0.3
+        client_module._STALL_TIMEOUT = 0.04
+        raw = b"x" * 200
+        tasks = []
+        client, transport = attached_client(
+            client_module,
+            progressive_reply_handler(struct.pack("<II", 1, len(raw)) + raw, tasks),
+        )
+        assert await client._read_vs(getattr(client_module.VS, target)) == raw
+        await asyncio.gather(*tasks)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["elapsed_s"] > client_module._CMD_TIMEOUT
+        assert stats["outcome"] == "success"
+        assert client.is_connected
+        assert transport.disconnect_count == 0
+    asyncio.run(scenario())
+
+
+def test_bulk_without_first_reply_keeps_ordinary_deadline(client_module):
+    async def scenario():
+        client_module._BULK_CMD_TIMEOUT = 0.3
+        client, transport = attached_client(client_module, lambda *_: None)
+        with pytest.raises(TimeoutError, match="Timed out during RadiaCode command"):
+            await asyncio.wait_for(client._read_vs(client_module.VS.SPECTRUM), 0.2)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["error_category"] == "no_response"
+        assert stats["elapsed_s"] < 0.2
+        assert transport.disconnect_count == 1
+    asyncio.run(scenario())
+
+
+def test_bulk_blocked_write_keeps_ordinary_deadline(client_module):
+    async def scenario():
+        client_module._BULK_CMD_TIMEOUT = 0.3
+        async def blocked_write(*_):
+            await asyncio.Event().wait()
+        client, transport = attached_client(client_module, blocked_write)
+        with pytest.raises(TimeoutError, match="Timed out during RadiaCode command"):
+            await asyncio.wait_for(client._read_vs(client_module.VS.SPECTRUM), 0.2)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["error_category"] == "write_timeout"
+        assert transport.disconnect_count == 1
+    asyncio.run(scenario())
+
+
+def test_bulk_incomplete_reply_keeps_interpacket_stall_deadline(client_module):
+    async def scenario():
+        client_module._BULK_CMD_TIMEOUT = 0.3
+        def partial(transport, request):
+            transport.notify(struct.pack("<i", 80) + request[4:8] + b"prefix")
+        client, transport = attached_client(client_module, partial)
+        with pytest.raises(TimeoutError, match="Incomplete response"):
+            await client._read_vs(client_module.VS.SPECTRUM)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["error_category"] == "incomplete_response"
+        assert stats["elapsed_s"] < client_module._CMD_TIMEOUT
+        assert transport.disconnect_count == 1
+    asyncio.run(scenario())
+
+
+def test_progressing_bulk_reply_still_has_hard_deadline(client_module):
+    async def scenario():
+        client_module._CMD_TIMEOUT = 0.04
+        client_module._BULK_CMD_TIMEOUT = 0.08
+        client_module._STALL_TIMEOUT = 0.04
+        raw = b"x" * 2000
+        tasks = []
+        client, transport = attached_client(
+            client_module,
+            progressive_reply_handler(struct.pack("<II", 1, len(raw)) + raw, tasks),
+        )
+        with pytest.raises(TimeoutError, match="Timed out during RadiaCode command"):
+            await client._read_vs(client_module.VS.SPECTRUM)
+        await asyncio.gather(*tasks)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["elapsed_s"] >= client_module._BULK_CMD_TIMEOUT
+        assert stats["elapsed_s"] < 0.2
+        assert stats["missing_body_bytes"] > 0
+        assert transport.disconnect_count == 1
+        assert not client.is_connected
+    asyncio.run(scenario())
+
+
+def test_primary_data_reply_keeps_ordinary_deadline_despite_progress(client_module):
+    async def scenario():
+        client_module._CMD_TIMEOUT = 0.04
+        client_module._BULK_CMD_TIMEOUT = 0.3
+        client_module._STALL_TIMEOUT = 0.04
+        raw = b"x" * 200
+        tasks = []
+        client, transport = attached_client(
+            client_module,
+            progressive_reply_handler(struct.pack("<II", 1, len(raw)) + raw, tasks),
+        )
+        with pytest.raises(TimeoutError, match="Timed out during RadiaCode command"):
+            await client._read_vs(client_module.VS.DATA_BUF)
+        await asyncio.gather(*tasks)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["elapsed_s"] < 0.2
+        assert stats["error_category"] == "incomplete_response"
+        assert transport.disconnect_count == 1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cancel_before_cleanup", [False, True])
+def test_repeated_cancellation_finishes_cleanup_before_queued_reconnect(
+    client_module, monkeypatch, cancel_before_cleanup,
+):
+    async def scenario():
+        client_module._DISCONNECT_TIMEOUT = 0.3
+        client, old = attached_client(client_module, lambda *_: None)
+        cleanup_started = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+        cleanup_cancelled = asyncio.Event()
+        async def slow_disconnect():
+            old.disconnect_count += 1
+            cleanup_started.set()
+            try:
+                await finish_cleanup.wait()
+                old.is_connected = False
+            except asyncio.CancelledError:
+                cleanup_cancelled.set()
+                raise
+        old.disconnect = slow_disconnect
+        command = asyncio.create_task(client._execute(client_module.CMD.GET_VERSION))
+        await old.write_started.wait()
+        if cancel_before_cleanup:
+            command.cancel()
+        await cleanup_started.wait()  # cancellation or ordinary response timeout
+        command.cancel()
+        await asyncio.sleep(0)
+        command.cancel()
+        fresh = FakeBLETransport(client_module)
+        device = supply_connection(monkeypatch, client_module, fresh)
+        reconnect = asyncio.create_task(client.connect(device))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not cleanup_cancelled.is_set()
+        assert not command.done()
+        assert client._cmd_lock.locked()
+        assert not fresh.requests
+        finish_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        await reconnect
+        assert old.disconnect_count == 1
+        assert not old.is_connected
+        assert len(fresh.requests) == 4
+        assert client.is_connected
+        assert not client._cmd_lock.locked()
+    asyncio.run(scenario())
+
+
 def test_stalled_partial_frame_is_rejected_and_transport_retired(client_module):
     async def scenario():
         def partial(transport, request):

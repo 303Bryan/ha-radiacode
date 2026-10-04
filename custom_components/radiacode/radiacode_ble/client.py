@@ -117,6 +117,14 @@ _WRITE_CHUNK = 18
 # Failed transports are then disconnected with a separate bounded cleanup.
 _CMD_TIMEOUT = 10.0
 
+# Once a bulk response starts, allow time for thousands of bytes to arrive.
+# No reply or a blocked write still uses the ordinary deadline; a response
+# that stops progressing still uses the same inter-packet stall deadline.
+_BULK_CMD_TIMEOUT = 30.0
+_BULK_VIRTUAL_STRINGS = frozenset({
+    VS.SPECTRUM, VS.SPEC_ACCUM, VS.CONFIGURATION, VS.SFR_FILE,
+})
+
 # A response that stops mid-frame cannot safely be followed by another
 # command: its late continuations have no framing header of their own.
 # Retire the connection after this much silence instead of returning a prefix.
@@ -410,10 +418,27 @@ class RadiaCodeBLEClient:
         self._last_disconnect_reason = reason
         _LOGGER.debug("Retiring BLE connection generation=%d reason=%s", self._connection_generation, reason)
 
+        # A second cancellation (e.g. unload during cancelled maintenance)
+        # must not cancel backend cleanup and strand a proxy connection slot.
+        # Hold the command lock until bounded cleanup finishes, then preserve
+        # cancellation so a queued reconnect cannot race the old transport.
+        cleanup = asyncio.create_task(self._disconnect_client(client))
+        cancellation = None
+        while True:
+            try:
+                await asyncio.shield(cleanup)
+                break
+            except asyncio.CancelledError as err:
+                if cleanup.cancelled():
+                    raise
+                cancellation = err
+        if cancellation is not None:
+            raise cancellation
+
+    async def _disconnect_client(self, client: BleakClient) -> None:
+        """Bound physical cleanup independently of caller cancellation."""
         try:
-            await asyncio.wait_for(
-                client.disconnect(), timeout=_DISCONNECT_TIMEOUT
-            )
+            await asyncio.wait_for(client.disconnect(), timeout=_DISCONNECT_TIMEOUT)
         except asyncio.TimeoutError:
             _LOGGER.debug("Disconnect timed out — client retired")
         except Exception as err:  # noqa: BLE001
@@ -794,6 +819,7 @@ class RadiaCodeBLEClient:
         self._expecting_response = True
         started = asyncio.get_running_loop().time()
         target = None
+        target_id = None
         if cmd in (CMD.RD_VIRT_STRING, CMD.WR_VIRT_STRING) and len(args) >= 4:
             target_id = struct.unpack_from("<I", args)[0]
             try:
@@ -814,18 +840,23 @@ class RadiaCodeBLEClient:
             "notification_count": 0, "notification_sizes": {},
             "declared_body_bytes": None, "received_body_bytes": 0,
             "missing_body_bytes": None, "first_byte_s": None,
-            "max_notification_gap_s": 0.0, "outcome": "success",
+            "max_notification_gap_s": 0.0, "deadline_s": _CMD_TIMEOUT,
+            "outcome": "success",
             "error_category": None, "_started": started,
         }
         self._command_lock_wait_s = 0.0
         self._command_stats = stats
         phase = "write"
         ended = None
+        bulk_deadline_extended = False
+        bulk_transfer = (
+            cmd == CMD.RD_VIRT_STRING and target_id in _BULK_VIRTUAL_STRINGS
+        )
 
         try:
             # This includes writes: even a Write Without Response operation
             # can stall in the host/proxy backend before it queues the bytes.
-            async with asyncio.timeout(_CMD_TIMEOUT):
+            async with asyncio.timeout(_CMD_TIMEOUT) as command_timeout:
                 for offset in range(0, len(packet), _WRITE_CHUNK):
                     if self._disconnected_event.is_set() or self._client is not client:
                         raise ConnectionError(
@@ -846,6 +877,13 @@ class RadiaCodeBLEClient:
                         )
                     if self._response_error is not None:
                         raise self._response_error
+                    if (
+                        bulk_transfer and self._response_started
+                        and not bulk_deadline_extended
+                    ):
+                        command_timeout.reschedule(started + _BULK_CMD_TIMEOUT)
+                        stats["deadline_s"] = _BULK_CMD_TIMEOUT
+                        bulk_deadline_extended = True
                     if self._response_started and self._resp_total == 0:
                         phase = "validate_echo"
                         return parse_response_body(bytes(self._resp_buf), cmd, seq)

@@ -11,6 +11,24 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.2rc1] — 2026-10-03
+
+### Fixed
+- **Repeated spectrum reconnects** — pause automatic spectrum acquisition after three consecutive failures. Keep the last complete histogram and continue radiation polling. A successful manual current-spectrum read resumes acquisition; an explicit spectrum reset or integration reload permits a new bounded series of attempts. Manually disabled spectrum polling remains disabled.
+- **Brief BLE outages** — retain the last accepted radiation sample for up to 60 seconds (or three configured poll intervals, if longer) during reconnects. An independent expiry timer makes stale measurements unavailable even while a reconnect is still running. Empty buffers and repeated samples never renew this window, and manually disabling BLE makes measurements unavailable immediately.
+- **Slow bulk transfers** — allow up to 30 seconds for spectra, configuration and the register directory once response packets start arriving, while retaining the two-second packet-stall deadline and strict complete-frame validation. Ordinary commands, hung writes and reads without any reply retain their ten-second deadline.
+- **Interrupted disconnect cleanup** — finish bounded BLE teardown before propagating repeated cancellation, helping release the proxy's connection slot during unload or user disconnect.
+
+### Added
+- Spectrum diagnostics report whether automatic acquisition is paused, consecutive failures and the retry limit. Transport diagnostics identify each command's deadline; radiation diagnostics distinguish retained readings from fresh measurements.
+- Regression coverage for repeated spectrum failures, manual recovery, stalled versus progressing bulk transfers, and measurement expiry during connection recovery.
+
+### Validation limits
+- This is a release candidate for device testing. The reported disconnect intervals match the existing spectrum retry schedule (5, 10, 20, 40, then 60 minutes), which points to failed automatic spectrum transfers; device diagnostics are still needed to confirm that cause.
+- Longer deadlines cannot recover notifications that a proxy drops. Pausing failed optional reads prevents an ongoing reconnect loop; it does not repair proxy forwarding loss.
+
+---
+
 ## [2.0.1] — 2026-10-03
 
 ### Fixed
@@ -360,7 +378,9 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v2.0.2rc1...HEAD
+[2.0.2rc1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.2rc1
+[2.0.1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.1
 [2.0.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.0
 [2.0.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.0b1
 [1.3.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0

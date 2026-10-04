@@ -354,13 +354,13 @@ def test_empty_or_replayed_records_do_not_renew_freshness(make_coordinator, cloc
         coordinator._client.get_data.return_value = (
             first.sensors if replayed else readings(protocol)
         )
-        clock.now = 1015
+        clock.now = 1059.9
         current = await refresh_and_settle(coordinator)
         assert coordinator.last_update_success is True
         assert current.sensors.measurement_time == first.sensors.measurement_time
         assert coordinator._last_fresh_monotonic == 1000
         assert coordinator.runtime_status["freshness"]["using_cached_measurement"] is True
-        clock.now = 1015.1
+        clock.now = 1060
         await refresh_and_settle(coordinator)
         assert coordinator.last_update_success is False
         assert "stale" in coordinator.last_error
@@ -451,7 +451,7 @@ def test_background_publication_preserves_failed_radiation_and_freshness(make_co
         await entered.wait()
         coordinator._client.get_data.side_effect = None
         coordinator._client.get_data.return_value = coordinator.data.sensors
-        clock.now = 1020
+        clock.now = 1060
         await coordinator.async_refresh()
         assert coordinator.last_update_success is False
         error = coordinator.last_error
@@ -494,7 +494,7 @@ def test_disconnect_cancels_and_awaits_worker_before_transport_release(make_coor
         assert coordinator._maintenance_task is None
         assert coordinator._maintenance_phase is None
         assert coordinator._last_spectrum is None
-        assert coordinator.listener_updates == updates + (action == "async_user_disconnect")
+        assert coordinator.listener_updates == updates + 2 * (action == "async_user_disconnect")
         coordinator._client.disconnect.assert_awaited_once()
         await coordinator.async_refresh()
         assert len(coordinator.hass.tasks) == 1
