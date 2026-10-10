@@ -292,6 +292,12 @@ From the device page, click the three-dot menu → **Download diagnostics** to g
 
 The download also includes bounded transport history, maintenance status, measurement freshness and spectrum attempt/success ages. Device and proxy identifiers are redacted. Full research, primary references and hardware acceptance criteria are in [protocol and stability research](docs/protocol-and-stability-research.md).
 
+Starting with 2.0.2rc2, `runtime.data_buf` also includes decoded record types, encountered record groups (`record_group_counts`, keyed by `eid:gid`, including known skipped groups), decoder stopping reason and offset, valid/invalid measurement candidates and their timestamp ranges, and the last 20 sample decisions with UTC receipt times. `runtime.freshness.last_sample_rejection` distinguishes absent pairs/timestamps, repeated or regressed timestamps, and outlier suppression. A successful Bluetooth command can still produce no fresh measurement; these fields explain that distinction without a raw packet capture.
+
+Device controls use the active Bluetooth link independently of radiation freshness. A connected device's known settings and reset buttons remain usable while radiation is stale. Unknown settings, an inactive link, user-disabled BLE and shutdown keep the corresponding controls unavailable. Radiation still expires on its own bounded freshness window.
+
+Connection establishment has a 30-second total deadline around connector retries, followed by separately bounded cleanup when necessary. Device initialization commands and the coordinator's single retry have their own deadlines; 30 seconds is not a bound on the complete poll/recovery cycle. See the [October 9 connectivity review](docs/connectivity-review-2026-10-09.md) for the supplied evidence and next hardware test.
+
 ---
 
 ## Contributing

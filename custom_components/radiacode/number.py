@@ -204,12 +204,15 @@ class RadiaCodeNumber(CoordinatorEntity[RadiaCodeCoordinator], NumberEntity):
         )
 
     @property
+    def available(self) -> bool:
+        """A known setting remains usable while radiation samples are stale."""
+        return self.coordinator.controls_available and self.native_value is not None
+
+    @property
     def native_value(self) -> Optional[float]:
         """Return the current value converted to HA units."""
-        if self.coordinator.data is None:
-            return None
         raw = getattr(
-            self.coordinator.data.settings,
+            self.coordinator.settings,
             self.entity_description.key,
             None,
         )

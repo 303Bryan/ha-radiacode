@@ -57,7 +57,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from bleak.backends.device import BLEDevice
@@ -170,6 +170,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._measurement_expiry_handle: Optional[asyncio.TimerHandle] = None
         self._using_cached_measurement = False
         self._last_sample_progress: dict = {}
+        self._last_data_buf_status: dict = {}
+        self._last_data_buf_received: Optional[float] = None
+        self._sample_history: deque[dict] = deque(maxlen=_PHASE_HISTORY_LIMIT)
+        self._last_sample_rejection: Optional[str] = None
+        self._consecutive_no_sample = 0
 
         # Outlier suppression: truncated BT-proxy transfers can occasionally
         # yield a misparsed record with an absurd value (e.g. 40 000 µSv/h at
@@ -235,6 +240,19 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     def is_ble_connected(self) -> bool:
         """True when the BLE link to the device is currently active."""
         return self._client.is_connected
+
+    @property
+    def controls_available(self) -> bool:
+        """Device controls depend on BLE, independently of radiation age."""
+        return (
+            not self._stopping and not self._user_disconnected
+            and self.is_ble_connected
+        )
+
+    @property
+    def settings(self) -> RadiaCodeSettings:
+        """Latest settings, including before the first radiation sample."""
+        return self._last_settings
 
     @property
     def measurement_available(self) -> bool:
@@ -351,6 +369,13 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 "measurement_type": self._last_measurement_type,
                 "measurement_flags": self._last_measurement_flags,
                 "sample_progress": dict(self._last_sample_progress),
+                "last_sample_rejection": self._last_sample_rejection,
+                "consecutive_polls_without_sample": self._consecutive_no_sample,
+            },
+            "data_buf": {
+                **self._last_data_buf_status,
+                "last_poll_age_seconds": self._age(self._last_data_buf_received),
+                "recent_samples": list(self._sample_history),
             },
             "bluetooth": {
                 "advertisement_source_at_connect": self._connection_source,
@@ -475,6 +500,16 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             data = await self._poll_with_retry(ble_device)
             self._check_user_disconnected("after radiation poll")
             now = time.monotonic()
+            self._last_data_buf_received = now
+            self._last_data_buf_status = {
+                **data.data_buf_status,
+                "received_at": datetime.now(timezone.utc).isoformat(),
+                "connection_count": self._connection_count,
+                "measurement_time": data.measurement_time.isoformat()
+                if data.measurement_time is not None else None,
+                "measurement_type": data.measurement_type,
+                "measurement_flags": data.measurement_flags,
+            }
             if data.battery is not None:
                 self._last_battery = data.battery
             if data.accumulated_dose is not None:
@@ -485,15 +520,22 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
 
             # Empty buffers, repeated timestamps and filtered samples must
             # never reset freshness. Keep both values from one accepted record.
-            fresh = (
-                data.dose_rate is not None and data.count_rate is not None
-                and data.measurement_time is not None
-                and (
-                    self._last_measurement_time is None
-                    or self._last_measurement_connection != self._connection_count
-                    or data.measurement_time > self._last_measurement_time
+            rejection = None
+            if data.dose_rate is None or data.count_rate is None:
+                rejection = "no_paired_measurement"
+            elif data.measurement_time is None:
+                rejection = "no_measurement_timestamp"
+            elif (
+                self._last_measurement_time is not None
+                and self._last_measurement_connection == self._connection_count
+                and data.measurement_time <= self._last_measurement_time
+            ):
+                rejection = (
+                    "repeated_timestamp"
+                    if data.measurement_time == self._last_measurement_time
+                    else "regressed_timestamp"
                 )
-            )
+            fresh = rejection is None
             if fresh:
                 dose_rate = self._dose_rate_filter.filter(data.dose_rate)
                 count_rate = self._count_rate_filter.filter(data.count_rate)
@@ -508,6 +550,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                             label, filter_.last_suppressed,
                         )
                 fresh = dose_rate is not None and count_rate is not None
+                if not fresh:
+                    rejection = "suppressed_outlier"
                 if fresh:
                     same_connection = (
                         self._last_measurement_connection == self._connection_count
@@ -530,6 +574,14 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     self._last_fresh_monotonic = now
                     self._schedule_measurement_expiry()
 
+            self._last_sample_rejection = rejection
+            self._consecutive_no_sample = 0 if fresh else self._consecutive_no_sample + 1
+            self._sample_history.append({
+                **self._last_data_buf_status,
+                "accepted": fresh,
+                "rejection_reason": rejection,
+                "measurement_age_seconds": self._age(self._last_fresh_monotonic),
+            })
             self._using_cached_measurement = not fresh
             # Even an initial empty buffer is a complete transport response.
             # Identity/spectrum discovery may proceed while radiation warms up.

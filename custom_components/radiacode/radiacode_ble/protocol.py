@@ -225,6 +225,7 @@ class RadiaCodeData:
     measurement_time: Optional[datetime.datetime] = None
     measurement_type: Optional[str] = None
     measurement_flags: Optional[int] = None
+    data_buf_status: dict = field(default_factory=dict)
 
 
 def compute_hardness(
@@ -508,7 +509,9 @@ class _Buf:
 
 # ── data_buf decoder ──────────────────────────────────────────────────────────
 
-def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
+def decode_data_buf(
+    data: bytes, base_time: datetime.datetime, diagnostics: Optional[dict] = None
+) -> list:
     """
     Decode the raw DATA_BUF byte stream into a list of typed records.
 
@@ -516,7 +519,8 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
       [uint8 seq] [uint8 eid] [uint8 gid] [int32_le ts_offset_10ms]
 
     Timestamps are base_time + ts_offset * 10 ms.
-    Decoding stops on unknown record types or sequence-number jumps.
+    Decoding stops on unknown record types or sequence-number jumps. Optional
+    diagnostics describe where decoding stopped without retaining raw bytes.
     """
     buf = _Buf(data)
     records: list = []
@@ -524,6 +528,7 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
 
     # Diagnostic counters for record types
     gid_counts: dict[int, int] = {}
+    record_group_counts: dict[str, int] = {}
 
     stop_reason = "complete"
     stop_offset = len(data)
@@ -540,6 +545,8 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
 
         next_seq = (seq + 1) % 256
         gid_counts[gid] = gid_counts.get(gid, 0) + 1
+        group_key = f"{eid}:{gid}"
+        record_group_counts[group_key] = record_group_counts.get(group_key, 0) + 1
 
         try:
             if eid == 0 and gid == 0:       # GRP_RealTimeData
@@ -629,7 +636,9 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
             elif eid == 1 and gid in (1, 2, 3):  # variable-length sample blocks
                 (samples_num,) = buf.unpack("<H")
                 buf.unpack("<I")   # smpl_time_ms
-                buf.skip(samples_num * _SAMPLE_SIZES[gid])
+                # A declared block larger than the remaining payload is an
+                # incomplete record, even when no scalar sensor is emitted.
+                buf.unpack(f"<{samples_num * _SAMPLE_SIZES[gid]}x")
 
             else:
                 stop_reason = f"unknown_record(eid={eid},gid={gid})"
@@ -644,6 +653,19 @@ def decode_data_buf(data: bytes, base_time: datetime.datetime) -> list:
     if stop_reason == "complete" and buf.remaining():
         stop_reason = "incomplete_header"
         stop_offset = len(data) - buf.remaining()
+    if diagnostics is not None:
+        diagnostics.update({
+            "payload_bytes": len(data),
+            "decoded_records": len(records),
+            "record_group_counts": record_group_counts,
+            "record_types": {
+                record_type: sum(type(record).__name__ == record_type for record in records)
+                for record_type in sorted({type(record).__name__ for record in records})
+            },
+            "stop_reason": stop_reason,
+            "stop_offset": stop_offset,
+            "unread_bytes": len(data) - stop_offset,
+        })
     if stop_reason != "complete" and _LOGGER.isEnabledFor(logging.DEBUG):
         _LOGGER.debug(
             "DATA_BUF decode stopped: reason=%s offset=%d unread_bytes=%d prefix=%s",
@@ -786,12 +808,26 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     measurement: Optional[RealTimeData | RawData | DoseRateDB] = None
     measurement_priority = -1
     priorities = {RealTimeData: 2, RawData: 1, DoseRateDB: 0}
+    candidates: dict[str, dict] = {}
 
     for r in records:
         if isinstance(r, (RealTimeData, DoseRateDB, RawData)):
+            candidate = candidates.setdefault(type(r).__name__, {
+                "valid_pairs": 0, "invalid_pairs": 0,
+                "earliest_time": None, "latest_time": None,
+            })
             if not (_valid_reading(r.dose_rate) and _valid_reading(r.count_rate)):
+                candidate["invalid_pairs"] += 1
                 _LOGGER.debug("Skipping implausible %s record: %s", type(r).__name__, r)
                 continue
+            candidate["valid_pairs"] += 1
+            timestamp = r.dt.isoformat()
+            candidate["earliest_time"] = min(
+                candidate["earliest_time"] or timestamp, timestamp
+            )
+            candidate["latest_time"] = max(
+                candidate["latest_time"] or timestamp, timestamp
+            )
             priority = priorities[type(r)]
             if (
                 measurement is None
@@ -826,6 +862,7 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
         measurement_time=measurement.dt if measurement is not None else None,
         measurement_type=type(measurement).__name__ if measurement is not None else None,
         measurement_flags=getattr(measurement, "flags", None),
+        data_buf_status={"measurement_candidates": candidates},
     )
 
 

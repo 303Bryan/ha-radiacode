@@ -61,7 +61,7 @@ from typing import Optional
 
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
-from bleak_retry_connector import establish_connection
+from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
 from .protocol import (
     CMD,
@@ -134,10 +134,10 @@ _DISCONNECT_TIMEOUT = 5.0
 _TEMPERATURE_INTERVAL = 60.0
 _COMMAND_HISTORY_LIMIT = 20
 
-# establish_connection() timeout per attempt.  15 s is generous for a BT
-# proxy hop; if the ESP32 can't connect in this window the slot is likely
-# stuck and we should fail fast so the coordinator can retry cleanly.
-_CONNECT_TIMEOUT = 15.0
+# Bound the entire establishment operation, including connector retries and
+# backoff. Its timeout constructor kwarg does not bound the connect calls made
+# inside establish_connection(). Keep cleanup on its separate bounded deadline.
+_CONNECT_TIMEOUT = 30.0
 
 
 class RadiaCodeBLEClient:
@@ -266,17 +266,34 @@ class RadiaCodeBLEClient:
         # ``BleakClient.set_disconnected_callback`` was deprecated in bleak
         # 0.18 and removed in bleak 1.0; calling it on a recent install
         # raises AttributeError before the init sequence ever runs.
+        # The connector constructs the BleakClient before awaiting connect().
+        # Retain that transport immediately so a timeout or cancellation can
+        # release a partially established proxy connection instead of losing
+        # access to the client that never returned from establish_connection().
+        owner = self
+
+        class ConnectionClient(BleakClientWithServiceCache):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                owner._client = self
+
         self._client = await self._run_init_step(
-            "establish_connection", establish_connection(
-                BleakClient,
-                ble_device,
-                ble_device.address,
-                disconnected_callback=self._on_ble_disconnect,
-                max_attempts=2,
+            "establish_connection", asyncio.wait_for(
+                establish_connection(
+                    ConnectionClient,
+                    ble_device,
+                    ble_device.address,
+                    disconnected_callback=self._on_ble_disconnect,
+                    max_attempts=2,
+                ),
                 timeout=_CONNECT_TIMEOUT,
             ),
         )
         self._check_connect_generation(generation)
+        # The connector may reuse this retained client across internal attempts.
+        # A failed attempt can fire its disconnect callback before a later
+        # attempt succeeds; that event does not describe the returned link.
+        self._reset_notification_state()
 
         # ── Verify the device exposes the expected RadiaCode service ────────
         # Early RC-101 hardware (~2019) sometimes connects but doesn't expose
@@ -504,8 +521,10 @@ class RadiaCodeBLEClient:
         # This is the sole operation on the primary reading path. Publish its
         # result before optional maintenance commands can stall or disconnect.
         raw = await self._read_vs(VS.DATA_BUF)
-        records = decode_data_buf(raw, self._base_time)
+        status = {}
+        records = decode_data_buf(raw, self._base_time, diagnostics=status)
         buf_data = extract_sensor_values(records)
+        buf_data.data_buf_status.update(status)
         now = asyncio.get_running_loop().time()
         if buf_data.temperature is not None:
             self._temperature = buf_data.temperature

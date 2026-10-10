@@ -11,6 +11,23 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.2rc2] — 2026-10-09
+
+### Fixed
+- **Connected controls going unavailable** — device switches, numbers, selects and reset buttons now use Bluetooth availability independently of radiation freshness. A stale radiation stream no longer disables a connected device's known settings. Unknown settings remain unavailable; BLE off, link loss and shutdown disable device controls immediately on publication.
+- **Unbounded connection attempts** — enforce a 30-second deadline around the entire connector establishment operation, including its internal retries. Retain the client as soon as the connector constructs it so timeout and cancellation can release partially established proxy resources. Disconnect cleanup remains separately bounded and cancellation-safe. This deadline covers establishment, not the complete initialization or two-attempt coordinator cycle.
+- **Truncated sample-block diagnostics** — identify incomplete variable-length blocks rather than silently reporting them fully decoded.
+
+### Added
+- **Sample-gap diagnostics** — bounded DATA_BUF summaries include record counts, stopping boundary, valid/invalid measurement candidates and their timestamp ranges. Radiation diagnostics report empty pairs, absent timestamps, repeated/regressed timestamps and suppressed outliers, with the last 20 sample decisions. Full raw buffers and proxy identifiers are not added.
+- **Current Home Assistant validation** — test actual coordinator, controls and connection-library behavior on both Home Assistant 2026.9.4 and the supplied 2026.10.0 runtime, alongside decoder and fake-transport regressions.
+- **Connectivity review** — October 9 activity, history and primary documentation findings with a controlled AIR-1 proxy acceptance plan in `docs/connectivity-review-2026-10-09.md`.
+
+### Validation limits
+- Includes RC1's bounded spectrum retries, 60-second minimum radiation lease and bulk-transfer deadlines. It does not establish why some complete DATA_BUF replies contain no advancing accepted measurement; the new diagnostics distinguish those cases for the next capture. Physical AIR-1/M5Stack proxy soak testing remains required before promoting to stable.
+
+---
+
 ## [2.0.2rc1] — 2026-10-03
 
 ### Fixed
