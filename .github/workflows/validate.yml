@@ -35,12 +35,20 @@ jobs:
       - run: pytest tests/ -v
 
   ha-runtime:
-    name: Home Assistant 2026.9.4 runtime
+    name: Home Assistant ${{ matrix.ha }} runtime
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ha: "2026.9.4"
+            requirements: tests/ha_runtime/requirements-ha-runtime.txt
+          - ha: "2026.10.0"
+            requirements: tests/ha_runtime/requirements-ha-runtime-2026.10.txt
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install -r tests/ha_runtime/requirements-ha-runtime.txt
+      - run: pip install -r ${{ matrix.requirements }}
       - run: python -m pytest tests/ha_runtime/ -v

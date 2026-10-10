@@ -180,6 +180,7 @@ class RadiaCodeSensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
     """A single RadiaCode sensor entity backed by the polling coordinator."""
 
     _attr_has_entity_name = True
+    _unrecorded_attributes = frozenset({"measurement_age_seconds"})
 
     def __init__(
         self,
@@ -194,6 +195,20 @@ class RadiaCodeSensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
             entry.data[CONF_ADDRESS],
             entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
         )
+
+    @property
+    def available(self) -> bool:
+        """Hold a recent sample during brief BLE recovery, then expire it."""
+        return self.coordinator.measurement_available
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Distinguish a cached measurement from current acquisition."""
+        freshness = self.coordinator.runtime_status["freshness"]
+        return {
+            "using_cached_measurement": freshness["using_cached_measurement"],
+            "measurement_age_seconds": freshness["age_seconds"],
+        }
 
     @property
     def native_value(self) -> Optional[float]:
@@ -360,6 +375,11 @@ class RadiaCodeRadiationAlarmSensor(
             entry.data[CONF_ADDRESS],
             entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
         )
+
+    @property
+    def available(self) -> bool:
+        """Keep the alarm state available for the same bounded sample lease."""
+        return self.coordinator.measurement_available
 
     def _thresholds_uSv_h(self) -> tuple[Optional[float], Optional[float]]:
         """Return the (L1, L2) alarm thresholds in µSv/h, or None if unknown."""

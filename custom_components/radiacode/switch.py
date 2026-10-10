@@ -113,12 +113,15 @@ class RadiaCodeSwitch(CoordinatorEntity[RadiaCodeCoordinator], SwitchEntity):
         )
 
     @property
+    def available(self) -> bool:
+        """A known setting remains usable while radiation samples are stale."""
+        return self.coordinator.controls_available and self.is_on is not None
+
+    @property
     def is_on(self) -> Optional[bool]:
         """Return True if the switch is on."""
-        if self.coordinator.data is None:
-            return None
         return getattr(
-            self.coordinator.data.settings,
+            self.coordinator.settings,
             self.entity_description.key,
             None,
         )

@@ -39,6 +39,7 @@ def client_module(monkeypatch):
     async def no_hardware(*args, **kwargs):
         raise AssertionError("Tests must supply a fake BLE transport")
 
+    connector.BleakClientWithServiceCache = type("BleakClientWithServiceCache", (), {})
     connector.establish_connection = no_hardware
     for name, module in (
         ("bleak", bleak), ("bleak.backends", backends),
@@ -58,6 +59,7 @@ def client_module(monkeypatch):
     module._CMD_TIMEOUT = 0.08
     module._STALL_TIMEOUT = 0.015
     module._DISCONNECT_TIMEOUT = 0.02
+    module._CONNECT_TIMEOUT = 0.08
     return module
 
 
@@ -148,6 +150,191 @@ def supply_connection(monkeypatch, module, transport):
     return types.SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
 
 
+def supply_tracked_client_type(monkeypatch, module, transports):
+    """Model the connector constructing its transport before awaiting connect."""
+    class CachedTransport(FakeBLETransport):
+        def __init__(self, device, *, disconnected_callback, **kwargs):
+            super().__init__(module)
+            self.device = device
+            self.disconnected_callback = disconnected_callback
+            self.is_connected = False
+            transports.append(self)
+
+        async def clear_cache(self):
+            return True
+
+    monkeypatch.setattr(module, "BleakClientWithServiceCache", CachedTransport)
+    return CachedTransport
+
+
+def test_establishment_uses_cache_client_without_ineffective_timeout_kwarg(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        transports = []
+        cached_type = supply_tracked_client_type(monkeypatch, client_module, transports)
+        device = types.SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+        client = client_module.RadiaCodeBLEClient()
+
+        async def establish(client_type, supplied_device, name, **kwargs):
+            assert issubclass(client_type, cached_type)
+            assert supplied_device is device
+            assert name == device.address
+            assert kwargs["max_attempts"] == 2
+            assert "timeout" not in kwargs
+            transport = client_type(supplied_device, **kwargs)
+            # It must be owned before the asynchronous connection starts.
+            assert client._client is transport
+            transport.is_connected = True
+            return transport
+
+        monkeypatch.setattr(client_module, "establish_connection", establish)
+        await client.connect(device)
+        assert len(transports) == 1
+        assert len(transports[0].requests) == 4
+        assert client.is_connected
+        await client.disconnect()
+        assert transports[0].disconnect_count == 1
+
+    asyncio.run(scenario())
+
+
+
+def test_internal_connection_retry_clears_failed_attempt_disconnect_event(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        transports = []
+        supply_tracked_client_type(monkeypatch, client_module, transports)
+        client = client_module.RadiaCodeBLEClient()
+        device = types.SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+
+        async def establish(client_type, supplied_device, name, **kwargs):
+            transport = client_type(supplied_device, **kwargs)
+            transport.is_connected = True
+            transport.drop_link()
+            assert client._disconnected_event.is_set()
+            assert client._notify_event.is_set()
+            # The connector retries with the same client rather than constructing
+            # another one. Return its later successful attempt.
+            await asyncio.sleep(0)
+            transport.is_connected = True
+            return transport
+
+        monkeypatch.setattr(client_module, "establish_connection", establish)
+        await client.connect(device)
+        assert len(transports) == 1
+        assert len(transports[0].requests) == 4
+        assert transports[0].disconnect_count == 0
+        assert not client._disconnected_event.is_set()
+        assert client.is_connected
+        await client.disconnect()
+
+    asyncio.run(scenario())
+
+def test_stuck_establishment_deadline_cleans_partially_created_transport(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        transports = []
+        supply_tracked_client_type(monkeypatch, client_module, transports)
+        cancelled = asyncio.Event()
+        client = client_module.RadiaCodeBLEClient()
+        device = types.SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+
+        async def establish(client_type, supplied_device, name, **kwargs):
+            client_type(supplied_device, **kwargs)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(client_module, "establish_connection", establish)
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(asyncio.TimeoutError):
+            await client.connect(device)
+        elapsed = asyncio.get_running_loop().time() - started
+        assert client_module._CONNECT_TIMEOUT <= elapsed < 0.3
+        assert cancelled.is_set()
+        assert transports[0].disconnect_count == 1
+        assert transports[0].notify_callback is None
+        assert not transports[0].requests
+        assert not client.is_connected
+        assert not client._cmd_lock.locked()
+        steps = client.transport_diagnostics["initialization_steps"]
+        assert steps[0]["step"] == "establish_connection"
+        assert steps[0]["outcome"] == "TimeoutError"
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_establishment_finishes_cleanup_before_queued_reconnect(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        client_module._DISCONNECT_TIMEOUT = 0.3
+        transports = []
+        supply_tracked_client_type(monkeypatch, client_module, transports)
+        started = asyncio.Event()
+        establishment_cancelled = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+        cleanup_cancelled = asyncio.Event()
+        client = client_module.RadiaCodeBLEClient()
+        device = types.SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+
+        async def establish(client_type, supplied_device, name, **kwargs):
+            transport = client_type(supplied_device, **kwargs)
+            if len(transports) > 1:
+                transport.is_connected = True
+                return transport
+
+            async def slow_disconnect():
+                transport.disconnect_count += 1
+                cleanup_started.set()
+                try:
+                    await finish_cleanup.wait()
+                    transport.is_connected = False
+                except asyncio.CancelledError:
+                    cleanup_cancelled.set()
+                    raise
+
+            transport.disconnect = slow_disconnect
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                establishment_cancelled.set()
+
+        monkeypatch.setattr(client_module, "establish_connection", establish)
+        connecting = asyncio.create_task(client.connect(device))
+        await started.wait()
+        connecting.cancel()
+        await cleanup_started.wait()
+        connecting.cancel()
+        await asyncio.sleep(0)
+        connecting.cancel()
+        reconnect = asyncio.create_task(client.connect(device))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert establishment_cancelled.is_set()
+        assert not cleanup_cancelled.is_set()
+        assert not connecting.done()
+        assert len(transports) == 1
+        assert client._cmd_lock.locked()
+        finish_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await connecting
+        await reconnect
+        assert transports[0].disconnect_count == 1
+        assert len(transports[1].requests) == 4
+        assert client.is_connected
+        assert not client._cmd_lock.locked()
+        await client.disconnect()
+
+    asyncio.run(scenario())
+
+
 def test_complete_fragmented_reply_and_chunked_write(client_module):
     async def scenario():
         payload = bytes(range(256)) * 2
@@ -161,6 +348,178 @@ def test_complete_fragmented_reply_and_chunked_write(client_module):
         assert not client._expecting_response
         assert client._resp_total == 0
 
+    asyncio.run(scenario())
+
+
+def progressive_reply_handler(payload, tasks, delay=0.01):
+    """Deliver fragments independently of completion of the backend write."""
+    def handler(transport, request):
+        async def deliver():
+            body = request[4:8] + payload
+            frame = struct.pack("<i", len(body)) + body
+            for offset in range(0, len(frame), 20):
+                if not transport.is_connected:
+                    return
+                transport.notify(frame[offset:offset + 20])
+                await asyncio.sleep(delay)
+        tasks.append(asyncio.create_task(deliver()))
+    return handler
+
+
+@pytest.mark.parametrize("target", ["SPECTRUM", "SPEC_ACCUM", "CONFIGURATION", "SFR_FILE"])
+def test_progressing_bulk_reply_outlives_ordinary_deadline(client_module, target):
+    async def scenario():
+        client_module._CMD_TIMEOUT = 0.04
+        client_module._BULK_CMD_TIMEOUT = 0.3
+        client_module._STALL_TIMEOUT = 0.04
+        raw = b"x" * 200
+        tasks = []
+        client, transport = attached_client(
+            client_module,
+            progressive_reply_handler(struct.pack("<II", 1, len(raw)) + raw, tasks),
+        )
+        assert await client._read_vs(getattr(client_module.VS, target)) == raw
+        await asyncio.gather(*tasks)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["elapsed_s"] > client_module._CMD_TIMEOUT
+        assert stats["outcome"] == "success"
+        assert client.is_connected
+        assert transport.disconnect_count == 0
+    asyncio.run(scenario())
+
+
+def test_bulk_without_first_reply_keeps_ordinary_deadline(client_module):
+    async def scenario():
+        client_module._BULK_CMD_TIMEOUT = 0.3
+        client, transport = attached_client(client_module, lambda *_: None)
+        with pytest.raises(TimeoutError, match="Timed out during RadiaCode command"):
+            await asyncio.wait_for(client._read_vs(client_module.VS.SPECTRUM), 0.2)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["error_category"] == "no_response"
+        assert stats["elapsed_s"] < 0.2
+        assert transport.disconnect_count == 1
+    asyncio.run(scenario())
+
+
+def test_bulk_blocked_write_keeps_ordinary_deadline(client_module):
+    async def scenario():
+        client_module._BULK_CMD_TIMEOUT = 0.3
+        async def blocked_write(*_):
+            await asyncio.Event().wait()
+        client, transport = attached_client(client_module, blocked_write)
+        with pytest.raises(TimeoutError, match="Timed out during RadiaCode command"):
+            await asyncio.wait_for(client._read_vs(client_module.VS.SPECTRUM), 0.2)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["error_category"] == "write_timeout"
+        assert transport.disconnect_count == 1
+    asyncio.run(scenario())
+
+
+def test_bulk_incomplete_reply_keeps_interpacket_stall_deadline(client_module):
+    async def scenario():
+        client_module._BULK_CMD_TIMEOUT = 0.3
+        def partial(transport, request):
+            transport.notify(struct.pack("<i", 80) + request[4:8] + b"prefix")
+        client, transport = attached_client(client_module, partial)
+        with pytest.raises(TimeoutError, match="Incomplete response"):
+            await client._read_vs(client_module.VS.SPECTRUM)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["error_category"] == "incomplete_response"
+        assert stats["elapsed_s"] < client_module._CMD_TIMEOUT
+        assert transport.disconnect_count == 1
+    asyncio.run(scenario())
+
+
+def test_progressing_bulk_reply_still_has_hard_deadline(client_module):
+    async def scenario():
+        client_module._CMD_TIMEOUT = 0.04
+        client_module._BULK_CMD_TIMEOUT = 0.08
+        client_module._STALL_TIMEOUT = 0.04
+        raw = b"x" * 2000
+        tasks = []
+        client, transport = attached_client(
+            client_module,
+            progressive_reply_handler(struct.pack("<II", 1, len(raw)) + raw, tasks),
+        )
+        with pytest.raises(TimeoutError, match="Timed out during RadiaCode command"):
+            await client._read_vs(client_module.VS.SPECTRUM)
+        await asyncio.gather(*tasks)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["elapsed_s"] >= client_module._BULK_CMD_TIMEOUT
+        assert stats["elapsed_s"] < 0.2
+        assert stats["missing_body_bytes"] > 0
+        assert transport.disconnect_count == 1
+        assert not client.is_connected
+    asyncio.run(scenario())
+
+
+def test_primary_data_reply_keeps_ordinary_deadline_despite_progress(client_module):
+    async def scenario():
+        client_module._CMD_TIMEOUT = 0.04
+        client_module._BULK_CMD_TIMEOUT = 0.3
+        client_module._STALL_TIMEOUT = 0.04
+        raw = b"x" * 200
+        tasks = []
+        client, transport = attached_client(
+            client_module,
+            progressive_reply_handler(struct.pack("<II", 1, len(raw)) + raw, tasks),
+        )
+        with pytest.raises(TimeoutError, match="Timed out during RadiaCode command"):
+            await client._read_vs(client_module.VS.DATA_BUF)
+        await asyncio.gather(*tasks)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["elapsed_s"] < 0.2
+        assert stats["error_category"] == "incomplete_response"
+        assert transport.disconnect_count == 1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cancel_before_cleanup", [False, True])
+def test_repeated_cancellation_finishes_cleanup_before_queued_reconnect(
+    client_module, monkeypatch, cancel_before_cleanup,
+):
+    async def scenario():
+        client_module._DISCONNECT_TIMEOUT = 0.3
+        client, old = attached_client(client_module, lambda *_: None)
+        cleanup_started = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+        cleanup_cancelled = asyncio.Event()
+        async def slow_disconnect():
+            old.disconnect_count += 1
+            cleanup_started.set()
+            try:
+                await finish_cleanup.wait()
+                old.is_connected = False
+            except asyncio.CancelledError:
+                cleanup_cancelled.set()
+                raise
+        old.disconnect = slow_disconnect
+        command = asyncio.create_task(client._execute(client_module.CMD.GET_VERSION))
+        await old.write_started.wait()
+        if cancel_before_cleanup:
+            command.cancel()
+        await cleanup_started.wait()  # cancellation or ordinary response timeout
+        command.cancel()
+        await asyncio.sleep(0)
+        command.cancel()
+        fresh = FakeBLETransport(client_module)
+        device = supply_connection(monkeypatch, client_module, fresh)
+        reconnect = asyncio.create_task(client.connect(device))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not cleanup_cancelled.is_set()
+        assert not command.done()
+        assert client._cmd_lock.locked()
+        assert not fresh.requests
+        finish_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        await reconnect
+        assert old.disconnect_count == 1
+        assert not old.is_connected
+        assert len(fresh.requests) == 4
+        assert client.is_connected
+        assert not client._cmd_lock.locked()
     asyncio.run(scenario())
 
 
@@ -723,6 +1082,33 @@ def test_direct_spectrum_transport_failure_is_strict_and_has_no_configuration_ga
 
     asyncio.run(scenario())
 
+
+
+def test_get_data_merges_record_decode_and_measurement_candidate_diagnostics(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        client, _ = attached_client(client_module)
+        client._base_time = datetime.datetime(2026, 1, 1)
+        record = struct.pack("<BBBi", 0, 0, 0, 0) + struct.pack(
+            "<ffHHHB", 12.5, 1.23e-4, 15, 20, 0, 0
+        )
+        unknown = struct.pack("<BBBi", 1, 0, 99, 0)
+
+        async def data(vs_id):
+            assert vs_id == client_module.VS.DATA_BUF
+            return record + unknown
+
+        monkeypatch.setattr(client, "_read_vs", data)
+        result = await client.get_data()
+        assert result.count_rate == 12.5
+        assert result.data_buf_status["decoded_records"] == 1
+        assert result.data_buf_status["record_types"] == {"RealTimeData": 1}
+        assert result.data_buf_status["stop_reason"].startswith("unknown_record")
+        assert result.data_buf_status["unread_bytes"] == len(unknown)
+        assert result.data_buf_status["measurement_candidates"]["RealTimeData"]["valid_pairs"] == 1
+
+    asyncio.run(scenario())
 
 def test_temperature_register_is_cached_between_sensor_polls(client_module, monkeypatch):
     async def scenario():
