@@ -3,11 +3,14 @@
 All notable changes to this project will be documented here.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-Versions follow [Semantic Versioning](https://semver.org/).
+New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`), with PEP 440 prerelease suffixes. Historical entries retain their original version identifiers and tag links.
 
 ---
 
 ## [Unreleased]
+
+### Changed
+- **Calendar release naming** — use `YYYY.MM.N` in future manifest versions, tags and release titles, with `bN`/`rcN` for prereleases. The release workflow validates the format. Older GitHub display names use calendar aliases while published tags, installed versions and downloads remain intact. The historical mapping is documented in `docs/release-versioning.md`.
 
 ---
 
