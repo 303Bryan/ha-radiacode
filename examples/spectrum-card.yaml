@@ -23,10 +23,18 @@ entities:
       }
     hovertemplate: '%{x:.1f} keV<br>%{y} counts<extra></extra>'
 layout:
+  height: 800
+  margin:
+    t: 30
+    b: 60
+    l: 70
+    r: 30
   xaxis:
     type: linear
-    title: Energy (keV)
+    title:
+      text: Energy (keV)
     autorange: true
   yaxis:
-    title: Counts
+    title:
+      text: Counts
     rangemode: tozero
