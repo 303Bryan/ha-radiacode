@@ -32,7 +32,10 @@ def test_known_skipped_records_are_counted_without_inventing_measurements(protoc
     )
     status = {}
     assert len(payload) == 115
-    assert protocol.decode_data_buf(payload, datetime(2026, 1, 1), status) == []
+    assert protocol.decode_data_buf(
+        payload, datetime(2026, 1, 1), status,
+        group4_format=protocol.Group4Format.LEGACY_USER_DATA,
+    ) == []
     assert status["record_group_counts"] == {"0:4": 5}
     assert status["record_types"] == {}
     assert status["stop_reason"] == "complete"

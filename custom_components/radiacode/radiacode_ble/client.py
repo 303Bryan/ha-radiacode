@@ -16,9 +16,9 @@ handled automatically by connect().
 
 BLE notification reassembly
 ────────────────────────────
-Responses arrive in one or more BLE notify packets. The first packet
-carries a 4-byte signed length prefix; subsequent packets are
-continuations. We accumulate packets into _resp_buf until the
+Responses arrive in one or more BLE notify packets. The byte stream starts
+with a 4-byte signed length prefix, which can span notification packets.
+The remaining bytes are continuations. We accumulate them until the
 declared number of bytes is received.  _notify_event signals progress or a
 connection drop; no partial frame is returned as a successful reply.
 
@@ -30,12 +30,14 @@ device, letting parse_response_body() detect mismatched replies.
 
 Write mode
 ──────────
-Writes use response=False (ATT Write Command / Write Without Response).
+Writes default to response=False (ATT Write Command / Write Without Response).
 Through ESPHome BT proxies, ATT Write Requests (response=True) can
 hang for 10+ seconds waiting for a Write Response that never arrives
 through the proxy relay, even though the device processes the command
 and sends notification data back.  Write Without Response is fire-and-
 forget; we confirm the command was processed via notification replies.
+Acknowledged writes are an explicit opt-in; they use the same command deadline
+and never fall back to retransmitting a potentially consumed command.
 
 Connection resilience
 ─────────────────────
@@ -54,6 +56,7 @@ import asyncio
 import datetime
 import logging
 import struct
+import time
 from collections import Counter, deque
 from copy import deepcopy
 from contextlib import asynccontextmanager
@@ -65,6 +68,8 @@ from bleak_retry_connector import BleakClientWithServiceCache, establish_connect
 
 from .protocol import (
     CMD,
+    Group4Format,
+    parse_group4_format,
     VS,
     VSFR,
     DIAGNOSTIC_VSFR_IDS,
@@ -113,6 +118,11 @@ _LOGGER = logging.getLogger(__name__)
 # Maximum bytes per write (BLE MTU constraint; both cdump and mkgeiger use 18)
 _WRITE_CHUNK = 18
 
+# SET_EXCHANGE advertises 16-bit detector transmit/receive sizes. Apply this
+# protocol maximum before negotiation, then use the detector transmit limit
+# for incoming response bodies (the length excludes the four-byte prefix).
+_MAX_RESPONSE_BODY = 0xFFFF
+
 # One deadline covers all command writes and response notifications.
 # Failed transports are then disconnected with a separate bounded cleanup.
 _CMD_TIMEOUT = 10.0
@@ -132,6 +142,7 @@ _STALL_TIMEOUT = 2.0
 
 _DISCONNECT_TIMEOUT = 5.0
 _TEMPERATURE_INTERVAL = 60.0
+_CONFIGURATION_RETRY_INTERVAL = 300.0
 _COMMAND_HISTORY_LIMIT = 20
 
 # Bound the entire establishment operation, including connector retries and
@@ -149,7 +160,11 @@ class RadiaCodeBLEClient:
     proxy infrastructure.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, acknowledged_writes: bool = False) -> None:
+        self._acknowledged_writes = acknowledged_writes
+        self._write_mode_effective: Optional[str] = None
+        self._exchange_metadata: dict = {}
+        self._response_body_limit: int = _MAX_RESPONSE_BODY
         self._client: Optional[BleakClient] = None
         # External disconnect invalidates reconnect work already queued or
         # awaiting backend cleanup/establishment.  Internal cleanup does not.
@@ -160,6 +175,7 @@ class RadiaCodeBLEClient:
 
         # Notification reassembly state
         self._resp_buf: bytearray = bytearray()
+        self._resp_header: bytearray = bytearray()
         # _resp_total tracks the total frame bytes still expected:
         #   0 = idle or complete, >0 = bytes remaining
         self._resp_total: int = 0
@@ -194,6 +210,12 @@ class RadiaCodeBLEClient:
         self._spectrum_format_authoritative: bool = False
         self._spectrum_format_source: Optional[str] = None
         self._firmware_version: Optional[str] = None
+        # Cache only a complete, actual device configuration. Reconnects to
+        # the same detector retain it; optional failures back off across links.
+        self._configuration_address: Optional[str] = None
+        self._configuration_loaded = False
+        self._configuration_next_retry = 0.0
+        self._group4_format: Optional[Group4Format] = None
 
         # Temperature changes slowly; DATA_BUF also carries RareData samples.
         # Avoid a separate register command on every regular sensor poll.
@@ -202,9 +224,16 @@ class RadiaCodeBLEClient:
 
     # ── Connection management ─────────────────────────────────────────────────
 
+    def _reset_exchange_limits(self) -> None:
+        """Discard metadata belonging to a retired or uninitialised link."""
+        self._exchange_metadata = {}
+        self._response_body_limit = _MAX_RESPONSE_BODY
+        self._write_mode_effective = None
+
     def _reset_notification_state(self) -> None:
         """Reset state for a new connection while holding the command lock."""
         self._resp_buf = bytearray()
+        self._resp_header = bytearray()
         self._resp_total = 0
         self._notify_event.clear()
         self._response_started = False
@@ -254,6 +283,18 @@ class RadiaCodeBLEClient:
         await self._retire_current_client("reconnect")
         self._check_connect_generation(generation)
 
+        address = ble_device.address.upper()
+        if self._configuration_address != address:
+            self._configuration_loaded = False
+            self._configuration_next_retry = 0.0
+            self._group4_format = None
+            if self._configuration_address is not None:
+                self._spectrum_format_version = 0
+                self._spectrum_format_loaded = False
+                self._spectrum_format_authoritative = False
+                self._spectrum_format_source = None
+                self._firmware_version = None
+            self._configuration_address = address
         self._seq = 0
         self._reset_notification_state()
         self._connection_generation += 1
@@ -334,6 +375,22 @@ class RadiaCodeBLEClient:
             self._connection_generation, self._transport_metadata,
         )
 
+        if self._acknowledged_writes:
+            get_characteristic = getattr(services, "get_characteristic", None)
+            characteristic = (
+                get_characteristic(WRITE_CHAR_UUID)
+                if callable(get_characteristic) else None
+            )
+            properties = getattr(characteristic, "properties", None)
+            if not properties or "write" not in properties:
+                raise RadiaCodeInitError(
+                    "write_mode",
+                    RuntimeError(
+                        "Acknowledged writes are not supported by the RadiaCode "
+                        "write characteristic"
+                    ),
+                )
+
         client = self._client
         try:
             # Bind the originating client into the callback.  A callback
@@ -354,7 +411,7 @@ class RadiaCodeBLEClient:
         # init failed (e.g. "RC-101 didn't reply to SET_EXCHANGE").
         # 1. Handshake — device expects this exact payload before responding to data
         try:
-            await self._run_init_step("set_exchange", self._execute_locked(CMD.SET_EXCHANGE, b"\x01\xff\x12\xff"))
+            await self._run_init_step("set_exchange", self._set_exchange_locked())
         except Exception as err:
             raise RadiaCodeInitError("set_exchange", err) from err
 
@@ -383,6 +440,19 @@ class RadiaCodeBLEClient:
         # cdump sets this to now+128 s during init.
         self._base_time = datetime.datetime.now() + datetime.timedelta(seconds=128)
 
+        # Establish the shared-ID record layout once. Failed optional reads
+        # back off across reconnects, so they cannot force every recovery into
+        # another bulk transfer. A failed transport cannot be reused for drain.
+        if self.configuration_retry_due:
+            try:
+                await self._run_init_step(
+                    "configuration", self._refresh_record_configuration_locked()
+                )
+            except Exception as err:
+                if not self.is_connected:
+                    raise RadiaCodeInitError("configuration", err) from err
+                _LOGGER.debug("Configuration unavailable; retaining unknown schema: %s", err)
+
         # Drain stale records accumulated while disconnected.  The full
         # framed response must arrive before another command can be sent.
         try:
@@ -394,6 +464,39 @@ class RadiaCodeBLEClient:
         _LOGGER.debug(
             "RadiaCode connected and initialised (%s)", ble_device.address
         )
+
+    async def _set_exchange_locked(self) -> None:
+        """Negotiate reply limits without reusing metadata from an older link."""
+        self._reset_exchange_limits()
+        payload = await self._execute_locked(CMD.SET_EXCHANGE, b"\x01\xff\x12\xff")
+        try:
+            # Legacy replies have eight payload bytes; current firmware adds
+            # a four-byte interface word. Preserve future complete extensions
+            # without interpreting their contents.
+            if len(payload) < 8 or 8 < len(payload) < 12:
+                raise ValueError(f"Invalid SET_EXCHANGE payload size: {len(payload)}")
+            target_id, tx_size, rx_size = struct.unpack_from("<IHH", payload)
+            if tx_size < 4 or rx_size < 4:
+                raise ValueError(
+                    f"Invalid SET_EXCHANGE transfer limits: TX={tx_size}, RX={rx_size}"
+                )
+            metadata = {
+                "target_id": target_id,
+                "detector_tx_size": tx_size,
+                "detector_rx_size": rx_size,
+                "interface_ready": None,
+                "interface_type": None,
+            }
+            if len(payload) >= 12:
+                interface = struct.unpack_from("<I", payload, 8)[0]
+                metadata["interface_ready"] = bool(interface & 0xFF)
+                metadata["interface_type"] = (interface >> 8) & 0xFF
+        except ValueError as err:
+            self._record_payload_error(err, payload)
+            raise
+        self._exchange_metadata = metadata
+        self._response_body_limit = tx_size
+        _LOGGER.debug("SET_EXCHANGE negotiated transport limits: %s", metadata)
 
     async def _run_init_step(self, step: str, operation):
         """Measure each initialization operation without recording payloads."""
@@ -428,6 +531,7 @@ class RadiaCodeBLEClient:
         self._expecting_response = False
         self._disconnected_event.set()
         self._notify_event.set()
+        self._reset_exchange_limits()
 
         if client is None:
             return
@@ -484,11 +588,29 @@ class RadiaCodeBLEClient:
         """Return bounded command summaries suitable for HA diagnostics."""
         return {
             "connection_generation": self._connection_generation,
-            "transport": dict(self._transport_metadata),
+            "transport": {
+                **self._transport_metadata,
+                "write_mode_requested": (
+                    "with_response" if self._acknowledged_writes else "without_response"
+                ),
+                "write_mode_effective": self._write_mode_effective,
+                "exchange": dict(self._exchange_metadata),
+                "response_body_limit": self._response_body_limit,
+            },
             "last_disconnect_reason": self._last_disconnect_reason,
             "initialization_steps": [dict(step) for step in self._initialization_steps],
             "recent_commands": deepcopy(list(self._command_history)),
             "spectrum_format_source": self._spectrum_format_source,
+            "configuration": {
+                "loaded": self._configuration_loaded,
+                "group4_schema": (
+                    self._group4_format.value if self._group4_format is not None else None
+                ),
+                "retry_in_seconds": (
+                    max(0.0, round(self._configuration_next_retry - time.monotonic(), 3))
+                    if not self._configuration_loaded else None
+                ),
+            },
         }
 
     def _on_ble_disconnect(self, client: BleakClient) -> None:
@@ -496,6 +618,7 @@ class RadiaCodeBLEClient:
         if client is not self._client:
             return
         self._last_disconnect_reason = "remote_disconnect"
+        self._reset_exchange_limits()
         _LOGGER.debug("BLE disconnect callback generation=%d", self._connection_generation)
         self._disconnected_event.set()
         self._notify_event.set()
@@ -522,7 +645,9 @@ class RadiaCodeBLEClient:
         # result before optional maintenance commands can stall or disconnect.
         raw = await self._read_vs(VS.DATA_BUF)
         status = {}
-        records = decode_data_buf(raw, self._base_time, diagnostics=status)
+        records = decode_data_buf(
+            raw, self._base_time, diagnostics=status, group4_format=self._group4_format
+        )
         buf_data = extract_sensor_values(records)
         buf_data.data_buf_status.update(status)
         now = asyncio.get_running_loop().time()
@@ -606,8 +731,48 @@ class RadiaCodeBLEClient:
 
     async def get_configuration(self) -> str:
         """Read the device configuration text (cp1251-encoded)."""
-        raw = await self._read_vs(VS.CONFIGURATION)
-        return raw.decode("cp1251", errors="replace")
+        async with self._command_lock_context():
+            raw = await self._read_vs_locked(VS.CONFIGURATION)
+            config = raw.decode("cp1251", errors="replace")
+            self._cache_record_configuration(config)
+            return config
+
+    @property
+    def configuration_retry_due(self) -> bool:
+        """Whether optional schema discovery is due after its bounded backoff."""
+        return (
+            not self._configuration_loaded
+            and time.monotonic() >= self._configuration_next_retry
+        )
+
+    def _cache_record_configuration(self, config: str) -> None:
+        """Unknown complete schemas remain unknown; do not infer from payloads."""
+        self._group4_format = parse_group4_format(config)
+        self._configuration_loaded = True
+        self._configuration_next_retry = 0.0
+
+    async def refresh_record_configuration(self) -> None:
+        """Retry optional schema discovery without running on the primary path."""
+        async with self._command_lock_context():
+            if self.configuration_retry_due:
+                await self._refresh_record_configuration_locked()
+
+    async def _refresh_record_configuration_locked(self) -> None:
+        self._configuration_next_retry = time.monotonic() + _CONFIGURATION_RETRY_INTERVAL
+        raw = await self._read_vs_locked(VS.CONFIGURATION)
+        config = raw.decode("cp1251", errors="replace")
+        self._cache_record_configuration(config)
+        # Do not replace an observed spectrum encoding with a missing default.
+        if not self._spectrum_format_loaded or any(
+            line.partition("=")[0].strip() == "SpecFormatVersion"
+            for line in config.splitlines()
+        ):
+            try:
+                self._apply_spectrum_configuration(raw)
+            except ValueError:
+                # A complete known record schema remains valid even if the
+                # unrelated spectrum declaration cannot authorize its decoder.
+                _LOGGER.debug("Configuration has an unsupported spectrum declaration")
 
     async def refresh_spectrum_format(self) -> None:
         """Read and validate the spectrum format from device configuration.
@@ -621,6 +786,11 @@ class RadiaCodeBLEClient:
     async def _refresh_spectrum_format_locked(self) -> None:
         """Discover the format while holding the command lock."""
         raw = await self._read_vs_locked(VS.CONFIGURATION)
+        self._cache_record_configuration(raw.decode("cp1251", errors="replace"))
+        self._apply_spectrum_configuration(raw)
+
+    def _apply_spectrum_configuration(self, raw: bytes) -> None:
+        """Reuse one complete configuration for spectrum and stream schemas."""
         config = raw.decode("cp1251", errors="replace")
         declared_values = [
             value.strip()
@@ -734,12 +904,7 @@ class RadiaCodeBLEClient:
             self._on_notify(sender, data)
 
     def _on_notify(self, _sender: object, data: bytearray) -> None:
-        """Assemble one strictly framed reply and wake the command on progress.
-
-        The first packet starts with an int32 little-endian body length;
-        continuation packets carry only body bytes.  Reject malformed
-        lengths and overflows instead of treating them as complete frames.
-        """
+        """Assemble one complete bounded frame independently of BLE boundaries."""
         if not self._expecting_response or self._response_error is not None:
             return
         if self._response_started and self._resp_total == 0:
@@ -754,7 +919,11 @@ class RadiaCodeBLEClient:
             if size_key not in sizes and len(sizes) >= 32:
                 size_key = "other"
             sizes[size_key] = sizes.get(size_key, 0) + 1
-            if stats["first_byte_s"] is None and data:
+        # Empty notifications do not advance the stream or renew its stall lease.
+        if not data:
+            return
+        if stats is not None:
+            if stats["first_byte_s"] is None:
                 stats["first_byte_s"] = round(now - stats["_started"], 4)
             if self._last_notification is not None:
                 stats["max_notification_gap_s"] = max(
@@ -762,31 +931,34 @@ class RadiaCodeBLEClient:
                 )
 
         if not self._response_started:
-            if len(data) < 4:
-                self._response_error = ValueError(
-                    f"BLE response length header too short: {len(data)} bytes"
-                )
-            else:
-                (body_len,) = struct.unpack_from("<i", data, 0)
+            needed = 4 - len(self._resp_header)
+            self._resp_header.extend(data[:needed])
+            data = data[needed:]
+            if len(self._resp_header) == 4:
+                (body_len,) = struct.unpack_from("<i", self._resp_header)
+                if stats is not None:
+                    stats["declared_body_bytes"] = body_len
                 if body_len < 4:
                     self._response_error = ValueError(
                         f"Invalid BLE response body length: {body_len}"
                     )
+                elif body_len > self._response_body_limit:
+                    self._response_error = ValueError(
+                        f"BLE response body length {body_len} exceeds limit "
+                        f"{self._response_body_limit}"
+                    )
                 else:
                     self._response_started = True
-                    if stats is not None:
-                        stats["declared_body_bytes"] = body_len
                     self._resp_total = body_len
-                    self._resp_buf.extend(data[4:])
-                    self._resp_total -= len(data) - 4
-        else:
-            self._resp_buf.extend(data)
-            self._resp_total -= len(data)
 
-        if self._resp_total < 0:
-            self._response_error = ValueError(
-                f"BLE response overflow by {-self._resp_total} bytes"
-            )
+        if self._response_started and self._response_error is None:
+            if len(data) > self._resp_total:
+                self._response_error = ValueError(
+                    f"BLE response overflow by {len(data) - self._resp_total} bytes"
+                )
+            else:
+                self._resp_buf.extend(data)
+                self._resp_total -= len(data)
         self._last_notification = now
         self._notify_event.set()
 
@@ -830,6 +1002,7 @@ class RadiaCodeBLEClient:
         self._seq = (self._seq + 1) % 32
         packet = build_command(cmd, seq, args)
         self._resp_buf = bytearray()
+        self._resp_header = bytearray()
         self._resp_total = 0
         self._response_started = False
         self._response_error = None
@@ -856,6 +1029,11 @@ class RadiaCodeBLEClient:
             "lock_wait_s": round(self._command_lock_wait_s, 4),
             "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "request_bytes": len(packet), "completed_write_chunks": 0,
+            "write_mode_requested": (
+                "with_response" if self._acknowledged_writes else "without_response"
+            ),
+            "write_mode_effective": None,
+            "response_body_limit": self._response_body_limit,
             "notification_count": 0, "notification_sizes": {},
             "declared_body_bytes": None, "received_body_bytes": 0,
             "missing_body_bytes": None, "first_byte_s": None,
@@ -881,10 +1059,12 @@ class RadiaCodeBLEClient:
                         raise ConnectionError(
                             f"BLE disconnected during command {cmd:#06x} (seq={seq})"
                         )
+                    self._write_mode_effective = stats["write_mode_requested"]
+                    stats["write_mode_effective"] = self._write_mode_effective
                     await client.write_gatt_char(
                         WRITE_CHAR_UUID,
                         packet[offset: offset + _WRITE_CHUNK],
-                        response=False,
+                        response=self._acknowledged_writes,
                     )
                     stats["completed_write_chunks"] += 1
 
@@ -923,10 +1103,14 @@ class RadiaCodeBLEClient:
                                 continue
                             except asyncio.TimeoutError:
                                 pass
+                        detail = (
+                            f"received {len(self._resp_header)} of 4 length-header bytes"
+                            if not self._response_started else
+                            f"received {len(self._resp_buf)} bytes, missing {self._resp_total}"
+                        )
                         raise TimeoutError(
                             f"Incomplete response to RadiaCode command {cmd:#06x} "
-                            f"(seq={seq}): received {len(self._resp_buf)} bytes, "
-                            f"missing {self._resp_total}"
+                            f"(seq={seq}): {detail}"
                         )
         except BaseException as err:
             ended = asyncio.get_running_loop().time()
@@ -935,7 +1119,7 @@ class RadiaCodeBLEClient:
             elif isinstance(err, TimeoutError):
                 category = (
                     "write_timeout" if phase == "write" else
-                    "incomplete_response" if self._response_started else "no_response"
+                    "incomplete_response" if self._response_started or self._resp_header else "no_response"
                 )
             elif isinstance(err, ConnectionError):
                 category = "connection_lost"
@@ -954,10 +1138,14 @@ class RadiaCodeBLEClient:
             if self._client is client:
                 await self._retire_current_client(f"command:{category}")
             if isinstance(err, TimeoutError) and not str(err):
+                detail = (
+                    f"received {len(self._resp_header)} of 4 length-header bytes"
+                    if self._resp_header and not self._response_started else
+                    f"received {len(self._resp_buf)} bytes, missing {self._resp_total}"
+                )
                 raise TimeoutError(
                     f"Timed out during RadiaCode command {cmd:#06x} "
-                    f"(seq={seq}): received {len(self._resp_buf)} bytes, "
-                    f"missing {self._resp_total}"
+                    f"(seq={seq}): {detail}"
                 ) from err
             raise
         finally:
@@ -965,6 +1153,8 @@ class RadiaCodeBLEClient:
             ended = ended if ended is not None else asyncio.get_running_loop().time()
             stats.pop("_started")
             stats["elapsed_s"] = round(ended - started, 4)
+            stats["received_header_bytes"] = len(self._resp_header)
+            stats["missing_header_bytes"] = 4 - len(self._resp_header)
             stats["received_body_bytes"] = len(self._resp_buf)
             stats["missing_body_bytes"] = self._resp_total if self._response_started else None
             stats["max_notification_gap_s"] = round(stats["max_notification_gap_s"], 4)

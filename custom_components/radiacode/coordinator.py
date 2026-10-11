@@ -69,9 +69,11 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    CONF_ACKNOWLEDGED_WRITES,
     CONF_ADDRESS,
     CONF_POLL_INTERVAL,
     CONF_SPECTRUM_INTERVAL,
+    DEFAULT_ACKNOWLEDGED_WRITES,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_SPECTRUM_INTERVAL,
     DOMAIN,
@@ -147,12 +149,18 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._spectrum_consecutive_failures = 0
         self._automatic_spectrum_paused = False
         self._address: str = entry.data[CONF_ADDRESS]
-        self._client = RadiaCodeBLEClient()
+        self._client = RadiaCodeBLEClient(
+            acknowledged_writes=entry.options.get(
+                CONF_ACKNOWLEDGED_WRITES, DEFAULT_ACKNOWLEDGED_WRITES
+            )
+        )
 
         # RareData fields appear ~once per minute; cache them so sensors
         # remain valid between polls that contain only RealTimeData records.
         self._last_battery: Optional[float] = None
         self._last_accumulated_dose: Optional[float] = None
+        # Independent non-resettable counter; never merge with since-reset dose.
+        self._last_dose_counter: Optional[float] = None
         self._last_temperature: Optional[float] = None
 
         # Keep one accepted measurement pair across brief record-less polls.
@@ -196,6 +204,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._last_diagnostics: RadiaCodeDiagnostics = RadiaCodeDiagnostics()
         self._next_diagnostics_read = 0.0
         self._next_temperature_read = 0.0
+        self._next_configuration_read = 0.0
 
         # Gamma spectrum; read on its own slower cadence (options-driven)
         # and cached in between — the heaviest BLE transfer we perform.
@@ -518,6 +527,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 self._last_battery = data.battery
             if data.accumulated_dose is not None:
                 self._last_accumulated_dose = data.accumulated_dose
+            if data.dose_counter is not None:
+                self._last_dose_counter = data.dose_counter
             if data.temperature is not None:
                 self._last_temperature = data.temperature
                 self._next_temperature_read = now + _TEMPERATURE_INTERVAL
@@ -615,6 +626,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 dose_rate=self._last_dose_rate,
                 count_rate=self._last_count_rate,
                 accumulated_dose=self._last_accumulated_dose,
+                dose_counter=self._last_dose_counter,
                 battery=self._last_battery,
                 temperature=self._last_temperature,
                 hardness=compute_hardness(
@@ -668,6 +680,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             or now >= self._next_diagnostics_read
             or now >= self._next_temperature_read
             or (
+                getattr(self._client, "configuration_retry_due", False)
+                and now >= self._next_configuration_read
+            )
+            or (
                 self._spectrum_interval > 0 and not self._automatic_spectrum_paused
                 and now >= self._next_spectrum_read
             )
@@ -695,6 +711,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     async def _async_run_maintenance(self) -> None:
         """Run due operations sequentially, yielding to primary polls."""
         operations = (
+            ("configuration", "_next_configuration_read", 300.0,
+             self._refresh_protocol_configuration, None),
             ("identity", "_next_identity_read", _IDENTITY_RETRY_INTERVAL,
              self._fetch_device_identity, None),
             ("settings", "_next_settings_read", _SETTINGS_INTERVAL,
@@ -719,6 +737,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     return
                 now = time.monotonic()
                 if now < getattr(self, deadline):
+                    continue
+                if phase == "configuration" and not getattr(
+                    self._client, "configuration_retry_due", False
+                ):
                     continue
                 if phase == "identity" and self._serial_number is not None:
                     continue
@@ -760,6 +782,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 self._publish_maintenance_cache()
         finally:
             self._maintenance_phase = None
+
+    async def _refresh_protocol_configuration(self) -> None:
+        """Schema retries share maintenance backoff and primary-poll priority."""
+        await self._client.refresh_record_configuration()
 
     def _publish_maintenance_cache(self) -> None:
         """Notify optional changes without rewriting radiation freshness/cadence."""

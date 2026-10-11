@@ -31,6 +31,7 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 | Dose Rate | µSv/h | Real-time ambient radiation dose rate |
 | Count Rate | cps | Raw detector counts per second |
 | Accumulated Dose | µSv | Total dose accumulated since last device reset |
+| Dose Counter | µSv | Independent non-resettable counter on supported firmware; unaffected by Reset Accumulated Dose |
 | Hardness | — | Spectral hardness coefficient (µR/h ÷ cps), as in the Radiacode app — characteristic per isotope, useful for pseudo-identification of sources |
 | Battery | % | Device battery level *(diagnostic)* |
 | Temperature | °C | Device internal temperature *(diagnostic)* |
@@ -105,7 +106,7 @@ layout:
 |--------|-------------|
 | BLE Connected | True while the BLE link is active; exposes `last_error`, `connection_count`, and `last_poll_duration` attributes *(diagnostic)* |
 
-> **Note:** Dose Rate and Count Rate update on every poll (default every 5 s, configurable). Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates.
+> **Note:** Dose Rate and Count Rate update on every poll (default every 5 s, configurable). Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates. The independent Dose Counter updates much less often at background radiation levels and is cached separately. It remains Unknown on firmware without a recognized counter schema.
 
 ---
 
@@ -206,6 +207,7 @@ After setup, click **Configure** on the integration to adjust:
 |--------|---------|-------|-------------|
 | Poll interval | 5 s | 5–300 s | How often sensor data is read over BLE. Longer intervals reduce BT proxy load and device battery drain. |
 | Spectrum poll interval | 60 s | 0–3600 s | How often the gamma spectrum is read. 0 disables spectrum polling (the largest BLE transfer). |
+| Confirm Bluetooth writes (experimental) | Off | On / Off | Requests an acknowledgment for each command chunk. Test this only when comparing connection behavior; some proxies stall with it enabled. Changing the option reloads the integration. |
 
 ---
 
@@ -295,6 +297,12 @@ The download also includes bounded transport history, maintenance status, measur
 Starting with 2.0.2rc2, `runtime.data_buf` also includes decoded record types, encountered record groups (`record_group_counts`, keyed by `eid:gid`, including known skipped groups), decoder stopping reason and offset, valid/invalid measurement candidates and their timestamp ranges, and the last 20 sample decisions with UTC receipt times. `runtime.freshness.last_sample_rejection` distinguishes absent pairs/timestamps, repeated or regressed timestamps, and outlier suppression. A successful Bluetooth command can still produce no fresh measurement; these fields explain that distinction without a raw packet capture.
 
 Starting with 2.0.2rc3, live sensors prefer the newest valid `RealTimeData` pair even when raw/database records have later timestamps. Raw/database pairs remain fallbacks when no valid live pair is present. Timestamp replay/regression checks are separate for each record type in the current connection, so a fallback cannot block the next live reading and switching types cannot renew a replayed sample. See the [October 10 RC2 field review](docs/rc2-field-review-2026-10-10.md).
+
+Starting with 2.0.2rc4, the integration reads and caches the detector's configuration to distinguish the modern six-byte dose counter from older group-4 records. It publishes a separate **Dose Counter** sensor; the existing resettable **Accumulated Dose** sensor retains its meaning. Counter-only updates cannot renew live radiation freshness.
+
+Response headers can span notifications, and declared response sizes must fit the detector's negotiated transmit limit. **Confirm Bluetooth writes (experimental)** is disabled by default. When enabled, it uses acknowledged writes only if the characteristic supports them; a stalled write retires the transport without changing modes or replaying the command. Leave proxy settings constant when comparing this option, and turn it off if connection establishment or polling stalls. Reload after changing detector firmware so configuration is read again.
+
+The manufacturer's manuals describe log entries being deleted after reading and connected measurements being forwarded without being stored in autonomous history. Reconnecting restores acquisition but cannot promise to recover every missed measurement. See [RC4 protocol and connectivity evidence](docs/protocol-connectivity-rc4.md) for the source boundaries and device acceptance checks.
 
 Device controls use the active Bluetooth link independently of radiation freshness. A connected device's known settings and reset buttons remain usable while radiation is stale. Unknown settings, an inactive link, user-disabled BLE and shutdown keep the corresponding controls unavailable. Radiation still expires on its own bounded freshness window.
 

@@ -19,10 +19,15 @@ CONF_SPECTRUM_INTERVAL = "spectrum_interval"
 DEFAULT_SPECTRUM_INTERVAL = 60
 MAX_SPECTRUM_INTERVAL = 3600
 
+# Experimental ATT write acknowledgments; compatibility mode stays the default.
+CONF_ACKNOWLEDGED_WRITES = "acknowledged_writes"
+DEFAULT_ACKNOWLEDGED_WRITES = False
+
 # Sensor keys — must match RadiaCodeData field names exactly
 SENSOR_DOSE_RATE        = "dose_rate"
 SENSOR_COUNT_RATE       = "count_rate"
 SENSOR_ACCUMULATED_DOSE = "accumulated_dose"
+SENSOR_DOSE_COUNTER     = "dose_counter"
 SENSOR_BATTERY          = "battery"
 SENSOR_TEMPERATURE      = "temperature"
 SENSOR_HARDNESS         = "hardness"

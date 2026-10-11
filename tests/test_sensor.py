@@ -71,7 +71,7 @@ def sensor_module(monkeypatch, protocol):
             SIGNAL_STRENGTH="signal_strength", ENUM="enum",
         ),
         SensorStateClass=SimpleNamespace(
-            MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing",
+            MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing", TOTAL="total",
         ),
         SensorEntity=Entity,
         SensorEntityDescription=SimpleNamespace,

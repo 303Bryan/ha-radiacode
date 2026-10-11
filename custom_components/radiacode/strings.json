@@ -26,10 +26,11 @@
     "step": {
       "init": {
         "title": "Radiacode Options",
-        "description": "Adjust how often the device is polled over Bluetooth. Spectrum reads are the largest BLE transfer — set the spectrum interval to 0 to disable them.",
+        "description": "Adjust how often the device is polled over Bluetooth. Spectrum reads are the largest BLE transfer — set the spectrum interval to 0 to disable them. Confirming Bluetooth writes may help some connections but can slow or stall others. Leave this off unless testing your connection.",
         "data": {
           "poll_interval": "Poll interval (seconds)",
-          "spectrum_interval": "Spectrum poll interval (seconds, 0 = disabled)"
+          "spectrum_interval": "Spectrum poll interval (seconds, 0 = disabled)",
+          "acknowledged_writes": "Confirm Bluetooth writes (experimental)"
         }
       }
     }

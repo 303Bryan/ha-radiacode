@@ -11,6 +11,25 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.2rc4] — 2026-10-10
+
+### Fixed
+- **Modern dose-counter records** — identify group 4 from the actual detector configuration and decode the confirmed six-byte counter payload without consuming following live records. Preserve the recognized older 16-byte UserData layout; unknown schemas stop conservatively.
+- **Split Bluetooth response headers** — assemble the four-byte length header across notifications and reject invalid or oversized declarations immediately. Enforce the incoming limit negotiated by SET_EXCHANGE, with a hard limit before negotiation; reconnects discard stale transport limits.
+
+### Added
+- **Dose Counter sensor** — expose the independent non-resettable counter in µSv, cached separately from the existing accumulated dose since reset. Reset Accumulated Dose affects only its original sensor. Sparse counter updates cannot renew live measurement availability.
+- **Experimental confirmed writes** — optional acknowledged Bluetooth writes, disabled by default for existing proxy compatibility. Unsupported characteristics are rejected before command delivery; stalled writes remain bounded and retire the transport without mode fallback or same-connection replay. Options changes use the existing integration reload path.
+- **Protocol diagnostics** — record requested/effective write mode, negotiated transmit/receive limits and recognized group-4 schema without exposing full configuration payloads.
+- Captured-record, legacy-schema, split-header, negotiated-limit, ACK-stall and Home Assistant entity/options regressions; source evidence and an AIR-1 acceptance plan.
+
+### Validation limits
+- Configuration parsing supports the confirmed modern counter and recognized legacy layout; it does not guess other firmware schemas. Reload after a firmware change to refresh cached configuration.
+- Full response validation, primary-poll priority, bounded recovery, spectrum circuit breaking and RC3's separate live-stream freshness remain in place. No timestamp bias or packet-stall deadline is relaxed.
+- Acknowledged writes are a controlled hardware experiment, not a confirmed repair for incoming proxy notification loss. The manufacturer describes consumed history and connected measurements that are not saved locally; complete backfill after a failed transfer cannot be assumed. Physical AIR-1 soak testing remains pending.
+
+---
+
 ## [2.0.2rc3] — 2026-10-10
 
 ### Fixed

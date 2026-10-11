@@ -74,7 +74,10 @@ async def connection_runtime(monkeypatch):
             return iter([types.SimpleNamespace(uuid=module.SERVICE_UUID)])
 
         def get_characteristic(self, characteristic):
-            return types.SimpleNamespace(uuid=characteristic, handle=1)
+            return types.SimpleNamespace(
+                uuid=characteristic, handle=1,
+                properties=["write", "write-without-response"],
+            )
 
     class Backend:
         def __init__(self, ble_device, *, disconnected_callback, **kwargs):
@@ -122,7 +125,7 @@ async def connection_runtime(monkeypatch):
     )
     owner = module.RadiaCodeBLEClient()
     # Wire-level handshake/framing is covered by the dependency-free client suite.
-    monkeypatch.setattr(owner, "_execute_locked", AsyncMock(return_value=struct.pack("<I", 1)))
+    monkeypatch.setattr(owner, "_execute_locked", AsyncMock(return_value=struct.pack("<IHHI", 0xFF03FF33, 65535, 65535, 0x0201)))
     monkeypatch.setattr(owner, "_read_vs_locked", AsyncMock(return_value=b""))
     try:
         yield module, owner, device, transports, scanner, Backend

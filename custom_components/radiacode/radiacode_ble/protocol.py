@@ -24,9 +24,10 @@ Wire format (response, arrives via BLE notifications):
 import datetime
 import logging
 import math
+import re
 import struct
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import Enum, IntEnum
 from typing import Callable, Optional
 
 _LOGGER = logging.getLogger(__name__)
@@ -200,10 +201,22 @@ class RawData:
 
 
 @dataclass
+class DoseCounterData:
+    """Independent non-resettable dose counter (DATA_BUF gid=4).
+
+    Firmware 4.13+ exposes this separate history counter in increments of
+    10 µR. It must not replace RareData's accumulated dose since reset.
+    """
+    dt: datetime.datetime
+    dose_uR: int           # independent counter, unsigned 32-bit µR
+    flags: int = 0         # opaque device history flags
+
+
+@dataclass
 class RareData:
     """Periodic status snapshot (data_buf gid=3, appears ~every minute)."""
     dt: datetime.datetime
-    dose: float            # accumulated dose, µSv
+    dose: float            # accumulated dose since reset, R
     charge_level: float    # battery, 0–100 percent
     temperature: float     # device temperature, °C
     flags: int = 0         # opaque device status flags
@@ -214,7 +227,8 @@ class RadiaCodeData:
     """Aggregated sensor readings for one poll cycle.
 
     All dose values are already converted to µSv-based units by
-    extract_sensor_values (raw data_buf values are in Roentgen).
+    extract_sensor_values (raw floating readings are in Roentgen; the
+    independent integer dose counter is in micro-Roentgen).
     """
     dose_rate: Optional[float]         # µSv/h   (converted from R/h)
     count_rate: Optional[float]        # CPS      (paired with dose-rate sample)
@@ -225,6 +239,7 @@ class RadiaCodeData:
     measurement_time: Optional[datetime.datetime] = None
     measurement_type: Optional[str] = None
     measurement_flags: Optional[int] = None
+    dose_counter: Optional[float] = None  # independent non-resettable counter, µSv
     data_buf_status: dict = field(default_factory=dict)
 
 
@@ -509,8 +524,113 @@ class _Buf:
 
 # ── data_buf decoder ──────────────────────────────────────────────────────────
 
+class Group4Format(str, Enum):
+    """Layouts positively identified in the detector configuration."""
+
+    DOSE_COUNTER = "dose_counter"
+    LEGACY_USER_DATA = "legacy_user_data"
+
+
+def parse_group4_format(config_text: str) -> Optional[Group4Format]:
+    """Identify group 4 from the actual VS_CONFIGURATION schema.
+
+    The modern counter and older UserData share an ID but have different
+    lengths and meanings. Accept only a complete recognized declaration;
+    neither firmware version nor bytes remaining establish its layout.
+    """
+    groups = []
+    in_data_structure = False
+    group = None
+    channel = None
+    for raw_line in config_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith((";", "#")):
+            continue
+        section = re.fullmatch(r"(\[+)([^\[\]]+)(\]+)", line)
+        if section:
+            depth = len(section[1])
+            if depth != len(section[3]):
+                if group is not None:
+                    group["invalid"] = True
+                continue
+            name = section[2].strip()
+            if depth == 1:
+                in_data_structure = name == "DataStructure"
+                group = None
+                channel = None
+            elif depth == 2 and in_data_structure:
+                group = {"name": name, "id": None, "channels": [], "invalid": False}
+                groups.append(group)
+                channel = None
+            elif depth == 3 and in_data_structure and group is not None:
+                channel = {
+                    "name": name, "id": None, "dtype": None,
+                    "unit": None, "expr": None,
+                }
+                group["channels"].append(channel)
+            elif group is not None:
+                group["invalid"] = True
+            continue
+        if not in_data_structure or group is None:
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or key.strip() not in ("Id", "DType", "Unit", "Expr"):
+            continue
+        key = key.strip()
+        if key == "Unit":
+            if channel is not None:
+                if channel["unit"] is not None:
+                    group["invalid"] = True
+                channel["unit"] = value.strip().strip('"').split("|", 1)[0].strip()
+            continue
+        target = channel if channel is not None else group
+        field_name = {"Id": "id", "DType": "dtype", "Expr": "expr"}[key]
+        if key in ("DType", "Expr") and channel is None:
+            group["invalid"] = True
+            continue
+        if target.get(field_name) is not None:
+            group["invalid"] = True
+            continue
+        try:
+            target[field_name] = int(value.strip(), 0)
+        except ValueError:
+            group["invalid"] = True
+
+    matching = [item for item in groups if item["id"] == 4]
+    if len(matching) != 1:
+        return None
+    group = matching[0]
+    channels = group["channels"]
+    ids = [item["id"] for item in channels]
+    if (
+        group["invalid"]
+        or any(value is None or not 0 <= value <= 255 for value in ids)
+        or len(set(ids)) != len(ids)
+    ):
+        return None
+    if (
+        group["name"] == "GRP_DoseCounter"
+        and [(item["name"], item["id"], item["dtype"]) for item in channels]
+        == [("CHN_DoseCounter", 22, 8), ("CHN_Flags", 0, 4)]
+        and channels[0]["unit"] in ("uR", "µR", "μR")
+        # The app applies Expr=1 using P1/P2 before returning channel values.
+        # Our supported counter and flags are raw integers without that scale.
+        and all(item["expr"] in (None, 0) for item in channels)
+    ):
+        return Group4Format.DOSE_COUNTER
+    if (
+        group["name"] == "GRP_UserData"
+        and [item["dtype"] for item in channels] == [8, 1, 1, 4, 4]
+        and channels[-1]["name"] == "CHN_Flags"
+        and channels[-1]["id"] == 0
+    ):
+        return Group4Format.LEGACY_USER_DATA
+    return None
+
+
 def decode_data_buf(
-    data: bytes, base_time: datetime.datetime, diagnostics: Optional[dict] = None
+    data: bytes, base_time: datetime.datetime, diagnostics: Optional[dict] = None,
+    *, group4_format: Optional[Group4Format] = None,
 ) -> list:
     """
     Decode the raw DATA_BUF byte stream into a list of typed records.
@@ -521,6 +641,7 @@ def decode_data_buf(
     Timestamps are base_time + ts_offset * 10 ms.
     Decoding stops on unknown record types or sequence-number jumps. Optional
     diagnostics describe where decoding stopped without retaining raw bytes.
+    Group 4 requires a recognized layout from the actual device configuration.
     """
     buf = _Buf(data)
     records: list = []
@@ -590,8 +711,16 @@ def decode_data_buf(
                     flags=flags,
                 ))
 
-            elif eid == 0 and gid == 4:     # GRP_UserData (skip)
-                buf.unpack("<IffHH")
+            elif eid == 0 and gid == 4:
+                if group4_format == Group4Format.DOSE_COUNTER:
+                    dose_uR, flags = buf.unpack("<IH")
+                    records.append(DoseCounterData(dt=dt, dose_uR=dose_uR, flags=flags))
+                elif group4_format == Group4Format.LEGACY_USER_DATA:
+                    buf.unpack("<IffHH")
+                else:
+                    stop_reason = "unsupported_group4_schema"
+                    stop_offset = record_offset
+                    break
 
             elif eid == 0 and gid == 5:     # GRP_ScheduleData (skip)
                 buf.unpack("<IffHH")
@@ -791,8 +920,9 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     by tens of seconds and must not displace it. When no valid live pair is
     present, retain the newest RawData/DoseRateDB fallback, preferring RawData
     on equal timestamps; equal type/time uses the last received record.
-    RareData appears ~once per minute, so battery and
-    accumulated_dose may be None if no RareData was in this batch.
+    RareData supplies the accumulated dose since reset, battery and temperature.
+    DoseCounterData supplies a separate non-resettable history counter; it must
+    not replace accumulated_dose or act as a live radiation measurement.
 
     The selected timestamp and record type are retained for diagnostics;
     timestamps are device offsets anchored at connection initialization,
@@ -806,6 +936,9 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     accumulated_dose: Optional[float] = None
     battery: Optional[float] = None
     temperature: Optional[float] = None
+    dose_counter: Optional[float] = None
+    dose_counter_time: Optional[datetime.datetime] = None
+    rare_time: Optional[datetime.datetime] = None
     measurement: Optional[RealTimeData | RawData | DoseRateDB] = None
     measurement_key = None
     priorities = {RealTimeData: 2, RawData: 1, DoseRateDB: 0}
@@ -844,9 +977,18 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
             ):
                 _LOGGER.debug("Skipping implausible RareData record: %s", r)
                 continue
-            accumulated_dose = r.dose * _R_TO_uSv  # R → µSv
-            battery = r.charge_level           # already 0–100 percent
-            temperature = r.temperature      # °C, already converted in decoder
+            if rare_time is None or r.dt >= rare_time:
+                accumulated_dose = r.dose * _R_TO_uSv  # R → µSv
+                battery = r.charge_level           # already 0–100 percent
+                temperature = r.temperature      # °C, already converted in decoder
+                rare_time = r.dt
+        elif isinstance(r, DoseCounterData):
+            if not isinstance(r.dose_uR, int) or not 0 <= r.dose_uR <= 0xFFFFFFFF:
+                _LOGGER.debug("Skipping implausible DoseCounterData record: %s", r)
+                continue
+            if dose_counter_time is None or r.dt >= dose_counter_time:
+                dose_counter = r.dose_uR / 100.0  # µR → µSv
+                dose_counter_time = r.dt
 
     if measurement is not None:
         dose_rate = measurement.dose_rate * _R_TO_uSv  # R/h → µSv/h
@@ -861,6 +1003,7 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
         measurement_time=measurement.dt if measurement is not None else None,
         measurement_type=type(measurement).__name__ if measurement is not None else None,
         measurement_flags=getattr(measurement, "flags", None),
+        dose_counter=dose_counter,
         data_buf_status={"measurement_candidates": candidates},
     )
 

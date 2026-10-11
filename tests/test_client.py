@@ -63,6 +63,20 @@ def client_module(monkeypatch):
     return module
 
 
+class FakeServices(list):
+    """Expose the service and write properties public Bleak APIs provide."""
+
+    def __init__(self, module):
+        self.characteristic = types.SimpleNamespace(
+            uuid=module.WRITE_CHAR_UUID,
+            properties=["write", "write-without-response"],
+        )
+        super().__init__([types.SimpleNamespace(uuid=module.SERVICE_UUID)])
+
+    def get_characteristic(self, uuid):
+        return self.characteristic if uuid == self.characteristic.uuid else None
+
+
 class FakeBLETransport:
     """Record writes and deliver controlled responses from the same loop."""
 
@@ -70,12 +84,13 @@ class FakeBLETransport:
         self.module = module
         self.handler = handler or self.reply_success
         self.is_connected = True
-        self.services = [types.SimpleNamespace(uuid=module.SERVICE_UUID)]
+        self.services = FakeServices(module)
         self.notify_callback = None
         self.disconnected_callback = None
         self.disconnect_count = 0
         self.requests = []
         self.writes = []
+        self.write_responses = []
         self.pending = bytearray()
         self.write_started = asyncio.Event()
 
@@ -85,7 +100,7 @@ class FakeBLETransport:
 
     async def write_gatt_char(self, characteristic, chunk, *, response):
         assert characteristic == self.module.WRITE_CHAR_UUID
-        assert response is False
+        self.write_responses.append(response)
         assert len(chunk) <= 18
         self.writes.append(bytes(chunk))
         self.write_started.set()
@@ -113,7 +128,9 @@ class FakeBLETransport:
 
     def reply_success(self, transport, request):
         cmd = struct.unpack_from("<H", request, 4)[0]
-        if cmd == self.module.CMD.RD_VIRT_STRING:
+        if cmd == self.module.CMD.SET_EXCHANGE:
+            payload = struct.pack("<IHHI", 0xFF03FF33, 65535, 65535, 0x0201)
+        elif cmd == self.module.CMD.RD_VIRT_STRING:
             payload = struct.pack("<II", 1, 0)
         else:
             payload = struct.pack("<I", 1)
@@ -130,8 +147,8 @@ class FakeBLETransport:
         self.disconnected_callback(self)
 
 
-def attached_client(module, handler=None):
-    client = module.RadiaCodeBLEClient()
+def attached_client(module, handler=None, *, acknowledged_writes=False):
+    client = module.RadiaCodeBLEClient(acknowledged_writes=acknowledged_writes)
     transport = FakeBLETransport(module, handler)
     client._client = transport
     transport.notify_callback = lambda sender, data: client._on_client_notify(
@@ -191,7 +208,7 @@ def test_establishment_uses_cache_client_without_ineffective_timeout_kwarg(
         monkeypatch.setattr(client_module, "establish_connection", establish)
         await client.connect(device)
         assert len(transports) == 1
-        assert len(transports[0].requests) == 4
+        assert len(transports[0].requests) == 5
         assert client.is_connected
         await client.disconnect()
         assert transports[0].disconnect_count == 1
@@ -224,7 +241,7 @@ def test_internal_connection_retry_clears_failed_attempt_disconnect_event(
         monkeypatch.setattr(client_module, "establish_connection", establish)
         await client.connect(device)
         assert len(transports) == 1
-        assert len(transports[0].requests) == 4
+        assert len(transports[0].requests) == 5
         assert transports[0].disconnect_count == 0
         assert not client._disconnected_event.is_set()
         assert client.is_connected
@@ -327,7 +344,7 @@ def test_cancelled_establishment_finishes_cleanup_before_queued_reconnect(
             await connecting
         await reconnect
         assert transports[0].disconnect_count == 1
-        assert len(transports[1].requests) == 4
+        assert len(transports[1].requests) == 5
         assert client.is_connected
         assert not client._cmd_lock.locked()
         await client.disconnect()
@@ -517,7 +534,7 @@ def test_repeated_cancellation_finishes_cleanup_before_queued_reconnect(
         await reconnect
         assert old.disconnect_count == 1
         assert not old.is_connected
-        assert len(fresh.requests) == 4
+        assert len(fresh.requests) == 5
         assert client.is_connected
         assert not client._cmd_lock.locked()
     asyncio.run(scenario())
@@ -595,7 +612,6 @@ def test_disconnected_partial_frame_cannot_be_success(client_module):
 @pytest.mark.parametrize(
     "bad_frame,match",
     [
-        (b"\x04\x00", "header too short"),
         (struct.pack("<i", -1), "Invalid BLE response body length"),
         (struct.pack("<i", 0), "Invalid BLE response body length"),
         (struct.pack("<i", 3) + b"abc", "Invalid BLE response body length"),
@@ -744,7 +760,7 @@ def test_reconnect_filters_old_callbacks_during_new_command(client_module, monke
         device = supply_connection(monkeypatch, client_module, fresh)
         await client.connect(device)
         assert client.is_connected
-        assert len(fresh.requests) == 4  # handshake, time, device time, drain
+        assert len(fresh.requests) == 5  # handshake, time, device time, configuration, drain
 
         def ghost_then_reply(transport, request):
             old.notify(b"late unframed continuation from old connection")
@@ -781,7 +797,10 @@ def test_incomplete_init_drain_is_fatal(client_module, monkeypatch):
     async def scenario():
         def handler(transport, request):
             cmd = struct.unpack_from("<H", request, 4)[0]
-            if cmd == client_module.CMD.RD_VIRT_STRING:
+            if (
+                cmd == client_module.CMD.RD_VIRT_STRING
+                and struct.unpack_from("<I", request, 8)[0] == client_module.VS.DATA_BUF
+            ):
                 transport.notify(struct.pack("<i", 80) + request[4:8])
             else:
                 transport.reply_success(transport, request)
@@ -870,9 +889,7 @@ def test_spectrum_reads_directly_and_keeps_observed_encoding_across_reconnect(cl
                 return
             vs_id = struct.unpack_from("<I", request, 8)[0]
             calls.append(vs_id)
-            if vs_id == client_module.VS.CONFIGURATION:
-                raise AssertionError("Configuration must not gate spectrum reads")
-            if vs_id == client_module.VS.DATA_BUF:
+            if vs_id in (client_module.VS.CONFIGURATION, client_module.VS.DATA_BUF):
                 data = b""
             else:
                 data = spectrum
@@ -898,7 +915,7 @@ def test_spectrum_reads_directly_and_keeps_observed_encoding_across_reconnect(cl
         assert client.spectrum_format_version == 0
         assert client._spectrum_format_loaded
         assert len((await client.get_spectrum()).counts) == 1024
-        assert calls.count(client_module.VS.CONFIGURATION) == 0
+        assert calls.count(client_module.VS.CONFIGURATION) == 1
 
     asyncio.run(scenario())
 
@@ -1301,5 +1318,717 @@ def test_disconnect_invalidates_reconnect_already_waiting_for_command_lock(
         assert fresh.notify_callback is None
         assert not fresh.requests
         assert not client.is_connected
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("split", [1, 2, 3])
+def test_length_header_split_across_notifications_is_reassembled(client_module, split):
+    async def scenario():
+        payload = bytes(range(256))
+
+        def fragmented_header(transport, request):
+            frame = struct.pack("<i", 4 + len(payload)) + request[4:8] + payload
+            transport.notify(frame[:split])
+            for offset in range(split, len(frame), 20):
+                transport.notify(frame[offset:offset + 20])
+
+        client, transport = attached_client(client_module, fragmented_header)
+        assert await client._execute(client_module.CMD.GET_VERSION) == payload
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["received_header_bytes"] == 4
+        assert stats["missing_header_bytes"] == 0
+        assert stats["received_body_bytes"] == 4 + len(payload)
+        assert stats["missing_body_bytes"] == 0
+        assert transport.disconnect_count == 0
+
+    asyncio.run(scenario())
+
+
+def test_header_echo_and_body_can_arrive_one_byte_at_a_time(client_module):
+    async def scenario():
+        payload = b"measurement"
+
+        def bytewise(transport, request):
+            frame = struct.pack("<i", 4 + len(payload)) + request[4:8] + payload
+            for byte in frame:
+                transport.notify(bytes([byte]))
+
+        client, transport = attached_client(client_module, bytewise)
+        assert await client._execute(client_module.CMD.GET_VERSION) == payload
+        assert client.transport_diagnostics["recent_commands"][-1]["notification_count"] == 19
+        assert transport.disconnect_count == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("header_bytes", [1, 2, 3])
+def test_partial_header_stalls_without_accepting_or_replaying_data_buf(
+    client_module, header_bytes,
+):
+    async def scenario():
+        def partial(transport, request):
+            transport.notify(struct.pack("<i", 40)[:header_bytes])
+
+        client, transport = attached_client(client_module, partial)
+        with pytest.raises(TimeoutError, match="Incomplete response"):
+            await client._read_vs(client_module.VS.DATA_BUF)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["error_category"] == "incomplete_response"
+        assert stats["received_header_bytes"] == header_bytes
+        assert stats["missing_header_bytes"] == 4 - header_bytes
+        assert stats["declared_body_bytes"] is None
+        assert stats["received_body_bytes"] == 0
+        assert stats["missing_body_bytes"] is None
+        assert len(transport.requests) == 1
+        assert transport.disconnect_count == 1
+        assert not client.is_connected
+
+    asyncio.run(scenario())
+
+
+def test_empty_notifications_do_not_renew_partial_header_stall(client_module):
+    async def scenario():
+        tasks = []
+
+        def partial_with_empty_keepalives(transport, request):
+            transport.notify(b"\x20")
+
+            async def empty_notifications():
+                for _ in range(10):
+                    await asyncio.sleep(0.004)
+                    transport.notify(b"")
+
+            tasks.append(asyncio.create_task(empty_notifications()))
+
+        client, transport = attached_client(client_module, partial_with_empty_keepalives)
+        with pytest.raises(TimeoutError):
+            await client._execute(client_module.CMD.GET_VERSION)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["notification_count"] < 11
+        assert stats["error_category"] == "incomplete_response"
+        await asyncio.gather(*tasks)
+        assert transport.disconnect_count == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("declared", [65536, 390103040])
+def test_prehandshake_oversize_length_is_rejected_before_buffering_body(
+    client_module, declared,
+):
+    async def scenario():
+        def oversized(transport, request):
+            header = struct.pack("<i", declared)
+            transport.notify(header[:1])
+            transport.notify(header[1:] + request[4:8] + b"untrusted body")
+
+        client, transport = attached_client(client_module, oversized)
+        with pytest.raises(ValueError, match="exceeds limit 65535"):
+            await client._execute(client_module.CMD.GET_VERSION)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["declared_body_bytes"] == declared
+        assert stats["error_category"] == "invalid_frame"
+        assert stats["received_body_bytes"] == 0
+        assert len(client._resp_buf) == 0
+        assert transport.disconnect_count == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("interface", [None, 0x0201])
+def test_set_exchange_retains_legacy_and_current_negotiated_limits(
+    client_module, monkeypatch, interface,
+):
+    async def scenario():
+        target = 0xDADA0107
+        handshake = struct.pack("<IHH", target, 2048, 1024)
+        if interface is not None:
+            handshake += struct.pack("<I", interface)
+
+        def handler(transport, request):
+            cmd = struct.unpack_from("<H", request, 4)[0]
+            if cmd == client_module.CMD.SET_EXCHANGE:
+                assert request[8:] == b"\x01\xff\x12\xff"
+                transport.reply(request, handshake, packet_size=1)
+            else:
+                transport.reply_success(transport, request)
+
+        client = client_module.RadiaCodeBLEClient()
+        transport = FakeBLETransport(client_module, handler)
+        device = supply_connection(monkeypatch, client_module, transport)
+        await client.connect(device)
+        metadata = client.transport_diagnostics["transport"]
+        assert metadata["exchange"] == {
+            "target_id": target,
+            "detector_tx_size": 2048,
+            "detector_rx_size": 1024,
+            "interface_ready": None if interface is None else True,
+            "interface_type": None if interface is None else 2,
+        }
+        assert metadata["response_body_limit"] == 2048
+        assert len(transport.requests) == 5
+        assert all(mode is False for mode in transport.write_responses)
+        metadata["exchange"]["target_id"] = 0
+        assert client.transport_diagnostics["transport"]["exchange"]["target_id"] == target
+        await client.disconnect()
+        assert client.transport_diagnostics["transport"]["exchange"] == {}
+        assert client.transport_diagnostics["transport"]["response_body_limit"] == 65535
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("payload", [
+    b"", b"\x01" * 4, b"\x01" * 7, b"\x01" * 9, b"\x01" * 11,
+    struct.pack("<IHH", 0xFF03FF33, 0, 1024),
+    struct.pack("<IHH", 0xFF03FF33, 3, 1024),
+    struct.pack("<IHH", 0xFF03FF33, 1024, 0),
+    struct.pack("<IHH", 0xFF03FF33, 1024, 3),
+])
+def test_invalid_set_exchange_fails_init_and_clears_limits(
+    client_module, monkeypatch, payload,
+):
+    async def scenario():
+        client = client_module.RadiaCodeBLEClient()
+        transport = FakeBLETransport(
+            client_module, lambda transport, request: transport.reply(request, payload),
+        )
+        device = supply_connection(monkeypatch, client_module, transport)
+        with pytest.raises(client_module.RadiaCodeInitError) as error:
+            await client.connect(device)
+        assert error.value.step == "set_exchange"
+        assert isinstance(error.value.__cause__, ValueError)
+        assert len(transport.requests) == 1
+        assert transport.disconnect_count == 1
+        diagnostics = client.transport_diagnostics
+        assert diagnostics["transport"]["exchange"] == {}
+        assert diagnostics["transport"]["response_body_limit"] == 65535
+        assert diagnostics["recent_commands"][-1]["error_category"] == "invalid_payload"
+        assert diagnostics["initialization_steps"][-1]["outcome"] == "ValueError"
+
+    asyncio.run(scenario())
+
+
+def test_negotiated_limit_accepts_boundary_and_rejects_oversize_reply(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        payloads = [b"x" * 60, b"x" * 61]
+
+        def handler(transport, request):
+            cmd = struct.unpack_from("<H", request, 4)[0]
+            if cmd == client_module.CMD.SET_EXCHANGE:
+                transport.reply(request, struct.pack("<IHHI", 0xFF03FF33, 64, 128, 0x0201))
+            elif cmd == client_module.CMD.GET_VERSION:
+                transport.reply(request, payloads.pop(0))
+            else:
+                transport.reply_success(transport, request)
+
+        client = client_module.RadiaCodeBLEClient()
+        transport = FakeBLETransport(client_module, handler)
+        device = supply_connection(monkeypatch, client_module, transport)
+        await client.connect(device)
+        assert await client._execute(client_module.CMD.GET_VERSION) == b"x" * 60
+        with pytest.raises(ValueError, match="body length 65 exceeds limit 64"):
+            await client._execute(client_module.CMD.GET_VERSION)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["response_body_limit"] == 64
+        assert stats["declared_body_bytes"] == 65
+        assert stats["received_body_bytes"] == 0
+        assert stats["error_category"] == "invalid_frame"
+        assert transport.disconnect_count == 1
+        assert len(transport.requests) == 7
+
+    asyncio.run(scenario())
+
+
+def test_reconnect_discards_previous_limits_and_partial_header(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        def first_handler(transport, request):
+            cmd = struct.unpack_from("<H", request, 4)[0]
+            if cmd == client_module.CMD.SET_EXCHANGE:
+                transport.reply(request, struct.pack("<IHHI", 0xFF03FF33, 12, 128, 0x0201))
+            elif cmd == client_module.CMD.GET_VERSION:
+                transport.notify(b"\x08\x00")
+            else:
+                transport.reply_success(transport, request)
+
+        client = client_module.RadiaCodeBLEClient()
+        first = FakeBLETransport(client_module, first_handler)
+        device = supply_connection(monkeypatch, client_module, first)
+        await client.connect(device)
+        assert client.transport_diagnostics["transport"]["response_body_limit"] == 12
+        with pytest.raises(TimeoutError):
+            await client._execute(client_module.CMD.GET_VERSION)
+        fresh = FakeBLETransport(client_module)
+        supply_connection(monkeypatch, client_module, fresh)
+        await client.connect(device)
+        assert client.transport_diagnostics["transport"]["response_body_limit"] == 65535
+        assert client.transport_diagnostics["transport"]["exchange"]["detector_tx_size"] == 65535
+        assert await client._execute(client_module.CMD.GET_VERSION) == struct.pack("<I", 1)
+        first.notify(b"\x00\x00garbage")
+        first.drop_link()
+        assert client.is_connected
+        assert client.transport_diagnostics["transport"]["exchange"]["detector_tx_size"] == 65535
+        await client.disconnect()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_requested_write_mode_is_applied_to_all_chunks(client_module, acknowledged):
+    async def scenario():
+        client, transport = attached_client(
+            client_module,
+            lambda transport, request: transport.reply(request, b"accepted"),
+            acknowledged_writes=acknowledged,
+        )
+        assert client.transport_diagnostics["transport"]["write_mode_effective"] is None
+        assert await client._execute(client_module.CMD.GET_VERSION, b"x" * 45) == b"accepted"
+        mode = "with_response" if acknowledged else "without_response"
+        assert transport.write_responses == [acknowledged] * 3
+        assert client.transport_diagnostics["transport"]["write_mode_requested"] == mode
+        assert client.transport_diagnostics["transport"]["write_mode_effective"] == mode
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["write_mode_requested"] == mode
+        assert stats["write_mode_effective"] == mode
+        assert stats["completed_write_chunks"] == 3
+        assert transport.disconnect_count == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("properties", [None, [], ["write-without-response"]])
+def test_acknowledged_mode_validates_write_support_before_any_command(
+    client_module, monkeypatch, properties,
+):
+    async def scenario():
+        client = client_module.RadiaCodeBLEClient(acknowledged_writes=True)
+        transport = FakeBLETransport(client_module)
+        transport.services.characteristic.properties = properties
+        device = supply_connection(monkeypatch, client_module, transport)
+        with pytest.raises(client_module.RadiaCodeInitError) as error:
+            await client.connect(device)
+        assert error.value.step == "write_mode"
+        assert "not supported" in str(error.value)
+        assert not transport.writes
+        assert not transport.requests
+        assert transport.notify_callback is None
+        assert transport.disconnect_count == 1
+        assert client.transport_diagnostics["transport"]["write_mode_requested"] == "with_response"
+        assert client.transport_diagnostics["transport"]["write_mode_effective"] is None
+
+    asyncio.run(scenario())
+
+
+def test_default_unacknowledged_mode_accepts_characteristic_without_write_support(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        client = client_module.RadiaCodeBLEClient()
+        transport = FakeBLETransport(client_module)
+        transport.services.characteristic.properties = ["write-without-response"]
+        device = supply_connection(monkeypatch, client_module, transport)
+        await client.connect(device)
+        assert len(transport.requests) == 5
+        assert all(response is False for response in transport.write_responses)
+        await client.disconnect()
+
+    asyncio.run(scenario())
+
+
+def test_acknowledged_write_stall_with_complete_reply_never_falls_back_or_replays(
+    client_module,
+):
+    async def scenario():
+        write_cancelled = asyncio.Event()
+
+        async def reply_without_write_ack(transport, request):
+            transport.reply(request, struct.pack("<II", 1, 0))
+            try:
+                await asyncio.Event().wait()
+            finally:
+                write_cancelled.set()
+
+        client, transport = attached_client(
+            client_module, reply_without_write_ack, acknowledged_writes=True,
+        )
+        with pytest.raises(TimeoutError):
+            await client._read_vs(client_module.VS.DATA_BUF)
+        stats = client.transport_diagnostics["recent_commands"][-1]
+        assert stats["error_category"] == "write_timeout"
+        assert stats["write_mode_requested"] == "with_response"
+        assert stats["write_mode_effective"] == "with_response"
+        assert stats["received_body_bytes"] == 12
+        assert stats["missing_body_bytes"] == 0
+        assert len(transport.requests) == 1
+        assert transport.write_responses == [True]
+        assert write_cancelled.is_set()
+        assert transport.disconnect_count == 1
+        assert not client.is_connected
+
+    asyncio.run(scenario())
+
+
+def test_acknowledged_write_failure_does_not_silently_change_mode(client_module):
+    async def scenario():
+        def unsupported(*_):
+            raise RuntimeError("proxy rejected acknowledged write")
+
+        client, transport = attached_client(
+            client_module, unsupported, acknowledged_writes=True,
+        )
+        with pytest.raises(RuntimeError, match="proxy rejected acknowledged write"):
+            await client._execute(client_module.CMD.GET_VERSION)
+        assert transport.write_responses == [True]
+        assert len(transport.requests) == 1
+        assert transport.disconnect_count == 1
+        assert client.transport_diagnostics["recent_commands"][-1]["error_category"] == "write_error"
+
+    asyncio.run(scenario())
+
+
+# Minimal protocol schema supplied by the detector; unrelated capabilities are
+# unnecessary for establishing the six-byte group-4 record layout.
+_MODERN_RECORD_CONFIGURATION = """[DataStructure]
+[[GRP_DoseCounter]]
+Id=4
+[[[CHN_DoseCounter]]]
+Id=22
+Unit=" uR| мкР"
+ScaledUnit=1
+DType=8
+RType=8
+[[[CHN_Flags]]]
+Id=0
+DType=4
+RType=8
+"""
+
+
+def _live_sensor_record(seq=0, offset=0, count_rate=12.5):
+    return struct.pack("<BBBi", seq, 0, 0, offset) + struct.pack(
+        "<ffHHHB", count_rate, 0.00002, 10, 20, 0, 0
+    )
+
+
+def _dose_counter_record(seq=0, offset=0):
+    return struct.pack("<BBBiIH", seq, 0, 4, offset, 106009, 0x3000)
+
+
+def _sensor_configuration_handler(module, config, records=b"", spectrum=None):
+    """Answer real virtual-string frames and reject unrequested bulk work."""
+    def handler(transport, request):
+        command = struct.unpack_from("<H", request, 4)[0]
+        if command != module.CMD.RD_VIRT_STRING:
+            transport.reply_success(transport, request)
+            return
+        target = struct.unpack_from("<I", request, 8)[0]
+        if target == module.VS.CONFIGURATION:
+            data = config.encode("cp1251")
+        elif target == module.VS.DATA_BUF:
+            data = records
+        elif target in (module.VS.SPECTRUM, module.VS.SPEC_ACCUM) and spectrum is not None:
+            data = spectrum
+        else:
+            raise AssertionError(f"Unexpected virtual-string read: {target:#x}")
+        transport.reply(request, struct.pack("<II", 1, len(data)) + data)
+
+    return handler
+
+
+def _virtual_string_requests(module, transport):
+    return [
+        struct.unpack_from("<I", request, 8)[0]
+        for request in transport.requests
+        if struct.unpack_from("<H", request, 4)[0] == module.CMD.RD_VIRT_STRING
+    ]
+
+
+def test_initial_configuration_decodes_counter_and_following_live_without_spectrum(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        records = _dose_counter_record() + _live_sensor_record(1, 1)
+        client = client_module.RadiaCodeBLEClient()
+        transport = FakeBLETransport(
+            client_module,
+            _sensor_configuration_handler(client_module, _MODERN_RECORD_CONFIGURATION, records),
+        )
+        device = supply_connection(monkeypatch, client_module, transport)
+        await client.connect(device)
+        assert _virtual_string_requests(client_module, transport) == [
+            client_module.VS.CONFIGURATION, client_module.VS.DATA_BUF,
+        ]
+        assert [step["step"] for step in client.transport_diagnostics["initialization_steps"]] == [
+            "establish_connection", "start_notify", "set_exchange", "set_time",
+            "device_time", "configuration", "data_buf",
+        ]
+        schema = client.transport_diagnostics["configuration"]
+        assert schema["loaded"] is True
+        assert schema["group4_schema"] == client_module.Group4Format.DOSE_COUNTER.value
+        assert not client.configuration_retry_due
+
+        data = await client.get_data()
+        assert data.dose_counter == pytest.approx(1060.09)
+        assert data.accumulated_dose is None
+        assert data.count_rate == pytest.approx(12.5)
+        assert data.dose_rate == pytest.approx(0.2)
+        assert data.measurement_type == "RealTimeData"
+        assert data.measurement_time == client._base_time + datetime.timedelta(milliseconds=10)
+        assert data.data_buf_status["stop_reason"] == "complete"
+        assert data.data_buf_status["record_types"] == {
+            "DoseCounterData": 1, "RealTimeData": 1,
+        }
+        assert _virtual_string_requests(client_module, transport) == [
+            client_module.VS.CONFIGURATION, client_module.VS.DATA_BUF, client_module.VS.DATA_BUF,
+        ]
+        assert client.is_connected
+        assert transport.disconnect_count == 0
+        await client.disconnect()
+
+    asyncio.run(scenario())
+
+
+def test_complete_record_configuration_is_cached_across_same_address_reconnect(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        records = _dose_counter_record() + _live_sensor_record(1, 1)
+        client = client_module.RadiaCodeBLEClient()
+        handler = _sensor_configuration_handler(
+            client_module, _MODERN_RECORD_CONFIGURATION, records,
+        )
+        first = FakeBLETransport(client_module, handler)
+        device = supply_connection(monkeypatch, client_module, first)
+        await client.connect(device)
+        assert len(first.requests) == 5
+        assert (await client.get_data()).dose_counter == pytest.approx(1060.09)
+
+        second = FakeBLETransport(client_module, handler)
+        supply_connection(monkeypatch, client_module, second)
+        # Address normalization must not discard a valid schema.
+        await client.connect(types.SimpleNamespace(address=device.address.lower()))
+        assert first.disconnect_count == 1
+        assert len(second.requests) == 4
+        assert _virtual_string_requests(client_module, second) == [client_module.VS.DATA_BUF]
+        assert (await client.get_data()).dose_counter == pytest.approx(1060.09)
+        assert _virtual_string_requests(client_module, second) == [
+            client_module.VS.DATA_BUF, client_module.VS.DATA_BUF,
+        ]
+        assert client.transport_diagnostics["configuration"]["group4_schema"] == (
+            client_module.Group4Format.DOSE_COUNTER.value
+        )
+        await client.disconnect()
+
+    asyncio.run(scenario())
+
+
+def test_different_address_invalidates_the_record_configuration_cache(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        client = client_module.RadiaCodeBLEClient()
+        first = FakeBLETransport(
+            client_module,
+            _sensor_configuration_handler(client_module, _MODERN_RECORD_CONFIGURATION),
+        )
+        device = supply_connection(monkeypatch, client_module, first)
+        await client.connect(device)
+        assert client._group4_format is client_module.Group4Format.DOSE_COUNTER
+
+        unknown_handler = _sensor_configuration_handler(
+            client_module, "[DeviceParams]\nFirmware=unknown\n",
+            _dose_counter_record() + _live_sensor_record(1, 1),
+        )
+
+        def second_handler(transport, request):
+            command = struct.unpack_from("<H", request, 4)[0]
+            if command == client_module.CMD.SET_EXCHANGE:
+                assert client._group4_format is None
+                assert not client._configuration_loaded
+            unknown_handler(transport, request)
+
+        second = FakeBLETransport(client_module, second_handler)
+        supply_connection(monkeypatch, client_module, second)
+        await client.connect(types.SimpleNamespace(address="11:22:33:44:55:66"))
+        assert len(second.requests) == 5
+        assert _virtual_string_requests(client_module, second) == [
+            client_module.VS.CONFIGURATION, client_module.VS.DATA_BUF,
+        ]
+        assert client.transport_diagnostics["configuration"]["loaded"] is True
+        assert client.transport_diagnostics["configuration"]["group4_schema"] is None
+        data = await client.get_data()
+        assert data.dose_counter is None
+        assert data.count_rate is None
+        assert data.measurement_time is None
+        assert data.data_buf_status["stop_reason"] == "unsupported_group4_schema"
+        assert client.is_connected
+        await client.disconnect()
+
+    asyncio.run(scenario())
+
+
+def test_incomplete_configuration_retires_link_and_backs_off_until_optional_retry(
+    client_module, monkeypatch,
+):
+    async def scenario():
+        clock = [100.0]
+        # Replace only this client's clock module, preserving asyncio's clock.
+        monkeypatch.setattr(client_module, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+        client = client_module.RadiaCodeBLEClient()
+
+        def incomplete_configuration(transport, request):
+            command = struct.unpack_from("<H", request, 4)[0]
+            if command == client_module.CMD.RD_VIRT_STRING:
+                assert struct.unpack_from("<I", request, 8)[0] == client_module.VS.CONFIGURATION
+                transport.notify(struct.pack("<i", 80) + request[4:8] + b"partial")
+            else:
+                transport.reply_success(transport, request)
+
+        first = FakeBLETransport(client_module, incomplete_configuration)
+        device = supply_connection(monkeypatch, client_module, first)
+        with pytest.raises(client_module.RadiaCodeInitError) as error:
+            await client.connect(device)
+        assert error.value.step == "configuration"
+        assert isinstance(error.value.__cause__, TimeoutError)
+        assert first.disconnect_count == 1
+        assert len(first.requests) == 4
+        assert _virtual_string_requests(client_module, first) == [client_module.VS.CONFIGURATION]
+        assert not client.is_connected
+        assert not client._cmd_lock.locked()
+        assert not client.configuration_retry_due
+        assert client.transport_diagnostics["configuration"] == {
+            "loaded": False, "group4_schema": None,
+            "retry_in_seconds": client_module._CONFIGURATION_RETRY_INTERVAL,
+        }
+
+        # Recovery must perform small init/drain commands and deliver live
+        # samples while the failed optional bulk read remains in backoff.
+        fresh = FakeBLETransport(
+            client_module,
+            _sensor_configuration_handler(
+                client_module, _MODERN_RECORD_CONFIGURATION, _live_sensor_record(),
+            ),
+        )
+        supply_connection(monkeypatch, client_module, fresh)
+        await client.connect(device)
+        assert len(fresh.requests) == 4
+        assert _virtual_string_requests(client_module, fresh) == [client_module.VS.DATA_BUF]
+        assert (await client.get_data()).count_rate == pytest.approx(12.5)
+        before_retry = len(fresh.requests)
+        await client.refresh_record_configuration()
+        assert len(fresh.requests) == before_retry
+        clock[0] += client_module._CONFIGURATION_RETRY_INTERVAL - 0.001
+        assert not client.configuration_retry_due
+        await client.refresh_record_configuration()
+        assert len(fresh.requests) == before_retry
+
+        clock[0] += 0.001
+        assert client.configuration_retry_due
+        await client.refresh_record_configuration()
+        assert len(fresh.requests) == before_retry + 1
+        assert _virtual_string_requests(client_module, fresh).count(client_module.VS.CONFIGURATION) == 1
+        assert not client.configuration_retry_due
+        assert client.transport_diagnostics["configuration"]["group4_schema"] == (
+            client_module.Group4Format.DOSE_COUNTER.value
+        )
+        fresh.handler = _sensor_configuration_handler(
+            client_module, _MODERN_RECORD_CONFIGURATION,
+            _dose_counter_record() + _live_sensor_record(1, 1),
+        )
+        data = await client.get_data()
+        assert data.count_rate == pytest.approx(12.5)
+        assert data.dose_counter == pytest.approx(1060.09)
+        assert data.data_buf_status["stop_reason"] == "complete"
+        after_retry = len(fresh.requests)
+        await client.refresh_record_configuration()
+        assert len(fresh.requests) == after_retry
+        assert first.disconnect_count == 1
+        assert fresh.disconnect_count == 0
+        assert client.is_connected
+        await client.disconnect()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("configuration", [
+    "", "[DataStructure]\n[[GRP_DoseCounter]]\nId=4\n",
+    _MODERN_RECORD_CONFIGURATION.replace("DType=8", "DType=9"),
+    _MODERN_RECORD_CONFIGURATION + _MODERN_RECORD_CONFIGURATION,
+])
+def test_unknown_complete_schema_preserves_prior_live_record_and_stops_at_group4(
+    client_module, monkeypatch, configuration,
+):
+    async def scenario():
+        records = (
+            _live_sensor_record(0, 0, count_rate=5.0)
+            + _dose_counter_record(1, 1)
+            + _live_sensor_record(2, 2, count_rate=50.0)
+        )
+        client = client_module.RadiaCodeBLEClient()
+        transport = FakeBLETransport(
+            client_module, _sensor_configuration_handler(client_module, configuration, records),
+        )
+        device = supply_connection(monkeypatch, client_module, transport)
+        await client.connect(device)
+        schema = client.transport_diagnostics["configuration"]
+        assert schema["loaded"] is True
+        assert schema["group4_schema"] is None
+        assert not client.configuration_retry_due
+        data = await client.get_data()
+        assert data.count_rate == pytest.approx(5.0)
+        assert data.dose_counter is None
+        assert data.accumulated_dose is None
+        assert data.measurement_time == client._base_time
+        assert data.data_buf_status["stop_reason"] == "unsupported_group4_schema"
+        assert data.data_buf_status["record_types"] == {"RealTimeData": 1}
+        assert data.data_buf_status["decoded_records"] == 1
+        assert _virtual_string_requests(client_module, transport).count(client_module.VS.CONFIGURATION) == 1
+        assert client.is_connected
+        await client.disconnect()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("spectrum_declaration", [
+    "", "SpecFormatVersion=abc\n", "SpecFormatVersion=\n", "SpecFormatVersion=2\n",
+    "SpecFormatVersion=0\nSpecFormatVersion=1\n",
+])
+def test_record_schema_discovery_does_not_poison_observed_spectrum_encoding(
+    client_module, monkeypatch, spectrum_declaration,
+):
+    async def scenario():
+        spectrum = struct.pack("<Ifff", 120, 0.0, 3.0, 0.0) + b"\x00\x40"
+        handler = _sensor_configuration_handler(
+            client_module, _MODERN_RECORD_CONFIGURATION + spectrum_declaration,
+            _dose_counter_record() + _live_sensor_record(1, 1), spectrum,
+        )
+        client, first = attached_client(client_module, handler)
+        assert (await client.get_spectrum()).counts == [0] * 1024
+        assert client.spectrum_format_version == 1
+        assert client.spectrum_format_source == "complete_payload"
+        assert _virtual_string_requests(client_module, first) == [client_module.VS.SPECTRUM]
+
+        fresh = FakeBLETransport(client_module, handler)
+        device = supply_connection(monkeypatch, client_module, fresh)
+        await client.connect(device)
+        assert client.spectrum_format_version == 1
+        assert client.spectrum_format_source == "complete_payload"
+        assert not client._spectrum_format_authoritative
+        assert client.transport_diagnostics["configuration"]["group4_schema"] == (
+            client_module.Group4Format.DOSE_COUNTER.value
+        )
+        assert (await client.get_data()).dose_counter == pytest.approx(1060.09)
+        before_spectrum = len(fresh.requests)
+        assert (await client.get_spectrum()).counts == [0] * 1024
+        assert len(fresh.requests) == before_spectrum + 1
+        assert _virtual_string_requests(client_module, fresh).count(client_module.VS.CONFIGURATION) == 1
+        assert _virtual_string_requests(client_module, fresh)[-1] == client_module.VS.SPECTRUM
+        assert client.spectrum_format_version == 1
+        assert client.is_connected
+        await client.disconnect()
 
     asyncio.run(scenario())

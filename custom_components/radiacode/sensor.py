@@ -4,6 +4,7 @@ Sensors per device:
   • Dose Rate          µSv/h   — real-time ambient radiation dose rate
   • Count Rate         cps     — raw detector counts per second
   • Accumulated Dose   µSv     — total dose since last reset
+  • Dose Counter       µSv     — independent non-resettable counter (supported firmware)
   • Hardness           —       — spectral hardness coefficient (µR/h ÷ cps)
   • Radiation Alarm    enum    — No Alarm / L1 Alarm / L2 Alarm
   • Battery            %       — device battery level (diagnostic)
@@ -47,6 +48,7 @@ from .const import (
     SENSOR_BATTERY,
     SENSOR_COUNT_RATE,
     SENSOR_DOSE_RATE,
+    SENSOR_DOSE_COUNTER,
     SENSOR_HARDNESS,
     SENSOR_MCU_TEMP,
     SENSOR_MCU_VREF,
@@ -115,6 +117,15 @@ SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
         entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    SensorEntityDescription(
+        key=SENSOR_DOSE_COUNTER,
+        name="Dose Counter",
+        native_unit_of_measurement="µSv",
+        # This independent device counter is not affected by the dose reset.
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        icon="mdi:counter",
     ),
 )
 
