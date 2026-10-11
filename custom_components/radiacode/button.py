@@ -77,6 +77,11 @@ class RadiaCodeButton(CoordinatorEntity[RadiaCodeCoordinator], ButtonEntity):
             entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
         )
 
+    @property
+    def available(self) -> bool:
+        """Reset actions need a live link, independent of radiation freshness."""
+        return self.coordinator.controls_available
+
     async def async_press(self) -> None:
         """Execute the reset action for this button."""
         if self.entity_description.key == BUTTON_SPECTRUM_RESET:

@@ -9,8 +9,115 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ## [Unreleased]
 
-### Changed
-- **Calendar release naming** — use `YYYY.MM.N` in future manifest versions, tags and release titles, with `bN`/`rcN` for prereleases. The release workflow validates the format. Older GitHub display names use calendar aliases while published tags, installed versions and downloads remain intact. The historical mapping is documented in `docs/release-versioning.md`.
+---
+
+## [2026.10.3] — 2026-10-11
+
+Promotes the tested RC5 implementation to stable. This release includes the cumulative connectivity, measurement-selection, dose-counter and spectrum-status improvements from RC1–RC5; runtime behavior is unchanged from RC5.
+
+### Fixed
+- **Responsive live radiation updates** — prefer valid live measurement pairs and track freshness independently for each record stream. A raw/database fallback cannot block the next live reading; repeated records cannot renew the freshness lease.
+- **Bounded Bluetooth recovery** — limit connection establishment and cleanup, handle fragmented response headers, enforce negotiated frame limits, and discard incomplete replies. A 60-second minimum measurement lease supports brief recoveries without hiding prolonged loss of fresh readings.
+- **Optional transfer isolation** — publish primary readings before background work, back off configuration acquisition, retain the last complete spectrum, and pause automatic spectrum reads after three consecutive failures. Connected controls use link availability independently of radiation freshness.
+- **Modern dose-counter decoding** — use the confirmed configuration-dependent record layout so counter records do not consume subsequent measurements; preserve recognized legacy layouts.
+
+### Added
+- **Dose Counter sensor** — expose the separate non-resettable device counter in µSv. Accumulated Dose and its reset action retain their existing meaning.
+- **Spectrum acquisition status** — expose `acquired_at` and `automatic_paused` on the Spectrum entity and in diagnostics. Failed reads retain the last complete snapshot and acquisition time; successful current-spectrum reads resume acquisition, and a successful reset clears the snapshot and metadata.
+- **Experimental confirmed Bluetooth writes** — optional command acknowledgments remain disabled by default. Existing saved choices are preserved; changing the option reloads the integration.
+- **Calendar release naming** — use `YYYY.MM.N` for new manifests, tags and release titles. Older releases retain their original tags and downloads; historical display names follow the documented calendar mapping.
+- **Diagnostics and regression coverage** — include record selection, sample progression, transport boundaries, dose-counter semantics, options, spectrum metadata and Home Assistant runtime checks.
+
+### Compatibility and known limits
+- Requires Home Assistant 2026.9.4 or newer; runtime coverage includes 2026.9.4, 2026.10.0 and 2026.10.1.
+- Field history showed approximately 17 hours without recorded sensor unavailability before user-confirmed updates/reloads. The final startup/reload capture continued primary polling through incomplete configuration and spectrum transfers; this is evidence of bounded recovery, not uninterrupted Bluetooth connectivity.
+- Incomplete bulk transfers persist on the observed ESPHome proxy routes, including the previously identified AIR-1 / ESPHome 2026.9.1 path. Spectrum snapshots can remain old or automatic acquisition can pause; check `acquired_at` and `automatic_paused`. Confirmed writes did not establish a repair and the final supplied capture had them enabled. Keep them off for the planned comparison.
+- The stable package changes only release metadata from RC5. It does not add averaging, clamp ordinary readings, infer unverified firmware layouts, or guarantee backfill of consumed measurements after a failed transfer. See [the final field review](https://github.com/303Bryan/ha-radiacode/blob/v2026.10.3/docs/stable-field-review-2026-10-11.md).
+
+---
+
+## [2.0.2rc5] — 2026-10-11
+
+### Added
+- **Spectrum acquisition time** — the Spectrum entity and downloadable diagnostics expose `acquired_at`, the UTC time the last complete current-spectrum snapshot was received. Failed reads keep that timestamp; a successful spectrum reset clears it. Accumulation duration remains a separate value.
+- **Visible automatic-read pause** — the Spectrum entity exposes `automatic_paused`, including when no histogram has been acquired. Pause/resume changes publish with the retained snapshot, so an old histogram no longer hides stopped acquisition.
+
+### Fixed
+- **Metadata publication with cached spectra** — timestamp and pause changes update the entity without rebuilding or traversing the 1,024-channel histogram. Ordinary radiation polls with unchanged spectrum metadata do not republish it. Manual current-spectrum failures also publish pause changes promptly.
+
+### Validation limits
+- These fields describe acquisition state; they do not recover missing incoming Bluetooth fragments or change spectrum retry, measurement freshness, or write-mode behavior. Confirm Bluetooth writes remains off by default; existing saved choices are preserved for the planned comparison.
+
+---
+
+## [2.0.2rc4] — 2026-10-10
+
+### Fixed
+- **Modern dose-counter records** — identify group 4 from the actual detector configuration and decode the confirmed six-byte counter payload without consuming following live records. Preserve the recognized older 16-byte UserData layout; unknown schemas stop conservatively.
+- **Split Bluetooth response headers** — assemble the four-byte length header across notifications and reject invalid or oversized declarations immediately. Enforce the incoming limit negotiated by SET_EXCHANGE, with a hard limit before negotiation; reconnects discard stale transport limits.
+
+### Added
+- **Dose Counter sensor** — expose the independent non-resettable counter in µSv, cached separately from the existing accumulated dose since reset. Reset Accumulated Dose affects only its original sensor. Sparse counter updates cannot renew live measurement availability.
+- **Experimental confirmed writes** — optional acknowledged Bluetooth writes, disabled by default for existing proxy compatibility. Unsupported characteristics are rejected before command delivery; stalled writes remain bounded and retire the transport without mode fallback or same-connection replay. Options changes use the existing integration reload path.
+- **Protocol diagnostics** — record requested/effective write mode, negotiated transmit/receive limits and recognized group-4 schema without exposing full configuration payloads.
+- Captured-record, legacy-schema, split-header, negotiated-limit, ACK-stall and Home Assistant entity/options regressions; source evidence and an AIR-1 acceptance plan.
+
+### Validation limits
+- Configuration parsing supports the confirmed modern counter and recognized legacy layout; it does not guess other firmware schemas. Reload after a firmware change to refresh cached configuration.
+- Full response validation, primary-poll priority, bounded recovery, spectrum circuit breaking and RC3's separate live-stream freshness remain in place. No timestamp bias or packet-stall deadline is relaxed.
+- Acknowledged writes are a controlled hardware experiment, not a confirmed repair for incoming proxy notification loss. The manufacturer describes consumed history and connected measurements that are not saved locally; complete backfill after a failed transfer cannot be assumed. Physical AIR-1 soak testing remains pending.
+
+---
+
+## [2.0.2rc3] — 2026-10-10
+
+### Fixed
+- **Live measurements rejected after raw/database records** — prefer the newest valid RealTimeData pair over RawData and DoseRateDB in a mixed buffer. The supplied firmware 4.14 logs show raw timestamps about 125–128 seconds ahead of receipt and database timestamps about 41–48 seconds ahead. Selecting them as globally newest displaced current live readings and caused false freshness expiry.
+- **Freshness across measurement streams** — keep accepted timestamp watermarks separately for each record type within the current connection. A fallback-only buffer cannot block the next live reading; alternating replayed streams cannot renew the freshness lease. New connections reset timestamp comparisons without extending a cached sample's lease.
+- **Sample progression diagnostics** — omit device-time progression across different record types rather than report an invalid cross-stream interval.
+
+### Added
+- Field review of RC2's October 10 logs/activity and regressions for future raw/database records, fallback-to-live transitions, cross-stream replays, and real Home Assistant entity publication.
+- Home Assistant 2026.10.1 runtime validation, matching the new supplied diagnostics, alongside the existing 2026.9.4 and 2026.10.0 matrix.
+
+### Validation limits
+- Retains RC2's bounded recovery, control availability, strict complete-frame checks, spectrum circuit breaker and 60-second minimum measurement lease.
+- The supplied logs also contain incomplete DATA_BUF responses while automatic spectrum reads are already paused. This release addresses the confirmed live-sample selection defect; physical proxy notification loss remains unresolved and requires further testing.
+
+---
+
+## [2.0.2rc2] — 2026-10-09
+
+### Fixed
+- **Connected controls going unavailable** — device switches, numbers, selects and reset buttons now use Bluetooth availability independently of radiation freshness. A stale radiation stream no longer disables a connected device's known settings. Unknown settings remain unavailable; BLE off, link loss and shutdown disable device controls immediately on publication.
+- **Unbounded connection attempts** — enforce a 30-second deadline around the entire connector establishment operation, including its internal retries. Retain the client as soon as the connector constructs it so timeout and cancellation can release partially established proxy resources. Disconnect cleanup remains separately bounded and cancellation-safe. This deadline covers establishment, not the complete initialization or two-attempt coordinator cycle.
+- **Truncated sample-block diagnostics** — identify incomplete variable-length blocks rather than silently reporting them fully decoded.
+
+### Added
+- **Sample-gap diagnostics** — bounded DATA_BUF summaries include record counts, stopping boundary, valid/invalid measurement candidates and their timestamp ranges. Radiation diagnostics report empty pairs, absent timestamps, repeated/regressed timestamps and suppressed outliers, with the last 20 sample decisions. Full raw buffers and proxy identifiers are not added.
+- **Current Home Assistant validation** — test actual coordinator, controls and connection-library behavior on both Home Assistant 2026.9.4 and the supplied 2026.10.0 runtime, alongside decoder and fake-transport regressions.
+- **Connectivity review** — October 9 activity, history and primary documentation findings with a controlled AIR-1 proxy acceptance plan in `docs/connectivity-review-2026-10-09.md`.
+
+### Validation limits
+- Includes RC1's bounded spectrum retries, 60-second minimum radiation lease and bulk-transfer deadlines. It does not establish why some complete DATA_BUF replies contain no advancing accepted measurement; the new diagnostics distinguish those cases for the next capture. Physical AIR-1/M5Stack proxy soak testing remains required before promoting to stable.
+
+---
+
+## [2.0.2rc1] — 2026-10-03
+
+### Fixed
+- **Repeated spectrum reconnects** — pause automatic spectrum acquisition after three consecutive failures. Keep the last complete histogram and continue radiation polling. A successful manual current-spectrum read resumes acquisition; an explicit spectrum reset or integration reload permits a new bounded series of attempts. Manually disabled spectrum polling remains disabled.
+- **Brief BLE outages** — retain the last accepted radiation sample for up to 60 seconds (or three configured poll intervals, if longer) during reconnects. An independent expiry timer makes stale measurements unavailable even while a reconnect is still running. Empty buffers and repeated samples never renew this window, and manually disabling BLE makes measurements unavailable immediately.
+- **Slow bulk transfers** — allow up to 30 seconds for spectra, configuration and the register directory once response packets start arriving, while retaining the two-second packet-stall deadline and strict complete-frame validation. Ordinary commands, hung writes and reads without any reply retain their ten-second deadline.
+- **Interrupted disconnect cleanup** — finish bounded BLE teardown before propagating repeated cancellation, helping release the proxy's connection slot during unload or user disconnect.
+
+### Added
+- Spectrum diagnostics report whether automatic acquisition is paused, consecutive failures and the retry limit. Transport diagnostics identify each command's deadline; radiation diagnostics distinguish retained readings from fresh measurements.
+- Regression coverage for repeated spectrum failures, manual recovery, stalled versus progressing bulk transfers, and measurement expiry during connection recovery.
+
+### Validation limits
+- This is a release candidate for device testing. The reported disconnect intervals match the existing spectrum retry schedule (5, 10, 20, 40, then 60 minutes), which points to failed automatic spectrum transfers; device diagnostics are still needed to confirm that cause.
+- Longer deadlines cannot recover notifications that a proxy drops. Pausing failed optional reads prevents an ongoing reconnect loop; it does not repair proxy forwarding loss.
 
 ---
 
@@ -363,7 +470,9 @@ Initial public release.
 - Automatic retry on stale connection detection (same poll cycle recovery)
 - GitHub Actions CI: hassfest + HACS validation
 
-[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/303Bryan/ha-radiacode/compare/v2.0.2rc1...HEAD
+[2.0.2rc1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.2rc1
+[2.0.1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.1
 [2.0.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.0
 [2.0.0b1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2.0.0b1
 [1.3.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v1.3.0

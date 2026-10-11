@@ -354,13 +354,13 @@ def test_empty_or_replayed_records_do_not_renew_freshness(make_coordinator, cloc
         coordinator._client.get_data.return_value = (
             first.sensors if replayed else readings(protocol)
         )
-        clock.now = 1015
+        clock.now = 1059.9
         current = await refresh_and_settle(coordinator)
         assert coordinator.last_update_success is True
         assert current.sensors.measurement_time == first.sensors.measurement_time
         assert coordinator._last_fresh_monotonic == 1000
         assert coordinator.runtime_status["freshness"]["using_cached_measurement"] is True
-        clock.now = 1015.1
+        clock.now = 1060
         await refresh_and_settle(coordinator)
         assert coordinator.last_update_success is False
         assert "stale" in coordinator.last_error
@@ -408,7 +408,7 @@ def test_zero_pair_is_fresh_and_slow_poll_gets_three_interval_grace(
         assert coordinator.runtime_status["freshness"]["grace_seconds"] == 900
         assert coordinator._last_fresh_monotonic == 1300
         assert coordinator.runtime_status["freshness"]["sample_progress"] == {
-            "device_seconds": 300, "receipt_seconds": 300,
+            "device_seconds": None, "receipt_seconds": 300,
         }
         await coordinator.async_shutdown()
 
@@ -451,7 +451,7 @@ def test_background_publication_preserves_failed_radiation_and_freshness(make_co
         await entered.wait()
         coordinator._client.get_data.side_effect = None
         coordinator._client.get_data.return_value = coordinator.data.sensors
-        clock.now = 1020
+        clock.now = 1060
         await coordinator.async_refresh()
         assert coordinator.last_update_success is False
         error = coordinator.last_error
@@ -494,7 +494,7 @@ def test_disconnect_cancels_and_awaits_worker_before_transport_release(make_coor
         assert coordinator._maintenance_task is None
         assert coordinator._maintenance_phase is None
         assert coordinator._last_spectrum is None
-        assert coordinator.listener_updates == updates + (action == "async_user_disconnect")
+        assert coordinator.listener_updates == updates + 2 * (action == "async_user_disconnect")
         coordinator._client.disconnect.assert_awaited_once()
         await coordinator.async_refresh()
         assert len(coordinator.hass.tasks) == 1
@@ -700,5 +700,90 @@ def test_runtime_diagnostics_are_bounded_and_label_advertisement_source(make_coo
         assert "channels" not in coordinator.spectrum_status
         assert coordinator.spectrum_status["format_source"] == "direct_spectrum"
         await coordinator.async_shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_independent_counter_cache_and_reset_preserve_live_lease(
+    make_coordinator, protocol, clock
+):
+    async def scenario():
+        coordinator = make_coordinator(spectrum_interval=0)
+        client = coordinator._client
+        client.get_data.side_effect = None
+        sample_time = datetime(2026, 1, 1)
+        client.get_data.return_value = readings(
+            protocol, dose_rate=0.12, count_rate=3.0, accumulated_dose=2.0,
+            dose_counter=1060.09, measurement_time=sample_time,
+            measurement_type="RealTimeData",
+        )
+        try:
+            await refresh_and_settle(coordinator)
+            lease = coordinator._last_fresh_monotonic
+            clock.now += 5
+            client.get_data.return_value = readings(protocol, dose_counter=1060.19)
+            await refresh_and_settle(coordinator)
+            assert coordinator.data.sensors.accumulated_dose == 2.0
+            assert coordinator.data.sensors.dose_counter == 1060.19
+            assert coordinator._last_fresh_monotonic == lease
+            assert coordinator.data.sensors.measurement_time == sample_time
+            assert coordinator._using_cached_measurement
+            client.get_data.return_value = readings(
+                protocol, dose_rate=0.12, count_rate=3.0,
+                measurement_time=sample_time + timedelta(seconds=10),
+                measurement_type="RealTimeData",
+            )
+            await coordinator.async_reset_dose()
+            await settle(coordinator)
+            assert coordinator.data.sensors.accumulated_dose == 0.0
+            assert coordinator.data.sensors.dose_counter == 1060.19
+            client.write_vsfr.assert_awaited_once_with(protocol.VSFR.DOSE_RESET, 1)
+            # Counter-only traffic must still expire the original live lease.
+            lease = coordinator._last_fresh_monotonic
+            clock.now += coordinator._freshness_grace
+            client.get_data.return_value = readings(protocol, dose_counter=1060.29)
+            await refresh_and_settle(coordinator)
+            assert coordinator._last_fresh_monotonic == lease
+            assert not coordinator.measurement_available
+            assert not coordinator.last_update_success
+        finally:
+            await coordinator.async_shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_configuration_retries_are_optional_and_back_off_across_polls(
+    make_coordinator, clock
+):
+    async def scenario():
+        coordinator = make_coordinator(spectrum_interval=0)
+        client = coordinator._client
+        coordinator._serial_number = "TEST-DEVICE"
+        for name in ("settings", "diagnostics", "temperature"):
+            setattr(coordinator, "_next_" + name + "_read", float("inf"))
+        client.configuration_retry_due = False
+        client.refresh_record_configuration = AsyncMock()
+        try:
+            await refresh_and_settle(coordinator)
+            assert coordinator.data.sensors.dose_rate == 0.12
+            client.refresh_record_configuration.assert_not_awaited()
+            client.configuration_retry_due = True
+            client.refresh_record_configuration.side_effect = RuntimeError("config unavailable")
+            clock.now += 5
+            await refresh_and_settle(coordinator)
+            assert coordinator.last_update_success
+            assert coordinator.data.sensors.dose_rate == 0.12
+            assert client.refresh_record_configuration.await_count == 1
+            assert coordinator._optional_errors["configuration"] == "config unavailable"
+            clock.now += 5
+            await refresh_and_settle(coordinator)
+            assert client.refresh_record_configuration.await_count == 1
+            clock.now += 300
+            client.refresh_record_configuration.side_effect = None
+            await refresh_and_settle(coordinator)
+            assert client.refresh_record_configuration.await_count == 2
+            assert "configuration" not in coordinator._optional_errors
+        finally:
+            await coordinator.async_shutdown()
 
     asyncio.run(scenario())

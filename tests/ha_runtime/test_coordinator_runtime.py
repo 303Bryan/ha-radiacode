@@ -145,6 +145,12 @@ async def test_optional_publication_preserves_failed_primary(runtime):
     await coordinator.async_refresh()
     await asyncio.wait_for(entered.wait(), timeout=1)
     coordinator.async_set_update_error(UpdateFailed("primary data unavailable"))
+    assert not coordinator.last_update_success
+    assert hass.states.get(dose.entity_id).state == "0.12"
+    assert hass.states.get(dose.entity_id).attributes["using_cached_measurement"]
+    coordinator._last_fresh_monotonic -= coordinator._freshness_grace
+    coordinator._cancel_measurement_expiry()
+    coordinator._expire_measurement()
     assert hass.states.get(dose.entity_id).state == "unavailable"
     release.set()
     await asyncio.wait_for(coordinator._maintenance_task, timeout=1)
@@ -175,6 +181,51 @@ async def test_shutdown_cancels_real_background_worker(runtime):
     assert worker.done()
     assert coordinator._maintenance_task is None
     client.disconnect.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_measurement_lease_expires_during_blocked_real_refresh(runtime):
+    hass, coordinator, client, dose, _ = runtime
+    coordinator._freshness_grace = 0.2
+    coordinator._spectrum_interval = 0
+    await coordinator.async_refresh()
+    if coordinator._maintenance_task is not None:
+        await coordinator._maintenance_task
+    entered, release = asyncio.Event(), asyncio.Event()
+    sample = client.get_data.return_value
+    async def blocked_poll():
+        entered.set()
+        await release.wait()
+        return sample
+    client.get_data.side_effect = blocked_poll
+    pending = asyncio.create_task(coordinator.async_refresh())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert hass.states.get(dose.entity_id).state == "0.12"
+        await asyncio.sleep(0.25)
+        assert not pending.done()
+        assert hass.states.get(dose.entity_id).state == "unavailable"
+    finally:
+        release.set()
+        await asyncio.wait_for(pending, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_failed_real_acquisition_keeps_lease_without_renewing_it(runtime):
+    hass, coordinator, _, dose, _ = runtime
+    coordinator._freshness_grace = 0.2
+    coordinator._spectrum_interval = 0
+    await coordinator.async_refresh()
+    if coordinator._maintenance_task is not None:
+        await coordinator._maintenance_task
+    receipt = coordinator._last_fresh_monotonic
+    coordinator.async_set_update_error(UpdateFailed("transient BLE drop"))
+    assert not coordinator.last_update_success
+    assert hass.states.get(dose.entity_id).state == "0.12"
+    coordinator.async_set_update_error(UpdateFailed("still reconnecting"))
+    assert coordinator._last_fresh_monotonic == receipt
+    await asyncio.sleep(0.25)
+    assert hass.states.get(dose.entity_id).state == "unavailable"
 
 
 @pytest.mark.asyncio
@@ -274,3 +325,92 @@ async def test_downloadable_diagnostics_serialize_and_redact_sources(runtime):
     assert "AA:BB:CC:DD:EE:FF" not in serialized
     assert result["sensors"]["measurement_time"] == "2026-01-01T12:00:00"
     assert result["transport"]["recent_commands"][0]["received_body_bytes"] == 1254
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,lead", [("RawData", 128), ("DoseRateDB", 43)])
+async def test_live_updates_remain_published_past_lease_with_future_mixed_records(
+    runtime, monkeypatch, kind, lead,
+):
+    from custom_components.radiacode import coordinator as coordinator_module
+    from custom_components.radiacode.radiacode_ble.protocol import (
+        DoseRateDB, RawData, RealTimeData, extract_sensor_values,
+    )
+
+    hass, coordinator, client, dose, _ = runtime
+    receipt_clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(
+        coordinator_module, "time", SimpleNamespace(monotonic=lambda: receipt_clock.now),
+    )
+    coordinator._spectrum_interval = 0
+    base = dt.datetime(2026, 1, 1, 12)
+    for step in range(16):
+        receipt_clock.now = 1000 + step * 5
+        timestamp = base + timedelta(seconds=step * 5)
+        live = RealTimeData(
+            timestamp, 8.93 + step * 0.01, 1,
+            0.00001268 + step * 0.00000001, 1, 0x2040,
+        )
+        records = [live]
+        # Anonymized observed offsets; isolated RT polls between mixed replies
+        # reproduced RC2's successful-read-but-rejected-live-update failure.
+        if step in (0, 8):
+            future = timestamp + timedelta(seconds=lead)
+            if kind == "RawData":
+                records.append(RawData(future, 16.0, 0.00009238))
+            else:
+                records.append(DoseRateDB(future, 100, 8.9, 0.0000127, 1))
+        client.get_data.return_value = extract_sensor_values(records)
+        await coordinator.async_refresh()
+        if coordinator._maintenance_task is not None:
+            await coordinator._maintenance_task
+        state = hass.states.get(dose.entity_id)
+        assert float(state.state) == pytest.approx(live.dose_rate * 10_000)
+        assert coordinator.data.sensors.measurement_time == timestamp
+        assert coordinator.data.sensors.measurement_type == "RealTimeData"
+        assert coordinator.last_update_success
+        assert coordinator._last_sample_rejection is None
+        assert coordinator._last_fresh_monotonic == receipt_clock.now
+    assert receipt_clock.now - 1000 > coordinator._freshness_grace
+    assert dose.available
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,lead", [("RawData", 128), ("DoseRateDB", 43)])
+async def test_fallback_to_earlier_live_time_keeps_real_entity_current(
+    runtime, monkeypatch, kind, lead,
+):
+    from custom_components.radiacode import coordinator as coordinator_module
+
+    hass, coordinator, client, dose, _ = runtime
+    receipt_clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(
+        coordinator_module, "time", SimpleNamespace(monotonic=lambda: receipt_clock.now),
+    )
+    coordinator._spectrum_interval = 0
+    base = dt.datetime(2026, 1, 1, 12)
+    client.get_data.return_value = RadiaCodeData(
+        dose_rate=0.1268, count_rate=8.93, accumulated_dose=None,
+        battery=None, temperature=None,
+        measurement_time=base + timedelta(seconds=lead), measurement_type=kind,
+    )
+    await coordinator.async_refresh()
+    if coordinator._maintenance_task is not None:
+        await coordinator._maintenance_task
+    assert hass.states.get(dose.entity_id).state == "0.1268"
+    receipt_clock.now += 5
+    timestamp = base + timedelta(seconds=5)
+    client.get_data.return_value = RadiaCodeData(
+        dose_rate=0.13, count_rate=9.0, accumulated_dose=None,
+        battery=None, temperature=None, measurement_time=timestamp,
+        measurement_type="RealTimeData", measurement_flags=0x2040,
+    )
+    await coordinator.async_refresh()
+    assert hass.states.get(dose.entity_id).state == "0.13"
+    assert not hass.states.get(dose.entity_id).attributes["using_cached_measurement"]
+    assert coordinator.data.sensors.measurement_time == timestamp
+    assert coordinator.last_update_success
+    assert dose.available
+    assert coordinator._last_sample_progress == {
+        "device_seconds": None, "receipt_seconds": 5,
+    }

@@ -1,0 +1,12 @@
+# Match the October 9 diagnostics and HA 2026.10.0 component manifests.
+# Python 3.14 is required.
+homeassistant==2026.10.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+bleak==3.0.2
+bleak-retry-connector==4.7.1
+habluetooth==7.1.2
+dbus-fast==5.0.22
+aiousbwatcher==1.1.2
+serialx==1.11.0
+aiohasupervisor==0.6.0

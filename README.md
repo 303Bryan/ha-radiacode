@@ -31,6 +31,7 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 | Dose Rate | µSv/h | Real-time ambient radiation dose rate |
 | Count Rate | cps | Raw detector counts per second |
 | Accumulated Dose | µSv | Total dose accumulated since last device reset |
+| Dose Counter | µSv | Independent non-resettable counter on supported firmware; unaffected by Reset Accumulated Dose |
 | Hardness | — | Spectral hardness coefficient (µR/h ÷ cps), as in the Radiacode app — characteristic per isotope, useful for pseudo-identification of sources |
 | Battery | % | Device battery level *(diagnostic)* |
 | Temperature | °C | Device internal temperature *(diagnostic)* |
@@ -55,8 +56,12 @@ The **Spectrum** sensor exposes the device's gamma spectrum (default: refreshed 
 | `calibration_a0/a1/a2` | Energy calibration: E(ch) = a0 + a1·ch + a2·ch² keV |
 | `duration_s` | Spectrum accumulation time in seconds |
 | `truncated` | False for published snapshots; incomplete reads keep the previous complete snapshot |
+| `acquired_at` | UTC time the last complete current-spectrum snapshot was received; empty before the first acquisition or after Spectrum Reset |
+| `automatic_paused` | True when automatic spectrum reads have stopped after repeated failures |
 
 A **Spectrum Reset** button clears the accumulation, and the **`radiacode.get_spectrum` action** returns the spectrum as response data (`accumulated: true` for the device's long-term accumulated spectrum) for use in scripts and automations.
+
+Open the Spectrum entity to inspect `acquired_at` and `automatic_paused`. Acquisition time is when Home Assistant received the complete snapshot, not when accumulation started; `duration_s` describes the accumulation period. Failed reads retain the last complete histogram and its acquisition time. A successful current-spectrum read advances the time and clears the pause; an accumulated-spectrum action does not replace it. These attributes also appear before a histogram is available. A false pause flag does not override a spectrum interval of 0, which disables automatic reads.
 
 **Plotting the spectrum (recommended panel view)** — install [Plotly Graph Card](https://github.com/dbuezas/lovelace-plotly-graph-card) from HACS, then use a dedicated [Panel view](https://www.home-assistant.io/dashboards/panel/) for a full-width graph. The example sets the graph height to **800 pixels** and reduces the margins to give the spectrum more vertical space.
 
@@ -116,7 +121,7 @@ For a graph within an existing dashboard view, paste [examples/spectrum-card.yam
 
 > Keep the `"y"` key quoted when copying or editing the card. If a saved card contains a `true` key in its place, rename it to `"y"`; Plotly needs both `x` and `y` arrays when `raw_plotly_config` is enabled.
 
-> **BT proxy note:** spectrum acquisition reads the histogram directly and selects an encoding only after complete validation; a configuration download is no longer a prerequisite. Incomplete or incorrectly framed Bluetooth responses cause the affected connection to be released before another command can reuse it. Invalid spectra are rejected and the last complete snapshot is kept; failed automatic reads retry after 5 minutes, then 10 minutes, up to 1 hour (or your configured interval if longer). Radiation readings publish before optional maintenance starts. The device still handles one BLE command at a time, so a stalled bulk request can delay the next acquisition until its bounded timeout releases the link. Download diagnostics to see format provenance, errors, transfer sizes/timing and snapshot age. Set the spectrum interval to 0 to disable automatic spectrum reads; the on-demand action remains available and updates the current-spectrum entity.
+> **BT proxy note:** spectrum acquisition reads the histogram directly and selects an encoding only after complete validation; a configuration download is no longer a prerequisite. Incomplete or incorrectly framed Bluetooth responses cause the affected connection to be released before another command can reuse it. Invalid spectra are rejected and the last complete snapshot is kept; failed automatic reads retry after 5 minutes, then 10 minutes (or your configured interval if longer), and pause after three consecutive failures. Radiation readings publish before optional maintenance starts. The device still handles one BLE command at a time, so a stalled bulk request can delay the next acquisition until its bounded timeout releases the link. Download diagnostics to see format provenance, errors, transfer sizes/timing and snapshot age. Set the spectrum interval to 0 to disable automatic spectrum reads; the on-demand action remains available and updates the current-spectrum entity.
 
 ### Binary Sensors
 
@@ -124,7 +129,7 @@ For a graph within an existing dashboard view, paste [examples/spectrum-card.yam
 |--------|-------------|
 | BLE Connected | True while the BLE link is active; exposes `last_error`, `connection_count`, and `last_poll_duration` attributes *(diagnostic)* |
 
-> **Note:** Dose Rate and Count Rate update on every poll (default every 5 s, configurable). Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates.
+> **Note:** Dose Rate and Count Rate update on every poll (default every 5 s, configurable). Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates. The independent Dose Counter updates much less often at background radiation levels and is cached separately. It remains Unknown on firmware without a recognized counter schema.
 
 ---
 
@@ -201,7 +206,7 @@ The Radiacode does **not** need to be paired with the Radiacode phone app to wor
 
 ## Release naming
 
-Future releases use **YYYY.MM.N**, with `rcN` for release candidates (for example, `2026.10.3rc6`). Older GitHub display names now follow that format while their original tags and installed versions remain valid. See [release versioning and the historical name mapping](docs/release-versioning.md).
+Releases use **YYYY.MM.N**, with `rcN` for release candidates (for example, `2026.10.4rc1`). The stable version `2026.10.3` promotes the RC5 work and uses the calendar version in both its manifest and tag. Older GitHub display names now follow that format while their original tags and installed versions remain valid. See [release versioning and the historical name mapping](docs/release-versioning.md).
 
 ## Configuration
 
@@ -229,6 +234,7 @@ After setup, click **Configure** on the integration to adjust:
 |--------|---------|-------|-------------|
 | Poll interval | 5 s | 5–300 s | How often sensor data is read over BLE. Longer intervals reduce BT proxy load and device battery drain. |
 | Spectrum poll interval | 60 s | 0–3600 s | How often the gamma spectrum is read. 0 disables spectrum polling (the largest BLE transfer). |
+| Confirm Bluetooth writes (experimental) | Off | On / Off | Requests an acknowledgment for each command chunk. Test this only when comparing connection behavior; some proxies stall with it enabled. Changing the option reloads the integration. |
 
 ---
 
@@ -250,7 +256,7 @@ For the best results with BT proxies:
 ## Known Limitations
 
 - **Large Bluetooth transfers** — weak links or busy proxies can stall spectrum/configuration transfers. The integration rejects incomplete responses, reconnects for subsequent polls, and backs off failed automatic spectrum reads. A stale data-buffer drain failure aborts initialization instead of continuing on a damaged stream; records sent during an interrupted read may be lost.
-- **Measurement freshness** — dose and count remain paired from the same sample. Empty buffers, repeated device timestamps and suppressed outliers do not renew freshness; after three poll intervals (at least 15 seconds) without a new accepted sample, radiation entities become unavailable. Diagnostics distinguish measurement age from a successful Bluetooth request.
+- **Measurement freshness** — dose and count remain paired from the same sample. Empty buffers, repeated device timestamps and suppressed outliers do not renew freshness; after three poll intervals (at least 60 seconds) without a new accepted sample, radiation entities become unavailable, including during a reconnect. Diagnostics distinguish measurement age from a successful Bluetooth request.
 - **Outlier suppression delay** — a dose/count rate reading more than 50× above the current baseline is held for confirmation by a subsequent measurement. Suppressed values are logged as warnings; interrupted transfers and stale readings can extend the interval before confirmation.
 - **Signal Strength while connected** — a connected BLE peripheral stops advertising, so no fresh RSSI is available during an active connection; the sensor holds the last observed value until the next advertisement.
 - **RareData update rate** — Battery, Temperature, and Accumulated Dose are updated by the device approximately once per minute, regardless of the poll interval.
@@ -262,7 +268,9 @@ For the best results with BT proxies:
 
 ### Sensor goes unavailable periodically
 
-Unavailable readings can result from dropped connections, incomplete transfers, or a device that has stopped delivering fresh measurements. Check diagnostics for measurement age and command failures, then check:
+Unavailable readings can result from dropped connections, incomplete transfers, or a device that has stopped delivering fresh measurements. Recent radiation readings remain available during a brief reconnect for up to 60 seconds (or three configured polling intervals, if longer). Diagnostics mark retained readings as cached; an independent timer expires them if fresh samples do not resume. Turning the BLE Connection switch off makes measurements unavailable immediately.
+
+Check diagnostics for measurement age and command failures, then check:
 - **RSSI** — look in HA logs for `RSSI=` values on the proxy. Below −85 dBm is marginal; below −95 dBm is unreliable. Move the proxy closer.
 - **Proxy slot usage** — the log will show `slots=X/3 free`. If you see `0/3 free` consistently, other BLE devices are competing for the proxy's connection slots.
 - **Device battery** — a low battery can cause the Radiacode to disconnect unexpectedly.
@@ -276,7 +284,9 @@ Unavailable readings can result from dropped connections, incomplete transfers, 
 
 ### Spectrum stays unchanged through a Bluetooth proxy
 
-An incomplete spectrum read keeps the last complete snapshot; check diagnostics for snapshot age and declared/received bytes. The integration releases the affected connection and backs off automatic retries. If notification bytes were dropped, a longer timeout cannot recover them.
+An incomplete spectrum read keeps the last complete snapshot; check diagnostics for snapshot age and declared/received bytes. The integration releases the affected connection and backs off automatic retries. After three consecutive failures, it pauses automatic spectrum acquisition so repeated large transfers stop interrupting radiation monitoring. The Spectrum entity shows `acquired_at` and `automatic_paused`; diagnostics also show `consecutive_failures` and `last_error`. `retry_in_seconds` is empty while paused. After addressing the connection problem, a successful manual **current-spectrum** action resumes automatic acquisition. Resetting the current spectrum or reloading the integration also starts a new bounded series of attempts. An accumulated-spectrum read does not resume current-spectrum acquisition.
+
+Spectra, configuration and the register directory have a 30-second transfer deadline once response packets start arriving; ordinary commands and bulk reads without a first reply have ten seconds. A two-second packet stall still fails the transfer. If notification bytes were dropped, a longer timeout cannot recover them.
 
 Correlate the HA command timestamp with the connected proxy's log. `Failed to send notify data response` means the proxy failed to forward a notification to HA. [ESPHome's warning implementation](https://github.com/esphome/esphome/blob/2026.9.0/esphome/components/bluetooth_connection/bluetooth_connection_hub.cpp#L360-L385) logs the first forwarding failure per connection, so one warning can accompany several missing notifications. The warning alone does not establish the underlying TCP-buffer cause.
 
@@ -310,6 +320,20 @@ On the proxy, look for notification-forwarding failures, dropped BLE events, TCP
 From the device page, click the three-dot menu → **Download diagnostics** to get a JSON dump of connection statistics, the latest sensor/settings snapshot, device-health readings, and the device's self-describing **SFR register directory** — a listing of every register the firmware supports with its address, size, type, and signedness (Bluetooth address and device name are redacted).
 
 The download also includes bounded transport history, maintenance status, measurement freshness and spectrum attempt/success ages. Device and proxy identifiers are redacted. Full research, primary references and hardware acceptance criteria are in [protocol and stability research](docs/protocol-and-stability-research.md).
+
+Starting with 2.0.2rc2, `runtime.data_buf` also includes decoded record types, encountered record groups (`record_group_counts`, keyed by `eid:gid`, including known skipped groups), decoder stopping reason and offset, valid/invalid measurement candidates and their timestamp ranges, and the last 20 sample decisions with UTC receipt times. `runtime.freshness.last_sample_rejection` distinguishes absent pairs/timestamps, repeated or regressed timestamps, and outlier suppression. A successful Bluetooth command can still produce no fresh measurement; these fields explain that distinction without a raw packet capture.
+
+Starting with 2.0.2rc3, live sensors prefer the newest valid `RealTimeData` pair even when raw/database records have later timestamps. Raw/database pairs remain fallbacks when no valid live pair is present. Timestamp replay/regression checks are separate for each record type in the current connection, so a fallback cannot block the next live reading and switching types cannot renew a replayed sample. See the [October 10 RC2 field review](docs/rc2-field-review-2026-10-10.md).
+
+Starting with 2.0.2rc4, the integration reads and caches the detector's configuration to distinguish the modern six-byte dose counter from older group-4 records. It publishes a separate **Dose Counter** sensor; the existing resettable **Accumulated Dose** sensor retains its meaning. Counter-only updates cannot renew live radiation freshness.
+
+Response headers can span notifications, and declared response sizes must fit the detector's negotiated transmit limit. **Confirm Bluetooth writes (experimental)** is disabled by default. When enabled, it uses acknowledged writes only if the characteristic supports them; a stalled write retires the transport without changing modes or replaying the command. Leave proxy settings constant when comparing this option, and turn it off if connection establishment or polling stalls. Reload after changing detector firmware so configuration is read again.
+
+The manufacturer's manuals describe log entries being deleted after reading and connected measurements being forwarded without being stored in autonomous history. Reconnecting restores acquisition but cannot promise to recover every missed measurement. See [RC4 protocol and connectivity evidence](docs/protocol-connectivity-rc4.md) for the source boundaries and device acceptance checks.
+
+Device controls use the active Bluetooth link independently of radiation freshness. A connected device's known settings and reset buttons remain usable while radiation is stale. Unknown settings, an inactive link, user-disabled BLE and shutdown keep the corresponding controls unavailable. Radiation still expires on its own bounded freshness window.
+
+Connection establishment has a 30-second total deadline around connector retries, followed by separately bounded cleanup when necessary. Device initialization commands and the coordinator's single retry have their own deadlines; 30 seconds is not a bound on the complete poll/recovery cycle. See the [October 9 connectivity review](docs/connectivity-review-2026-10-09.md) for the supplied evidence and next hardware test.
 
 ---
 

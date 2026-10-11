@@ -23,10 +23,12 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
+    CONF_ACKNOWLEDGED_WRITES,
     CONF_ADDRESS,
     CONF_NAME,
     CONF_POLL_INTERVAL,
     CONF_SPECTRUM_INTERVAL,
+    DEFAULT_ACKNOWLEDGED_WRITES,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_SPECTRUM_INTERVAL,
     DOMAIN,
@@ -167,6 +169,9 @@ class RadiaCodeOptionsFlow(OptionsFlow):
         current_spectrum = self._entry.options.get(
             CONF_SPECTRUM_INTERVAL, DEFAULT_SPECTRUM_INTERVAL
         )
+        current_acknowledged_writes = self._entry.options.get(
+            CONF_ACKNOWLEDGED_WRITES, DEFAULT_ACKNOWLEDGED_WRITES
+        )
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -182,6 +187,9 @@ class RadiaCodeOptionsFlow(OptionsFlow):
                         vol.Coerce(int),
                         vol.Range(min=0, max=MAX_SPECTRUM_INTERVAL),
                     ),
+                    vol.Optional(
+                        CONF_ACKNOWLEDGED_WRITES, default=current_acknowledged_writes
+                    ): bool,
                 }
             ),
         )

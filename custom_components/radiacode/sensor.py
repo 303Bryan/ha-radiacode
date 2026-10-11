@@ -4,6 +4,7 @@ Sensors per device:
   • Dose Rate          µSv/h   — real-time ambient radiation dose rate
   • Count Rate         cps     — raw detector counts per second
   • Accumulated Dose   µSv     — total dose since last reset
+  • Dose Counter       µSv     — independent non-resettable counter (supported firmware)
   • Hardness           —       — spectral hardness coefficient (µR/h ÷ cps)
   • Radiation Alarm    enum    — No Alarm / L1 Alarm / L2 Alarm
   • Battery            %       — device battery level (diagnostic)
@@ -47,6 +48,7 @@ from .const import (
     SENSOR_BATTERY,
     SENSOR_COUNT_RATE,
     SENSOR_DOSE_RATE,
+    SENSOR_DOSE_COUNTER,
     SENSOR_HARDNESS,
     SENSOR_MCU_TEMP,
     SENSOR_MCU_VREF,
@@ -116,6 +118,15 @@ SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         suggested_display_precision=1,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
+    SensorEntityDescription(
+        key=SENSOR_DOSE_COUNTER,
+        name="Dose Counter",
+        native_unit_of_measurement="µSv",
+        # This independent device counter is not affected by the dose reset.
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        icon="mdi:counter",
+    ),
 )
 
 
@@ -180,6 +191,7 @@ class RadiaCodeSensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
     """A single RadiaCode sensor entity backed by the polling coordinator."""
 
     _attr_has_entity_name = True
+    _unrecorded_attributes = frozenset({"measurement_age_seconds"})
 
     def __init__(
         self,
@@ -194,6 +206,20 @@ class RadiaCodeSensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
             entry.data[CONF_ADDRESS],
             entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
         )
+
+    @property
+    def available(self) -> bool:
+        """Hold a recent sample during brief BLE recovery, then expire it."""
+        return self.coordinator.measurement_available
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Distinguish a cached measurement from current acquisition."""
+        freshness = self.coordinator.runtime_status["freshness"]
+        return {
+            "using_cached_measurement": freshness["using_cached_measurement"],
+            "measurement_age_seconds": freshness["age_seconds"],
+        }
 
     @property
     def native_value(self) -> Optional[float]:
@@ -361,6 +387,11 @@ class RadiaCodeRadiationAlarmSensor(
             entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
         )
 
+    @property
+    def available(self) -> bool:
+        """Keep the alarm state available for the same bounded sample lease."""
+        return self.coordinator.measurement_available
+
     def _thresholds_uSv_h(self) -> tuple[Optional[float], Optional[float]]:
         """Return the (L1, L2) alarm thresholds in µSv/h, or None if unknown."""
         if self.coordinator.data is None:
@@ -443,6 +474,7 @@ class RadiaCodeSpectrumSensor(
             entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
         )
         self._cached_spectrum: Optional[Spectrum] = None
+        self._cached_spectrum_metadata: Optional[dict[str, Any]] = None
         self._attr_native_value: Optional[int] = None
         self._attr_extra_state_attributes: dict[str, Any] = {}
         self._last_available = self.available
@@ -455,21 +487,32 @@ class RadiaCodeSpectrumSensor(
         self._last_available = self.available
 
     def _refresh_spectrum_cache(self) -> bool:
-        """Build entity values only when the coordinator supplies a new snapshot."""
+        """Refresh snapshots once and publish scalar metadata independently."""
         spectrum = (
             self.coordinator.data.spectrum
             if self.coordinator.data is not None
             else None
         )
-        # The coordinator reuses the snapshot between spectrum reads. Its
-        # other sensors update much more often, so compare by identity rather
-        # than repeatedly traversing all 1024 channels on every normal poll.
-        if spectrum is self._cached_spectrum:
+        metadata = self.coordinator.spectrum_entity_attributes
+        spectrum_changed = spectrum is not self._cached_spectrum
+        metadata_changed = metadata != self._cached_spectrum_metadata
+        # Normal radiation polls reuse both the snapshot and scalar metadata.
+        # They must not repeatedly traverse all 1024 spectrum channels.
+        if not spectrum_changed and not metadata_changed:
             return False
+        self._cached_spectrum_metadata = dict(metadata)
+        if not spectrum_changed:
+            # Preserve already published attribute dictionaries while reusing
+            # the entity-owned histogram without copying or summing it again.
+            self._attr_extra_state_attributes = {
+                **self._attr_extra_state_attributes, **metadata,
+            }
+            return True
+
         self._cached_spectrum = spectrum
         if spectrum is None:
             self._attr_native_value = None
-            self._attr_extra_state_attributes = {}
+            self._attr_extra_state_attributes = dict(metadata)
             return True
 
         # Keep an entity-owned copy so a published state's histogram remains
@@ -484,12 +527,13 @@ class RadiaCodeSpectrumSensor(
             "calibration_a2": spectrum.a2,
             "truncated": spectrum.truncated,
             "channels": channels,
+            **metadata,
         }
         return True
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Publish new spectra and connection availability transitions."""
+        """Publish spectrum, scalar metadata and availability changes."""
         spectrum_changed = self._refresh_spectrum_cache()
         available = self.available
         if spectrum_changed or available != self._last_available:

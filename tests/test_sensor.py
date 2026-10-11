@@ -71,7 +71,7 @@ def sensor_module(monkeypatch, protocol):
             SIGNAL_STRENGTH="signal_strength", ENUM="enum",
         ),
         SensorStateClass=SimpleNamespace(
-            MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing",
+            MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing", TOTAL="total",
         ),
         SensorEntity=Entity,
         SensorEntityDescription=SimpleNamespace,
@@ -125,6 +125,7 @@ def coordinator():
     return SimpleNamespace(
         data=SimpleNamespace(spectrum=None),
         last_update_success=True,
+        spectrum_entity_attributes={"acquired_at": None, "automatic_paused": False},
         async_add_listener=add_listener,
         notify=lambda: [listener() for listener in listeners],
     )
@@ -144,7 +145,9 @@ def make_spectrum(protocol, **changes):
 def test_initial_unknown_spectrum(sensor_module, coordinator):
     sensor = make_sensor(sensor_module, coordinator)
     assert sensor.native_value is None
-    assert sensor.extra_state_attributes == {}
+    assert sensor.extra_state_attributes == {
+        "acquired_at": None, "automatic_paused": False,
+    }
     assert sensor.available
 
 
@@ -159,6 +162,7 @@ def test_full_spectrum_attributes_are_cached(sensor_module, coordinator, protoco
         "duration_s": 60, "channel_count": 1024,
         "calibration_a0": -2.0, "calibration_a1": 3.0, "calibration_a2": 0.001,
         "truncated": False, "channels": [1] * 1024,
+        "acquired_at": None, "automatic_paused": False,
     }
     assert sensor.extra_state_attributes is attributes
     assert attributes["channels"] is not spectrum.counts
@@ -238,9 +242,13 @@ def test_removed_snapshot_clears_value_and_attributes(
     coordinator.data = empty_data
     coordinator.notify()
 
-    assert sensor.writes == [(True, None, {})]
+    assert sensor.writes == [(True, None, {
+        "acquired_at": None, "automatic_paused": False,
+    })]
     assert sensor.native_value is None
-    assert sensor.extra_state_attributes == {}
+    assert sensor.extra_state_attributes == {
+        "acquired_at": None, "automatic_paused": False,
+    }
 
 
 def test_latest_data_prepared_before_initial_ha_write(sensor_module, coordinator, protocol):
@@ -256,3 +264,78 @@ def test_latest_data_prepared_before_initial_ha_write(sensor_module, coordinator
     coordinator.last_update_success = True
     coordinator.notify()
     assert sensor.writes[0][0] is True
+
+
+def test_unknown_spectrum_publishes_pause_metadata_while_unavailable(
+    sensor_module, coordinator,
+):
+    coordinator.last_update_success = False
+    sensor = make_sensor(sensor_module, coordinator)
+    asyncio.run(sensor.async_added_to_hass())
+    original = sensor.extra_state_attributes
+    coordinator.spectrum_entity_attributes["automatic_paused"] = True
+    coordinator.notify()
+    coordinator.notify()
+
+    assert sensor.writes == [(False, None, {
+        "acquired_at": None, "automatic_paused": True,
+    })]
+    assert original == {"acquired_at": None, "automatic_paused": False}
+    assert sensor.extra_state_attributes is not original
+
+
+def test_metadata_changes_reuse_channels_without_traversing_or_mutating_old_states(
+    sensor_module, coordinator, protocol, monkeypatch,
+):
+    class CountedList(list):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    # Count traversals of both the device list and the entity-owned copy.
+    monkeypatch.setattr(sensor_module, "list", CountedList, raising=False)
+    counts = CountedList([1] * 1024)
+    spectrum = make_spectrum(protocol, counts=counts)
+    coordinator.data.spectrum = spectrum
+    coordinator.spectrum_entity_attributes["acquired_at"] = "2026-10-11T02:00:00+00:00"
+    sensor = make_sensor(sensor_module, coordinator)
+    asyncio.run(sensor.async_added_to_hass())
+    original = sensor.extra_state_attributes
+    channels = original["channels"]
+    initial_iterations = (counts.iterations, channels.iterations)
+
+    coordinator.last_update_success = False
+    coordinator.spectrum_entity_attributes["automatic_paused"] = True
+    coordinator.notify()
+    paused = sensor.extra_state_attributes
+    assert paused is not original
+    assert paused["channels"] is channels
+    assert not original["automatic_paused"]
+    assert paused["acquired_at"] == original["acquired_at"]
+
+    # A successful read may reuse the same Spectrum object. Its scalar time
+    # must still publish, without refreshing the channel list from the source.
+    counts[0] = 999
+    coordinator.spectrum_entity_attributes.update(
+        acquired_at="2026-10-11T02:05:00+00:00", automatic_paused=False,
+    )
+    coordinator.notify()
+    resumed = sensor.extra_state_attributes
+    assert resumed is not paused
+    assert resumed["channels"] is channels
+    assert paused["automatic_paused"]
+    assert paused["acquired_at"] == "2026-10-11T02:00:00+00:00"
+    assert resumed["acquired_at"] == "2026-10-11T02:05:00+00:00"
+    assert sensor.native_value == 1024
+    assert channels[0] == 1
+    assert (counts.iterations, channels.iterations) == initial_iterations
+    assert len(sensor.writes) == 2
+
+    for _ in range(12):
+        coordinator.data = SimpleNamespace(spectrum=spectrum)
+        coordinator.notify()
+    assert len(sensor.writes) == 2
+    assert sensor.extra_state_attributes is resumed
+    assert (counts.iterations, channels.iterations) == initial_iterations

@@ -101,12 +101,15 @@ class RadiaCodeSelect(CoordinatorEntity[RadiaCodeCoordinator], SelectEntity):
         )
 
     @property
+    def available(self) -> bool:
+        """A known setting remains usable while radiation samples are stale."""
+        return self.coordinator.controls_available and self.current_option is not None
+
+    @property
     def current_option(self) -> Optional[str]:
         """Return the currently selected option."""
-        if self.coordinator.data is None:
-            return None
         raw = getattr(
-            self.coordinator.data.settings,
+            self.coordinator.settings,
             self.entity_description.key,
             None,
         )
