@@ -9,8 +9,30 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ## [Unreleased]
 
-### Changed
-- **Calendar release naming** — use `YYYY.MM.N` in future manifest versions, tags and release titles, with `bN`/`rcN` for prereleases. The release workflow validates the format. Older GitHub display names use calendar aliases while published tags, installed versions and downloads remain intact. The historical mapping is documented in `docs/release-versioning.md`.
+---
+
+## [2026.10.3] — 2026-10-11
+
+Promotes the tested RC5 implementation to stable. This release includes the cumulative connectivity, measurement-selection, dose-counter and spectrum-status improvements from RC1–RC5; runtime behavior is unchanged from RC5.
+
+### Fixed
+- **Responsive live radiation updates** — prefer valid live measurement pairs and track freshness independently for each record stream. A raw/database fallback cannot block the next live reading; repeated records cannot renew the freshness lease.
+- **Bounded Bluetooth recovery** — limit connection establishment and cleanup, handle fragmented response headers, enforce negotiated frame limits, and discard incomplete replies. A 60-second minimum measurement lease supports brief recoveries without hiding prolonged loss of fresh readings.
+- **Optional transfer isolation** — publish primary readings before background work, back off configuration acquisition, retain the last complete spectrum, and pause automatic spectrum reads after three consecutive failures. Connected controls use link availability independently of radiation freshness.
+- **Modern dose-counter decoding** — use the confirmed configuration-dependent record layout so counter records do not consume subsequent measurements; preserve recognized legacy layouts.
+
+### Added
+- **Dose Counter sensor** — expose the separate non-resettable device counter in µSv. Accumulated Dose and its reset action retain their existing meaning.
+- **Spectrum acquisition status** — expose `acquired_at` and `automatic_paused` on the Spectrum entity and in diagnostics. Failed reads retain the last complete snapshot and acquisition time; successful current-spectrum reads resume acquisition, and a successful reset clears the snapshot and metadata.
+- **Experimental confirmed Bluetooth writes** — optional command acknowledgments remain disabled by default. Existing saved choices are preserved; changing the option reloads the integration.
+- **Calendar release naming** — use `YYYY.MM.N` for new manifests, tags and release titles. Older releases retain their original tags and downloads; historical display names follow the documented calendar mapping.
+- **Diagnostics and regression coverage** — include record selection, sample progression, transport boundaries, dose-counter semantics, options, spectrum metadata and Home Assistant runtime checks.
+
+### Compatibility and known limits
+- Requires Home Assistant 2026.9.4 or newer; runtime coverage includes 2026.9.4, 2026.10.0 and 2026.10.1.
+- Field history showed approximately 17 hours without recorded sensor unavailability before user-confirmed updates/reloads. The final startup/reload capture continued primary polling through incomplete configuration and spectrum transfers; this is evidence of bounded recovery, not uninterrupted Bluetooth connectivity.
+- Incomplete bulk transfers persist on the observed ESPHome proxy routes, including the previously identified AIR-1 / ESPHome 2026.9.1 path. Spectrum snapshots can remain old or automatic acquisition can pause; check `acquired_at` and `automatic_paused`. Confirmed writes did not establish a repair and the final supplied capture had them enabled. Keep them off for the planned comparison.
+- The stable package changes only release metadata from RC5. It does not add averaging, clamp ordinary readings, infer unverified firmware layouts, or guarantee backfill of consumed measurements after a failed transfer. See [the final field review](https://github.com/303Bryan/ha-radiacode/blob/v2026.10.3/docs/stable-field-review-2026-10-11.md).
 
 ---
 

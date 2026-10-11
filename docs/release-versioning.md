@@ -6,21 +6,21 @@ Use PEP 440 prerelease suffixes: `2026.10.3b1` for a beta or `2026.10.3rc6` for 
 
 ## Names used by each system
 
-| Location | Example for the next October candidate |
+| Location | Example for the next October release line |
 |---|---|
-| Integration `manifest.json` version | `2026.10.3rc6` |
-| Changelog heading | `[2026.10.3rc6]` |
-| GitHub tag | `v2026.10.3rc6` |
-| GitHub display title | `2026.10.3rc6` |
-| Optional manual-install ZIP | `radiacode-v2026.10.3rc6.zip` |
+| Integration `manifest.json` version | `2026.10.4rc1` |
+| Changelog heading | `[2026.10.4rc1]` |
+| GitHub tag | `v2026.10.4rc1` |
+| GitHub display title | `2026.10.4rc1` |
+| Optional manual-install ZIP | `radiacode-v2026.10.4rc1.zip` |
 
 HACS identifies installed and available versions by the release tag, not the display title. Future tags and manifests must therefore use the same calendar version. A calendar version is newer than the legacy `2.0.x` versions. Existing published manifests, tags and ZIP contents retain their original versions.
 
 ## October 2026 transition
 
-The two published October stable release lines are displayed as `2026.10.1` (tag `v2.0.0`) and `2026.10.2` (tag `v2.0.1`). The current RC5 displays `2026.10.3rc5`, with its original `v2.0.2rc5` tag and integration version. If another candidate is released in October, use `2026.10.3rc6` for its actual version and tag; an October final would be `2026.10.3`.
+The earlier October stable releases display as `2026.10.1` (tag `v2.0.0`) and `2026.10.2` (tag `v2.0.1`). RC5 displays `2026.10.3rc5`, with its original `v2.0.2rc5` tag and integration version. Its stable promotion is `2026.10.3`, with tag `v2026.10.3` and matching manifest version. The next October release line is `2026.10.4`.
 
-The naming change does not publish a new build or promote the current beta. Existing installation URLs and HACS version identifiers remain valid.
+The historical display-name migration alone did not publish builds. The stable promotion separately changes the new package version and tag; existing installation URLs and historical HACS identifiers remain valid.
 
 ## Publishing future releases
 
