@@ -785,12 +785,13 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     Reference: cdump narodmon.py uses ``1_000_000 * dose_rate`` → µR/h;
                cdump webserver.py uses ``10_000 * dose_rate`` → µSv/h.
 
-    Dose rate and count rate always come from the same most recent valid
-    measurement (RealTimeData, DoseRateDB, RawData), including zero values.
-    Device timestamps select the newest record even when database history
-    follows live measurements in the buffer. Equal timestamps prefer live
-    RealTimeData, then RawData, then DoseRateDB; equal type/time uses the last
-    received record. RareData appears ~once per minute, so battery and
+    Dose rate and count rate always come from the same valid measurement,
+    including zero values. Prefer the newest valid RealTimeData record for
+    live sensors: RawData and DoseRateDB timestamps can lead the live stream
+    by tens of seconds and must not displace it. When no valid live pair is
+    present, retain the newest RawData/DoseRateDB fallback, preferring RawData
+    on equal timestamps; equal type/time uses the last received record.
+    RareData appears ~once per minute, so battery and
     accumulated_dose may be None if no RareData was in this batch.
 
     The selected timestamp and record type are retained for diagnostics;
@@ -806,7 +807,7 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     battery: Optional[float] = None
     temperature: Optional[float] = None
     measurement: Optional[RealTimeData | RawData | DoseRateDB] = None
-    measurement_priority = -1
+    measurement_key = None
     priorities = {RealTimeData: 2, RawData: 1, DoseRateDB: 0}
     candidates: dict[str, dict] = {}
 
@@ -828,14 +829,12 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
             candidate["latest_time"] = max(
                 candidate["latest_time"] or timestamp, timestamp
             )
-            priority = priorities[type(r)]
-            if (
-                measurement is None
-                or r.dt > measurement.dt
-                or (r.dt == measurement.dt and priority >= measurement_priority)
-            ):
+            # Rank live records before comparing timestamps: the observed
+            # raw/database streams do not share a comparable live watermark.
+            key = (isinstance(r, RealTimeData), r.dt, priorities[type(r)])
+            if measurement_key is None or key >= measurement_key:
                 measurement = r
-                measurement_priority = priority
+                measurement_key = key
         elif isinstance(r, RareData):
             if (
                 not _valid_reading(r.dose)

@@ -11,6 +11,23 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.2rc3] — 2026-10-10
+
+### Fixed
+- **Live measurements rejected after raw/database records** — prefer the newest valid RealTimeData pair over RawData and DoseRateDB in a mixed buffer. The supplied firmware 4.14 logs show raw timestamps about 125–128 seconds ahead of receipt and database timestamps about 41–48 seconds ahead. Selecting them as globally newest displaced current live readings and caused false freshness expiry.
+- **Freshness across measurement streams** — keep accepted timestamp watermarks separately for each record type within the current connection. A fallback-only buffer cannot block the next live reading; alternating replayed streams cannot renew the freshness lease. New connections reset timestamp comparisons without extending a cached sample's lease.
+- **Sample progression diagnostics** — omit device-time progression across different record types rather than report an invalid cross-stream interval.
+
+### Added
+- Field review of RC2's October 10 logs/activity and regressions for future raw/database records, fallback-to-live transitions, cross-stream replays, and real Home Assistant entity publication.
+- Home Assistant 2026.10.1 runtime validation, matching the new supplied diagnostics, alongside the existing 2026.9.4 and 2026.10.0 matrix.
+
+### Validation limits
+- Retains RC2's bounded recovery, control availability, strict complete-frame checks, spectrum circuit breaker and 60-second minimum measurement lease.
+- The supplied logs also contain incomplete DATA_BUF responses while automatic spectrum reads are already paused. This release addresses the confirmed live-sample selection defect; physical proxy notification loss remains unresolved and requires further testing.
+
+---
+
 ## [2.0.2rc2] — 2026-10-09
 
 ### Fixed

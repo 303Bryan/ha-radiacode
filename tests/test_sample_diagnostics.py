@@ -53,7 +53,7 @@ def test_candidate_diagnostics_distinguish_live_history_and_invalid_pairs(protoc
     history = protocol.DoseRateDB(now + timedelta(seconds=20), 100, 9, 0.00002, 1)
     invalid = protocol.RawData(now, float("nan"), 0.00001)
     result = protocol.extract_sensor_values([live, history, invalid])
-    assert result.measurement_type == "DoseRateDB"
+    assert result.measurement_type == "RealTimeData"
     candidates = result.data_buf_status["measurement_candidates"]
     assert candidates["RealTimeData"]["valid_pairs"] == 1
     assert candidates["DoseRateDB"]["latest_time"] == history.dt.isoformat()
@@ -73,6 +73,7 @@ def test_rejected_samples_report_reason_without_renewing_lease(
         first = await refresh_and_settle(coordinator)
         timestamp = first.sensors.measurement_time
         values = {"dose_rate": 0.12, "count_rate": 12,
+                  "measurement_type": "RealTimeData",
                   "measurement_time": timestamp + timedelta(seconds=5)}
         if reason == "no_paired_measurement":
             values["dose_rate"] = None

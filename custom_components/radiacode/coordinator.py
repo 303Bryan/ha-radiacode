@@ -164,6 +164,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._last_measurement_flags: Optional[int] = None
         self._last_fresh_monotonic: Optional[float] = None
         self._last_measurement_connection = 0
+        # Raw/database offsets can lead the live stream. A fallback must not
+        # block later live samples, and switching types must not replay them.
+        self._measurement_watermarks: dict[Optional[str], datetime] = {}
+        self._watermark_connection = 0
         # Three normal polling opportunities, with a 60-second minimum,
         # cover proxy reconnect/init delays without hiding a stalled stream.
         self._freshness_grace = max(60.0, float(poll_interval) * 3)
@@ -520,19 +524,24 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
 
             # Empty buffers, repeated timestamps and filtered samples must
             # never reset freshness. Keep both values from one accepted record.
+            if self._watermark_connection != self._connection_count:
+                # Initialization resets the device offset anchor. Keep the
+                # cached sample lease, but compare only this connection.
+                self._measurement_watermarks.clear()
+                self._watermark_connection = self._connection_count
+            previous_time = self._measurement_watermarks.get(data.measurement_type)
             rejection = None
             if data.dose_rate is None or data.count_rate is None:
                 rejection = "no_paired_measurement"
             elif data.measurement_time is None:
                 rejection = "no_measurement_timestamp"
             elif (
-                self._last_measurement_time is not None
-                and self._last_measurement_connection == self._connection_count
-                and data.measurement_time <= self._last_measurement_time
+                previous_time is not None
+                and data.measurement_time <= previous_time
             ):
                 rejection = (
                     "repeated_timestamp"
-                    if data.measurement_time == self._last_measurement_time
+                    if data.measurement_time == previous_time
                     else "regressed_timestamp"
                 )
             fresh = rejection is None
@@ -560,14 +569,20 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                         "device_seconds": (
                             data.measurement_time - self._last_measurement_time
                         ).total_seconds()
-                        if self._last_measurement_time is not None and same_connection
-                        else None,
+                        if (
+                            self._last_measurement_time is not None
+                            and same_connection
+                            and data.measurement_type == self._last_measurement_type
+                        ) else None,
                         "receipt_seconds": self._age(self._last_fresh_monotonic)
                         if same_connection else None,
                     }
                     self._last_dose_rate = dose_rate
                     self._last_count_rate = count_rate
                     self._last_measurement_time = data.measurement_time
+                    self._measurement_watermarks[data.measurement_type] = (
+                        data.measurement_time
+                    )
                     self._last_measurement_type = data.measurement_type
                     self._last_measurement_flags = data.measurement_flags
                     self._last_measurement_connection = self._connection_count

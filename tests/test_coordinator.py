@@ -408,7 +408,7 @@ def test_zero_pair_is_fresh_and_slow_poll_gets_three_interval_grace(
         assert coordinator.runtime_status["freshness"]["grace_seconds"] == 900
         assert coordinator._last_fresh_monotonic == 1300
         assert coordinator.runtime_status["freshness"]["sample_progress"] == {
-            "device_seconds": 300, "receipt_seconds": 300,
+            "device_seconds": None, "receipt_seconds": 300,
         }
         await coordinator.async_shutdown()
 
