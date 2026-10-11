@@ -474,6 +474,7 @@ class RadiaCodeSpectrumSensor(
             entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]),
         )
         self._cached_spectrum: Optional[Spectrum] = None
+        self._cached_spectrum_metadata: Optional[dict[str, Any]] = None
         self._attr_native_value: Optional[int] = None
         self._attr_extra_state_attributes: dict[str, Any] = {}
         self._last_available = self.available
@@ -486,21 +487,32 @@ class RadiaCodeSpectrumSensor(
         self._last_available = self.available
 
     def _refresh_spectrum_cache(self) -> bool:
-        """Build entity values only when the coordinator supplies a new snapshot."""
+        """Refresh snapshots once and publish scalar metadata independently."""
         spectrum = (
             self.coordinator.data.spectrum
             if self.coordinator.data is not None
             else None
         )
-        # The coordinator reuses the snapshot between spectrum reads. Its
-        # other sensors update much more often, so compare by identity rather
-        # than repeatedly traversing all 1024 channels on every normal poll.
-        if spectrum is self._cached_spectrum:
+        metadata = self.coordinator.spectrum_entity_attributes
+        spectrum_changed = spectrum is not self._cached_spectrum
+        metadata_changed = metadata != self._cached_spectrum_metadata
+        # Normal radiation polls reuse both the snapshot and scalar metadata.
+        # They must not repeatedly traverse all 1024 spectrum channels.
+        if not spectrum_changed and not metadata_changed:
             return False
+        self._cached_spectrum_metadata = dict(metadata)
+        if not spectrum_changed:
+            # Preserve already published attribute dictionaries while reusing
+            # the entity-owned histogram without copying or summing it again.
+            self._attr_extra_state_attributes = {
+                **self._attr_extra_state_attributes, **metadata,
+            }
+            return True
+
         self._cached_spectrum = spectrum
         if spectrum is None:
             self._attr_native_value = None
-            self._attr_extra_state_attributes = {}
+            self._attr_extra_state_attributes = dict(metadata)
             return True
 
         # Keep an entity-owned copy so a published state's histogram remains
@@ -515,12 +527,13 @@ class RadiaCodeSpectrumSensor(
             "calibration_a2": spectrum.a2,
             "truncated": spectrum.truncated,
             "channels": channels,
+            **metadata,
         }
         return True
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Publish new spectra and connection availability transitions."""
+        """Publish spectrum, scalar metadata and availability changes."""
         spectrum_changed = self._refresh_spectrum_cache()
         available = self.available
         if spectrum_changed or available != self._last_available:

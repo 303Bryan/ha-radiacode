@@ -209,6 +209,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # Gamma spectrum; read on its own slower cadence (options-driven)
         # and cached in between — the heaviest BLE transfer we perform.
         self._last_spectrum: Optional[Spectrum] = None
+        self._last_spectrum_acquired_at: Optional[datetime] = None
 
         # Set to True when the user explicitly disconnects via the connection
         # switch.  Polling is suspended until the user turns it back on.
@@ -341,11 +342,20 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         return self._sfr_file
 
     @property
+    def spectrum_entity_attributes(self) -> dict:
+        """Return stable scalar metadata without copying the histogram."""
+        return {
+            "acquired_at": self._last_spectrum_acquired_at.isoformat()
+            if self._last_spectrum_acquired_at is not None else None,
+            "automatic_paused": self._automatic_spectrum_paused,
+        }
+
+    @property
     def spectrum_status(self) -> dict:
         """Summarize spectrum polling without copying the large histogram."""
         return {
             "poll_interval": self._spectrum_interval,
-            "automatic_paused": self._automatic_spectrum_paused,
+            **self.spectrum_entity_attributes,
             "consecutive_failures": self._spectrum_consecutive_failures,
             "failure_limit": _SPECTRUM_FAILURE_LIMIT,
             "format_version": self._client.spectrum_format_version,
@@ -809,6 +819,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
 
     def _record_spectrum_success(self, spectrum: Spectrum) -> None:
         self._last_spectrum = spectrum
+        self._last_spectrum_acquired_at = datetime.now(timezone.utc)
         # A successful manual current-spectrum read also proves this path is
         # usable again and resumes automatic reads at the configured cadence.
         self._spectrum_consecutive_failures = 0
@@ -1142,6 +1153,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._automatic_spectrum_paused = False
         self._spectrum_retry_delay = max(_SPECTRUM_RETRY_MIN, self._spectrum_interval)
         self._last_spectrum = None
+        self._last_spectrum_acquired_at = None
         self._last_spectrum_error = None
         self._last_spectrum_success = None
         self._optional_errors.pop("spectrum", None)
@@ -1176,6 +1188,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             self._optional_errors[phase] = error
             if not accumulated:
                 self._record_spectrum_failure(error)
+                self._publish_maintenance_cache()
             raise UpdateFailed(f"Spectrum read failed: {err}") from err
         finally:
             self._record_phase(f"{phase}_action", started, error)

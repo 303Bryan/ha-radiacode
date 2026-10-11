@@ -11,6 +11,20 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.2rc5] — 2026-10-11
+
+### Added
+- **Spectrum acquisition time** — the Spectrum entity and downloadable diagnostics expose `acquired_at`, the UTC time the last complete current-spectrum snapshot was received. Failed reads keep that timestamp; a successful spectrum reset clears it. Accumulation duration remains a separate value.
+- **Visible automatic-read pause** — the Spectrum entity exposes `automatic_paused`, including when no histogram has been acquired. Pause/resume changes publish with the retained snapshot, so an old histogram no longer hides stopped acquisition.
+
+### Fixed
+- **Metadata publication with cached spectra** — timestamp and pause changes update the entity without rebuilding or traversing the 1,024-channel histogram. Ordinary radiation polls with unchanged spectrum metadata do not republish it. Manual current-spectrum failures also publish pause changes promptly.
+
+### Validation limits
+- These fields describe acquisition state; they do not recover missing incoming Bluetooth fragments or change spectrum retry, measurement freshness, or write-mode behavior. Confirm Bluetooth writes remains off by default; existing saved choices are preserved for the planned comparison.
+
+---
+
 ## [2.0.2rc4] — 2026-10-10
 
 ### Fixed

@@ -56,8 +56,12 @@ The **Spectrum** sensor exposes the device's gamma spectrum (default: refreshed 
 | `calibration_a0/a1/a2` | Energy calibration: E(ch) = a0 + a1·ch + a2·ch² keV |
 | `duration_s` | Spectrum accumulation time in seconds |
 | `truncated` | False for published snapshots; incomplete reads keep the previous complete snapshot |
+| `acquired_at` | UTC time the last complete current-spectrum snapshot was received; empty before the first acquisition or after Spectrum Reset |
+| `automatic_paused` | True when automatic spectrum reads have stopped after repeated failures |
 
 A **Spectrum Reset** button clears the accumulation, and the **`radiacode.get_spectrum` action** returns the spectrum as response data (`accumulated: true` for the device's long-term accumulated spectrum) for use in scripts and automations.
+
+Open the Spectrum entity to inspect `acquired_at` and `automatic_paused`. Acquisition time is when Home Assistant received the complete snapshot, not when accumulation started; `duration_s` describes the accumulation period. Failed reads retain the last complete histogram and its acquisition time. A successful current-spectrum read advances the time and clears the pause; an accumulated-spectrum action does not replace it. These attributes also appear before a histogram is available. A false pause flag does not override a spectrum interval of 0, which disables automatic reads.
 
 **Plotting the spectrum** — install [Plotly Graph Card](https://github.com/dbuezas/lovelace-plotly-graph-card) from HACS, then add a Manual card using the YAML below. Replace `sensor.radiacode_spectrum` with your device's actual Spectrum entity ID (shown in Settings → Devices & Services → Entities). The same example is available in [examples/spectrum-card.yaml](examples/spectrum-card.yaml).
 
@@ -257,7 +261,7 @@ Check diagnostics for measurement age and command failures, then check:
 
 ### Spectrum stays unchanged through a Bluetooth proxy
 
-An incomplete spectrum read keeps the last complete snapshot; check diagnostics for snapshot age and declared/received bytes. The integration releases the affected connection and backs off automatic retries. After three consecutive failures, it pauses automatic spectrum acquisition so repeated large transfers stop interrupting radiation monitoring. Diagnostics show `automatic_paused`, `consecutive_failures`, and `last_error`; `retry_in_seconds` is empty while paused. After addressing the connection problem, a successful manual **current-spectrum** action resumes automatic acquisition. Resetting the current spectrum or reloading the integration also starts a new bounded series of attempts. An accumulated-spectrum read does not resume current-spectrum acquisition.
+An incomplete spectrum read keeps the last complete snapshot; check diagnostics for snapshot age and declared/received bytes. The integration releases the affected connection and backs off automatic retries. After three consecutive failures, it pauses automatic spectrum acquisition so repeated large transfers stop interrupting radiation monitoring. The Spectrum entity shows `acquired_at` and `automatic_paused`; diagnostics also show `consecutive_failures` and `last_error`. `retry_in_seconds` is empty while paused. After addressing the connection problem, a successful manual **current-spectrum** action resumes automatic acquisition. Resetting the current spectrum or reloading the integration also starts a new bounded series of attempts. An accumulated-spectrum read does not resume current-spectrum acquisition.
 
 Spectra, configuration and the register directory have a 30-second transfer deadline once response packets start arriving; ordinary commands and bulk reads without a first reply have ten seconds. A two-second packet stall still fails the transfer. If notification bytes were dropped, a longer timeout cannot recover them.
 
