@@ -58,42 +58,61 @@ The **Spectrum** sensor exposes the device's gamma spectrum (default: refreshed 
 
 A **Spectrum Reset** button clears the accumulation, and the **`radiacode.get_spectrum` action** returns the spectrum as response data (`accumulated: true` for the device's long-term accumulated spectrum) for use in scripts and automations.
 
-**Plotting the spectrum** — install [Plotly Graph Card](https://github.com/dbuezas/lovelace-plotly-graph-card) from HACS, then add a Manual card using the YAML below. Replace `sensor.radiacode_spectrum` with your device's actual Spectrum entity ID (shown in Settings → Devices & Services → Entities). The same example is available in [examples/spectrum-card.yaml](examples/spectrum-card.yaml).
+**Plotting the spectrum (recommended panel view)** — install [Plotly Graph Card](https://github.com/dbuezas/lovelace-plotly-graph-card) from HACS, then use a dedicated [Panel view](https://www.home-assistant.io/dashboards/panel/) for a full-width graph. The example sets the graph height to **800 pixels** and reduces the margins to give the spectrum more vertical space.
+
+Replace `sensor.radiacode_spectrum` with your device's actual Spectrum entity ID (shown in Settings → Devices & Services → Entities). Add the YAML below as a **dashboard view**; when editing the full dashboard configuration, add it as an item under `views:` with the appropriate list indentation. The copyable view example is also available in [examples/spectrum-panel.yaml](examples/spectrum-panel.yaml).
 
 ```yaml
-type: custom:plotly-graph
-title: Gamma Spectrum
-refresh_interval: 60
-raw_plotly_config: true
-entities:
-  - entity: sensor.radiacode_spectrum
-    name: Counts
-    type: scatter
-    mode: lines
-    x: |
-      $fn ({ hass, getFromConfig }) => {
-        const sensor = hass.states[getFromConfig('.entity')];
-        if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
-        const a = sensor.attributes;
-        return (a.channels || []).map((_, ch) =>
-          a.calibration_a0 + a.calibration_a1 * ch + a.calibration_a2 * ch * ch);
-      }
-    "y": |
-      $fn ({ hass, getFromConfig }) => {
-        const sensor = hass.states[getFromConfig('.entity')];
-        if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
-        return sensor.attributes.channels || [];
-      }
-    hovertemplate: '%{x:.1f} keV<br>%{y} counts<extra></extra>'
-layout:
-  xaxis:
-    type: linear
-    title: Energy (keV)
-    autorange: true
-  yaxis:
-    title: Counts
-    rangemode: tozero
+type: panel
+path: radiacode-spectrum
+title: RadiaCode Spectrum
+cards:
+  - type: custom:plotly-graph
+    title: Gamma Spectrum
+    refresh_interval: 60
+    raw_plotly_config: true
+    entities:
+      - entity: sensor.radiacode_spectrum
+        name: Counts
+        type: scatter
+        mode: lines
+        x: |
+          $fn ({ hass, getFromConfig }) => {
+            const sensor = hass.states[getFromConfig('.entity')];
+            if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
+            const a = sensor.attributes;
+            return (a.channels || []).map((_, ch) =>
+              a.calibration_a0 + a.calibration_a1 * ch + a.calibration_a2 * ch * ch);
+          }
+        "y": |
+          $fn ({ hass, getFromConfig }) => {
+            const sensor = hass.states[getFromConfig('.entity')];
+            if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
+            return sensor.attributes.channels || [];
+          }
+        hovertemplate: '%{x:.1f} keV<br>%{y} counts<extra></extra>'
+    layout:
+      height: 800
+      margin:
+        t: 30
+        b: 60
+        l: 70
+        r: 30
+      xaxis:
+        type: linear
+        title:
+          text: Energy (keV)
+        autorange: true
+      yaxis:
+        title:
+          text: Counts
+        rangemode: tozero
+show_icon_and_title: false
 ```
+
+Adjust `layout.height` to suit your screen, for example `600` or `1000`. The height belongs inside the Plotly card's `layout` section. Axis labels use `title.text` for compatibility with current Plotly versions.
+
+For a graph within an existing dashboard view, paste [examples/spectrum-card.yaml](examples/spectrum-card.yaml) into a **Manual card**. It uses the same height and margins without the outer panel-view settings.
 
 > Keep the `"y"` key quoted when copying or editing the card. If a saved card contains a `true` key in its place, rename it to `"y"`; Plotly needs both `x` and `y` arrays when `raw_plotly_config` is enabled.
 
