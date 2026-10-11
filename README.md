@@ -199,6 +199,10 @@ The Radiacode does **not** need to be paired with the Radiacode phone app to wor
 
 ---
 
+## Release naming
+
+Future releases use **YYYY.MM.N**, with `rcN` for release candidates (for example, `2026.10.3rc6`). Older GitHub display names now follow that format while their original tags and installed versions remain valid. See [release versioning and the historical name mapping](docs/release-versioning.md).
+
 ## Configuration
 
 ### Automatic Discovery
