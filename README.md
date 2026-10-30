@@ -141,6 +141,10 @@ For a graph within an existing dashboard view, paste [examples/spectrum-card.yam
 
 > **BT proxy note:** spectrum acquisition reads the histogram directly and selects an encoding only after complete validation; a configuration download is no longer a prerequisite. Incomplete or incorrectly framed Bluetooth responses cause the affected connection to be released before another command can reuse it. Invalid spectra are rejected and the last complete snapshot is kept; failed automatic reads retry after 5 minutes, then 10 minutes (or your configured interval if longer), and pause after three consecutive failures. Radiation readings publish before optional maintenance starts. The device still handles one BLE command at a time, so a stalled bulk request can delay the next acquisition until its bounded timeout releases the link. Download diagnostics to see format provenance, errors, transfer sizes/timing and snapshot age. Set the spectrum interval to 0 to disable automatic spectrum reads; the on-demand action remains available and updates the current-spectrum entity.
 
+Firmware identity checks run after reconnect. The diagnostic register directory is a separate bulk operation with one automatic attempt per integration load or confirmed firmware change; failures are not retried on every reconnect. Configuration discovery runs in background maintenance after primary publication, with a five-minute retry delay after failure. Diagnostics include `transport.configuration.record_layout` to inspect the actual firmware declarations without exposing device identity.
+
+**2026.10.4b2 / firmware 4.15:** field testing found a record-boundary mismatch that can leave battery, accumulated dose and dose counter unavailable even while live radiation updates continue. This beta fixes the optional-download reconnect loop and adds evidence for a subsequent decoder correction. See the [field findings and test steps](docs/beta2-connection-review-2026-10-30.md).
+
 ### Binary Sensors
 
 | Entity | Description |

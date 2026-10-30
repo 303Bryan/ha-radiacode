@@ -11,6 +11,21 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.10.4b2] — 2026-10-30
+
+Connection recovery follow-up for 1XX devices after the first firmware 4.15 field capture.
+
+### Fixed
+- **Register-directory reconnect loop** — separate the large diagnostic SFR download from the small firmware check. Attempt it once per integration load/confirmed firmware version, including when it fails or is cancelled. Reconnecting no longer retries that failed download every minute; firmware checks still run after reconnect.
+- **Configuration blocking connection setup** — defer configuration discovery to optional maintenance after primary publication. An incomplete configuration response still retires its connection and backs off, but cannot fail connection initialization or trigger its immediate retry path.
+
+### Diagnostics and validation
+- Include a bounded record-layout summary from the actual device configuration: known group/channel names, numeric IDs/types/scales, and recognized units. Device identity and unrelated configuration text are excluded.
+- Add reconnect-loop/cancellation regressions and HA 2026.10.4 to the runtime matrix.
+- The supplied field log also shows incomplete spectrum transfers and a firmware 4.15 record-boundary mismatch. These remain unresolved; no speculative record-width or dose-counter-unit change is included. Live radiation readings continued during the later capture, while battery/accumulated-dose/counter data were missing. See [field findings and b2 testing](docs/beta2-connection-review-2026-10-30.md).
+
+---
+
 ## [2026.10.4b1] — 2026-10-30
 
 Beta for testing the 1XX measurement-quality and alarm improvements prompted by Windows 1.16.01 / firmware 4.15. ZERO support is not included.

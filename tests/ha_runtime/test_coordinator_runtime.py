@@ -10,6 +10,7 @@ import datetime as dt
 import logging
 import json
 from datetime import timedelta
+from dataclasses import replace
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -71,6 +72,7 @@ async def runtime(tmp_path, monkeypatch):
         get_diagnostics=AsyncMock(return_value=RadiaCodeDiagnostics()),
         get_serial_number=AsyncMock(return_value="TEST-DEVICE"),
         get_firmware_version=AsyncMock(return_value="4.14"),
+        get_sfr_file=AsyncMock(return_value=""),
         get_spectrum=AsyncMock(return_value=Spectrum(
             duration_s=60, a0=-2, a1=3, a2=0.001, counts=[1] * 1024,
         )),
@@ -134,6 +136,42 @@ async def test_radiation_reaches_ha_before_blocked_spectrum(runtime):
     assert state.attributes["channel_count"] == 1024
     assert state.attributes["channels"] == [2] * 1024
     assert coordinator._unsub_refresh is scheduled_refresh
+
+
+@pytest.mark.asyncio
+async def test_failed_directory_is_independent_of_reconnect_identity(runtime):
+    hass, c, client, dose, _ = runtime
+    c._spectrum_interval = 0
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def incomplete_directory():
+        entered.set()
+        await release.wait()
+        client.is_connected = False
+        raise TimeoutError("SFR_FILE incomplete")
+
+    client.get_sfr_file.side_effect = incomplete_directory
+    await c.async_refresh()
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert hass.states.get(dose.entity_id).state == "0.12"
+    release.set()
+    await c._maintenance_task
+    assert c._sfr_attempted
+    assert c.runtime_status["maintenance"]["errors"]["register_directory"] == "SFR_FILE incomplete"
+    client.is_connected = True
+    c._connection_count += 1
+    client.get_data.return_value = replace(
+        client.get_data.return_value,
+        measurement_time=client.get_data.return_value.measurement_time + timedelta(seconds=5),
+        dose_rate=0.13,
+    )
+    await c.async_refresh()
+    if c._maintenance_task is not None:
+        await c._maintenance_task
+    client.get_firmware_version.assert_awaited_once()
+    client.get_sfr_file.assert_awaited_once()
+    assert hass.states.get(dose.entity_id).state == "0.13"
+    assert client.is_connected
 
 
 @pytest.mark.asyncio

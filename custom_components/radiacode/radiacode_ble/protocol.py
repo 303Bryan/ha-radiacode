@@ -658,6 +658,66 @@ def parse_group4_format(config_text: str) -> Optional[Group4Format]:
     return None
 
 
+def describe_record_layout(config_text: str) -> list[dict]:
+    """Bounded structural diagnostics, without arbitrary configuration text.
+
+    These declarations describe evidence only; they never authorize decoding.
+    Export numeric IDs/types/scales and known field names, excluding device
+    identity, sensor descriptions, and all unrelated configuration sections.
+    """
+    known_groups = {"GRP_" + name for name in (
+        "RealTimeData", "RawData", "DoseRateDB", "RareData", "DoseCounter",
+        "UserData", "ScheduleData", "AccelData", "Event", "RawCountRate", "RawDoseRate",
+    )}
+    known_channels = {"CHN_" + name for name in (
+        "CountRate", "DoseRate", "CountRateErr", "DoseRateErr", "Flags",
+        "RealTimeFlags", "Count", "Duration", "Dose", "Temperature",
+        "ChargeLevel", "DoseCounter", "Event", "EventChnMsk",
+    )}
+    groups: list[dict] = []
+    in_data = False
+    group = channel = None
+    for raw in config_text.splitlines():
+        line = raw.strip()
+        section = re.fullmatch(r"(\[+)([^\[\]]+)(\]+)", line)
+        if section and len(section[1]) == len(section[3]):
+            depth, name = len(section[1]), section[2].strip()
+            if depth == 1:
+                in_data = name == "DataStructure"
+                group = channel = None
+            elif in_data and depth == 2:
+                if len(groups) >= 32:
+                    break
+                group = {"name": name if name in known_groups else "unrecognized", "channels": []}
+                groups.append(group)
+                channel = None
+            elif in_data and depth == 3 and group is not None:
+                if len(group["channels"]) >= 32:
+                    break
+                channel = {"name": name if name in known_channels else "unrecognized"}
+                group["channels"].append(channel)
+            continue
+        if not in_data or group is None:
+            continue
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        target = channel if channel is not None else group
+        if key == "Unit" and channel is not None:
+            unit = value.strip().strip('"').split("|", 1)[0].strip()
+            if unit in {"uR", "µR", "μR", "urem", "µrem", "μrem", "R", "rem", "R/h", "rem/h", "%", "°C", "cps", "s"}:
+                target[key] = unit
+            continue
+        if not sep or key not in {"Id", "DType", "Expr", "P1", "P2"}:
+            continue
+        try:
+            number = float(value) if key in {"P1", "P2"} else int(value.strip(), 0)
+            if math.isfinite(number) and abs(number) <= 2**32:
+                target[key] = number
+        except (ValueError, OverflowError):
+            continue
+    return groups
+
+
 def parse_event_schema(config_text: str) -> Optional[EventSchema]:
     """Validate the declared 1XX event layout, never infer it from packet size.
 

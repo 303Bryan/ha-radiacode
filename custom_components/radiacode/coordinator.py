@@ -236,6 +236,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # Device's self-describing SFR register directory (fetched once,
         # alongside identity).  Logged at debug and exposed in diagnostics.
         self._sfr_file: Optional[str] = None
+        self._sfr_attempted = False
+        self._next_sfr_read = 0.0
 
         # ── Diagnostics ──────────────────────────────────────────────────
         self._last_error: Optional[str] = None
@@ -499,6 +501,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 and not self._maintenance_task.done(),
                 "phase": self._maintenance_phase,
                 "errors": dict(self._optional_errors),
+                "register_directory_attempted": self._sfr_attempted,
             },
             "recent_phases": list(self._phase_history),
         }
@@ -803,6 +806,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             or now >= self._next_settings_read
             or now >= self._next_diagnostics_read
             or now >= self._next_temperature_read
+            or (self._fw_version is not None and not self._sfr_attempted)
             or (
                 getattr(self._client, "configuration_retry_due", False)
                 and now >= self._next_configuration_read
@@ -845,6 +849,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
              self._client.get_diagnostics, "_last_diagnostics"),
             ("temperature", "_next_temperature_read", _TEMPERATURE_INTERVAL,
              self._client.get_temperature, "_last_temperature"),
+            ("register_directory", "_next_sfr_read", 0.0,
+             self._fetch_register_directory, None),
             ("spectrum", "_next_spectrum_read", self._spectrum_interval,
              self._client.get_spectrum, "_last_spectrum"),
         )
@@ -867,6 +873,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 ):
                     continue
                 if phase == "identity" and self._serial_number is not None and self._identity_connection == self._connection_count:
+                    continue
+                if phase == "register_directory" and (
+                    self._fw_version is None or self._sfr_attempted
+                ):
                     continue
                 if phase == "spectrum" and (
                     self._spectrum_interval <= 0 or self._automatic_spectrum_paused
@@ -990,6 +1000,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             self._identity_connection = connection
             if previous_firmware is not None and self._fw_version != previous_firmware:
                 self._sfr_file = None
+                self._sfr_attempted = False
+                self._next_sfr_read = 0.0
+                self._optional_errors.pop("register_directory", None)
                 self._last_settings = RadiaCodeSettings()
                 self._last_diagnostics = RadiaCodeDiagnostics()
                 self._last_temperature = None
@@ -1018,37 +1031,6 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             self._serial_number = None  # ensure we retry
             raise
 
-        # Read the device's self-describing SFR register directory — an
-        # ASCII listing of every register with address, size, type, and
-        # signedness.  One-time read; failure is non-fatal (the listing is
-        # informational). A failed transfer releases its connection; no
-        # partial listing is accepted.
-        if self._sfr_file is None:
-            try:
-                self._sfr_file = await self._client.get_sfr_file()
-                self._optional_errors.pop("register_directory", None)
-                if self._sfr_file:
-                    _LOGGER.info(
-                        "Read device SFR register directory: %d bytes, %d entries "
-                        "(full listing at debug level and in diagnostics download)",
-                        len(self._sfr_file),
-                        len(self._sfr_file.splitlines()),
-                    )
-                    _LOGGER.debug(
-                        "Device SFR register directory:\n%s", self._sfr_file
-                    )
-                else:
-                    # Some firmware (observed: RC-103 FW 4.14) returns an
-                    # empty SFR_FILE over BLE even though the read succeeds.
-                    _LOGGER.debug(
-                        "Device returned an empty SFR register directory "
-                        "(not provided over BLE on this firmware)"
-                    )
-            except Exception as err:  # noqa: BLE001
-                self._optional_errors["register_directory"] = str(err)
-                _LOGGER.debug("SFR directory read failed (non-fatal): %s", err)
-        self._check_user_disconnected("after register directory")
-
         # Push the serial number and firmware version into the HA device
         # registry so they appear on the device info card.
         registry = dr.async_get(self.hass)
@@ -1065,6 +1047,28 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 serial_number=self._serial_number,
                 sw_version=self._fw_version,
             )
+
+    async def _fetch_register_directory(self) -> None:
+        """Attempt this diagnostic-only bulk download once per firmware/load.
+
+        Mark before awaiting: failure or cancellation must not let a reconnect
+        re-arm the same optional download and repeatedly tear down the link.
+        Firmware checks stay small and run independently on every reconnect.
+        """
+        if self._sfr_attempted or self._fw_version is None:
+            return
+        self._sfr_attempted = True
+        self._sfr_file = await self._client.get_sfr_file()
+        self._check_user_disconnected("after register directory")
+        if self._sfr_file:
+            _LOGGER.info(
+                "Read device SFR register directory: %d bytes, %d entries "
+                "(full listing at debug level and in diagnostics download)",
+                len(self._sfr_file), len(self._sfr_file.splitlines()),
+            )
+            _LOGGER.debug("Device SFR register directory:\n%s", self._sfr_file)
+        else:
+            _LOGGER.debug("Device returned an empty SFR register directory")
 
     def _check_user_disconnected(self, context: str = "") -> None:
         """Raise UpdateFailed if the user has disabled the BLE connection.

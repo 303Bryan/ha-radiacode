@@ -98,6 +98,7 @@ from .protocol import (
     decode_serial_number,
     parse_firmware_version,
     parse_event_schema,
+    describe_record_layout,
 )
 
 
@@ -218,6 +219,7 @@ class RadiaCodeBLEClient:
         self._configuration_next_retry = 0.0
         self._group4_format: Optional[Group4Format] = None
         self._event_schema = None
+        self._record_layout: list[dict] = []
         self._configuration_generation = -1
         self._firmware_check_pending = False
 
@@ -295,6 +297,7 @@ class RadiaCodeBLEClient:
             self._configuration_next_retry = 0.0
             self._group4_format = None
             self._event_schema = None
+            self._record_layout = []
             self._temperature = None
             self._temperature_observed_monotonic = None
             if self._configuration_address is not None:
@@ -451,18 +454,9 @@ class RadiaCodeBLEClient:
         # cdump sets this to now+128 s during init.
         self._base_time = datetime.datetime.now() + datetime.timedelta(seconds=128)
 
-        # Establish the shared-ID record layout once. Failed optional reads
-        # back off across reconnects, so they cannot force every recovery into
-        # another bulk transfer. A failed transport cannot be reused for drain.
-        if self.configuration_retry_due:
-            try:
-                await self._run_init_step(
-                    "configuration", self._refresh_record_configuration_locked()
-                )
-            except Exception as err:
-                if not self.is_connected:
-                    raise RadiaCodeInitError("configuration", err) from err
-                _LOGGER.debug("Configuration unavailable; retaining unknown schema: %s", err)
+        # Configuration is optional bulk work. The coordinator reads it after
+        # publishing primary data; a failed download must not fail connection
+        # initialization or force its immediate retry path.
 
         # Drain stale records accumulated while disconnected.  The full
         # framed response must arrive before another command can be sent.
@@ -617,6 +611,7 @@ class RadiaCodeBLEClient:
                 "firmware_check_pending": self._firmware_check_pending,
                 "schema_usable": self._record_schema_usable,
                 "event_schema": self._event_schema is not None,
+                "record_layout": self._record_layout,
                 "firmware_version": self._firmware_version,
                 "group4_schema": (
                     self._group4_format.value if self._group4_format is not None else None
@@ -754,6 +749,7 @@ class RadiaCodeBLEClient:
             self._configuration_generation = -1
             self._group4_format = None
             self._event_schema = None
+            self._record_layout = []
             self._spectrum_format_loaded = False
             self._spectrum_format_authoritative = False
             self._spectrum_format_source = None
@@ -796,6 +792,7 @@ class RadiaCodeBLEClient:
         """Unknown complete schemas remain unknown; do not infer from payloads."""
         self._group4_format = parse_group4_format(config)
         self._event_schema = parse_event_schema(config)
+        self._record_layout = describe_record_layout(config)
         self._configuration_generation = self._connection_generation
         self._configuration_loaded = True
         self._configuration_next_retry = 0.0

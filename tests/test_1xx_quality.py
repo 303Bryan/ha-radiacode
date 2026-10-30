@@ -250,8 +250,9 @@ def test_firmware_rechecked_after_reconnect_and_changed_caches_cleared(make_coor
         await c._fetch_device_identity()
         assert c._identity_connection == 1 and c.firmware_version == "4.15"
         assert c._last_settings.dr_alarm_level1 is None
-        assert c._sfr_file == ""
-        assert c._client.get_sfr_file.await_count == 1
+        assert c._sfr_file is None
+        assert not c._sfr_attempted
+        c._client.get_sfr_file.assert_not_awaited()
         assert c._client.get_serial_number.await_count == 0
         assert not c._automatic_spectrum_paused
         await c.async_shutdown()
