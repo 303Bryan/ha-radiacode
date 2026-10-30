@@ -11,6 +11,21 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.10.4b3] — 2026-10-30
+
+Bound automatic configuration discovery after the longer stationary 1XX field test.
+
+### Fixed
+- **Five-minute configuration reconnect loop** — pause automatic configuration downloads after three unsuccessful attempts, retaining the five-minute delay between attempts. The budget survives reconnects and the BLE Connection switch, including cancelled transfers. Reloading the integration, changing detectors or detecting a confirmed firmware change permits new attempts. A successful explicit configuration read clears the pause and caches only the complete reply.
+- Expose `automatic_attempts`, `automatic_attempt_limit` and `automatic_paused` in `transport.configuration` diagnostics. A paused download has no scheduled retry; one warning explains how to retry it. Primary radiation polling and other maintenance continue.
+
+### Evidence and limits
+- In the later 28-minute segment of the supplied log, all 344 measurement-buffer commands succeeded and 336 fresh dose/count pairs were accepted. Five configuration downloads failed and each retired its connection at roughly five-minute intervals. The largest accepted-reading gap in that segment was 15 seconds. See [field findings and beta 3 test steps](docs/beta3-connection-review-2026-10-30.md).
+- Regressions cover incomplete framed replies, repeated reconnects, cancellation, successful recovery and firmware/address/reload reset behavior. Hardware acceptance of this beta remains pending.
+- This change prevents indefinite automatic retries; it does not repair missing Bluetooth notifications or the firmware 4.15 record-boundary mismatch. No speculative decoder change, transfer-timeout increase or ZERO support is included.
+
+---
+
 ## [2026.10.4b2] — 2026-10-30
 
 Connection recovery follow-up for 1XX devices after the first firmware 4.15 field capture.

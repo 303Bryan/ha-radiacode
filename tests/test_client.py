@@ -1925,6 +1925,8 @@ def test_incomplete_configuration_retires_link_and_backs_off_until_optional_retr
             "retry_in_seconds": client_module._CONFIGURATION_RETRY_INTERVAL,
             "firmware_check_pending": True, "schema_usable": False,
             "event_schema": False, "firmware_version": None, "record_layout": [],
+            "automatic_attempts": 1, "automatic_attempt_limit": 3,
+            "automatic_paused": False,
         }
 
         # Recovery must perform small init/drain commands and deliver live

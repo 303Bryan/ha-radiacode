@@ -145,6 +145,7 @@ _STALL_TIMEOUT = 2.0
 _DISCONNECT_TIMEOUT = 5.0
 _TEMPERATURE_INTERVAL = 60.0
 _CONFIGURATION_RETRY_INTERVAL = 300.0
+_CONFIGURATION_MAX_ATTEMPTS = 3
 _COMMAND_HISTORY_LIMIT = 20
 
 # Bound the entire establishment operation, including connector retries and
@@ -217,6 +218,7 @@ class RadiaCodeBLEClient:
         self._configuration_address: Optional[str] = None
         self._configuration_loaded = False
         self._configuration_next_retry = 0.0
+        self._configuration_attempts = 0
         self._group4_format: Optional[Group4Format] = None
         self._event_schema = None
         self._record_layout: list[dict] = []
@@ -295,6 +297,7 @@ class RadiaCodeBLEClient:
         if self._configuration_address != address:
             self._configuration_loaded = False
             self._configuration_next_retry = 0.0
+            self._configuration_attempts = 0
             self._group4_format = None
             self._event_schema = None
             self._record_layout = []
@@ -608,6 +611,9 @@ class RadiaCodeBLEClient:
             "spectrum_format_source": self._spectrum_format_source,
             "configuration": {
                 "loaded": self._configuration_loaded,
+                "automatic_attempts": self._configuration_attempts,
+                "automatic_attempt_limit": _CONFIGURATION_MAX_ATTEMPTS,
+                "automatic_paused": self.configuration_automatic_paused,
                 "firmware_check_pending": self._firmware_check_pending,
                 "schema_usable": self._record_schema_usable,
                 "event_schema": self._event_schema is not None,
@@ -618,7 +624,8 @@ class RadiaCodeBLEClient:
                 ),
                 "retry_in_seconds": (
                     max(0.0, round(self._configuration_next_retry - time.monotonic(), 3))
-                    if not self._configuration_loaded else None
+                    if not self._configuration_loaded and not self.configuration_automatic_paused
+                    else None
                 ),
             },
         }
@@ -746,6 +753,7 @@ class RadiaCodeBLEClient:
             _LOGGER.debug("Firmware changed %s -> %s; invalidating protocol metadata", self._firmware_version, firmware)
             self._configuration_loaded = False
             self._configuration_next_retry = 0.0
+            self._configuration_attempts = 0
             self._configuration_generation = -1
             self._group4_format = None
             self._event_schema = None
@@ -781,10 +789,19 @@ class RadiaCodeBLEClient:
             return config
 
     @property
-    def configuration_retry_due(self) -> bool:
-        """Whether optional schema discovery is due after its bounded backoff."""
+    def configuration_automatic_paused(self) -> bool:
+        """Keep repeated optional bulk failures from retiring healthy links."""
         return (
             not self._configuration_loaded
+            and self._configuration_attempts >= _CONFIGURATION_MAX_ATTEMPTS
+        )
+
+    @property
+    def configuration_retry_due(self) -> bool:
+        """Whether discovery is due within its per-device/firmware budget."""
+        return (
+            not self._configuration_loaded
+            and not self.configuration_automatic_paused
             and time.monotonic() >= self._configuration_next_retry
         )
 
@@ -796,6 +813,7 @@ class RadiaCodeBLEClient:
         self._configuration_generation = self._connection_generation
         self._configuration_loaded = True
         self._configuration_next_retry = 0.0
+        self._configuration_attempts = 0
 
     async def refresh_record_configuration(self) -> None:
         """Retry optional schema discovery without running on the primary path."""
@@ -805,7 +823,21 @@ class RadiaCodeBLEClient:
 
     async def _refresh_record_configuration_locked(self) -> None:
         self._configuration_next_retry = time.monotonic() + _CONFIGURATION_RETRY_INTERVAL
-        raw = await self._read_vs_locked(VS.CONFIGURATION)
+        # Consume the attempt before awaiting so cancellation cannot re-arm an
+        # indefinite retry loop. Reconnect/user disconnect preserve this budget;
+        # a new client, detector address or confirmed firmware change resets it.
+        self._configuration_attempts += 1
+        try:
+            raw = await self._read_vs_locked(VS.CONFIGURATION)
+        except (Exception, asyncio.CancelledError):
+            if self.configuration_automatic_paused:
+                _LOGGER.warning(
+                    "Automatic configuration discovery paused after %s unsuccessful "
+                    "attempts; radiation polling continues. Reload the integration "
+                    "to retry after checking the Bluetooth connection",
+                    self._configuration_attempts,
+                )
+            raise
         config = raw.decode("cp1251", errors="replace")
         self._cache_record_configuration(config)
         # Do not replace an observed spectrum encoding with a missing default.
