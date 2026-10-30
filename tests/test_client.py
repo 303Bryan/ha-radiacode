@@ -1814,9 +1814,17 @@ def test_complete_record_configuration_is_cached_across_same_address_reconnect(
         assert first.disconnect_count == 1
         assert len(second.requests) == 4
         assert _virtual_string_requests(client_module, second) == [client_module.VS.DATA_BUF]
+        # Retained schema cannot decode counters on a new link until firmware
+        # is confirmed (or configuration is obtained on the current link).
+        assert (await client.get_data()).dose_counter is None
+        async def version_reply(cmd, args=b""):
+            assert cmd == client_module.CMD.GET_VERSION
+            return struct.pack("<HH", 1, 4) + bytes([0]) + struct.pack("<HH", 14, 4) + bytes([0])
+        monkeypatch.setattr(client, "_execute", version_reply)
+        assert await client.get_firmware_version() == "4.14"
         assert (await client.get_data()).dose_counter == pytest.approx(1060.09)
         assert _virtual_string_requests(client_module, second) == [
-            client_module.VS.DATA_BUF, client_module.VS.DATA_BUF,
+            client_module.VS.DATA_BUF, client_module.VS.DATA_BUF, client_module.VS.DATA_BUF,
         ]
         assert client.transport_diagnostics["configuration"]["group4_schema"] == (
             client_module.Group4Format.DOSE_COUNTER.value
@@ -1903,6 +1911,8 @@ def test_incomplete_configuration_retires_link_and_backs_off_until_optional_retr
         assert client.transport_diagnostics["configuration"] == {
             "loaded": False, "group4_schema": None,
             "retry_in_seconds": client_module._CONFIGURATION_RETRY_INTERVAL,
+            "firmware_check_pending": True, "schema_usable": False,
+            "event_schema": False, "firmware_version": None,
         }
 
         # Recovery must perform small init/drain commands and deliver live

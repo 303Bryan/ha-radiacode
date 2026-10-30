@@ -183,6 +183,11 @@ async def async_setup_entry(
     )
     entities.append(RadiaCodeRSSISensor(coordinator, entry))
     entities.append(RadiaCodeRadiationAlarmSensor(coordinator, entry))
+    entities.extend(RadiaCodeRadiationAlarmSensor(coordinator, entry, kind)
+                    for kind in (SENSOR_COUNT_RATE, SENSOR_ACCUMULATED_DOSE))
+    entities.extend(RadiaCodeQualitySensor(coordinator, entry, kind)
+                    for kind in (SENSOR_DOSE_RATE, SENSOR_COUNT_RATE))
+    entities.append(RadiaCodeTemperatureStatusSensor(coordinator, entry))
     entities.append(RadiaCodeSpectrumSensor(coordinator, entry))
     async_add_entities(entities)
 
@@ -216,10 +221,13 @@ class RadiaCodeSensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Distinguish a cached measurement from current acquisition."""
         freshness = self.coordinator.runtime_status["freshness"]
-        return {
+        attrs = {
             "using_cached_measurement": freshness["using_cached_measurement"],
             "measurement_age_seconds": freshness["age_seconds"],
         }
+        if self.entity_description.key in (SENSOR_DOSE_RATE, SENSOR_COUNT_RATE):
+            attrs.update(self.coordinator.radiation_quality(self.entity_description.key))
+        return attrs
 
     @property
     def native_value(self) -> Optional[float]:
@@ -354,10 +362,69 @@ class RadiaCodeRSSISensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity)
 _uR_PER_uSv = 100.0
 
 
+class RadiaCodeQualitySensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
+    """Calculated quality of the currently accepted radiation sample."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["normal", "reduced"]
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:check-decagram-outline"
+
+    def __init__(self, coordinator, entry, kind: str) -> None:
+        super().__init__(coordinator)
+        self._kind = kind
+        self._attr_name = "Dose Rate Quality" if kind == SENSOR_DOSE_RATE else "Count Rate Quality"
+        self._attr_unique_id = f"{entry.data[CONF_ADDRESS]}-{kind}_quality"
+        self._attr_device_info = build_device_info(entry.data[CONF_ADDRESS], entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]))
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.measurement_available
+
+    @property
+    def native_value(self) -> Optional[str]:
+        quality = self.coordinator.radiation_quality(self._kind)["quality"]
+        return None if quality == "unknown" else quality
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return self.coordinator.radiation_quality(self._kind)
+
+
+class RadiaCodeTemperatureStatusSensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
+    """Calculated detector-temperature range status with a bounded lifetime."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Detector Temperature Status"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["normal", "low", "high"]
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:thermometer-alert"
+    _unrecorded_attributes = frozenset({"temperature_age_seconds"})
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.data[CONF_ADDRESS]}-detector_temperature_status"
+        self._attr_device_info = build_device_info(entry.data[CONF_ADDRESS], entry.data.get(CONF_NAME, entry.data[CONF_ADDRESS]))
+
+    @property
+    def available(self) -> bool:
+        return not self.coordinator.user_disconnected
+
+    @property
+    def native_value(self) -> Optional[str]:
+        return self.coordinator.detector_temperature_status["status"]
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return self.coordinator.detector_temperature_status
+
+
 class RadiaCodeRadiationAlarmSensor(
     CoordinatorEntity[RadiaCodeCoordinator], SensorEntity
 ):
-    """Enum sensor mirroring the device's dose rate alarm state.
+    """Calculated threshold level, not the firmware's latched alarm state.
 
     States: "No Alarm", "L1 Alarm", "L2 Alarm" — compared against the
     device's own L1/L2 dose rate thresholds, so HA alarms even if device
@@ -377,10 +444,17 @@ class RadiaCodeRadiationAlarmSensor(
         self,
         coordinator: RadiaCodeCoordinator,
         entry: ConfigEntry,
+        kind: str = SENSOR_DOSE_RATE,
     ) -> None:
         super().__init__(coordinator)
+        self._kind = kind
+        key, self._attr_name = {
+            SENSOR_DOSE_RATE: (SENSOR_RADIATION_ALARM, "Radiation Alarm"),
+            SENSOR_COUNT_RATE: ("count_rate_alarm", "Count Rate Alarm"),
+            SENSOR_ACCUMULATED_DOSE: ("accumulated_dose_alarm", "Accumulated Dose Alarm"),
+        }[kind]
         self._attr_unique_id = (
-            f"{entry.data[CONF_ADDRESS]}-{SENSOR_RADIATION_ALARM}"
+            f"{entry.data[CONF_ADDRESS]}-{key}"
         )
         self._attr_device_info = build_device_info(
             entry.data[CONF_ADDRESS],
@@ -390,6 +464,8 @@ class RadiaCodeRadiationAlarmSensor(
     @property
     def available(self) -> bool:
         """Keep the alarm state available for the same bounded sample lease."""
+        if self._kind == SENSOR_ACCUMULATED_DOSE:
+            return self.coordinator.accumulated_dose_fresh
         return self.coordinator.measurement_available
 
     def _thresholds_uSv_h(self) -> tuple[Optional[float], Optional[float]]:
@@ -397,11 +473,16 @@ class RadiaCodeRadiationAlarmSensor(
         if self.coordinator.data is None:
             return None, None
         settings = self.coordinator.data.settings
-        l1 = settings.dr_alarm_level1
-        l2 = settings.dr_alarm_level2
+        prefix, scale = {
+            SENSOR_DOSE_RATE: ("dr", _uR_PER_uSv),
+            SENSOR_COUNT_RATE: ("cr", 10.0),
+            SENSOR_ACCUMULATED_DOSE: ("ds", _uR_PER_uSv),
+        }[self._kind]
+        l1 = getattr(settings, f"{prefix}_alarm_level1")
+        l2 = getattr(settings, f"{prefix}_alarm_level2")
         return (
-            l1 / _uR_PER_uSv if l1 is not None else None,
-            l2 / _uR_PER_uSv if l2 is not None else None,
+            l1 / scale if l1 is not None else None,
+            l2 / scale if l2 is not None else None,
         )
 
     @property
@@ -409,7 +490,7 @@ class RadiaCodeRadiationAlarmSensor(
         """Return the current alarm state."""
         if self.coordinator.data is None:
             return None
-        dose_rate = self.coordinator.data.sensors.dose_rate
+        dose_rate = getattr(self.coordinator.data.sensors, self._kind)
         l1, l2 = self._thresholds_uSv_h()
         if dose_rate is None or l1 is None or l1 <= 0:
             return None
@@ -433,11 +514,12 @@ class RadiaCodeRadiationAlarmSensor(
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose the alarm thresholds for automations."""
         l1, l2 = self._thresholds_uSv_h()
-        attrs: dict[str, Any] = {}
+        unit = {SENSOR_DOSE_RATE: "usv_h", SENSOR_COUNT_RATE: "cps", SENSOR_ACCUMULATED_DOSE: "usv"}[self._kind]
+        attrs: dict[str, Any] = {"source": "calculated", "measurement": self._kind}
         if l1 is not None:
-            attrs["level1_threshold_usv_h"] = l1
+            attrs[f"level1_threshold_{unit}"] = l1
         if l2 is not None:
-            attrs["level2_threshold_usv_h"] = l2
+            attrs[f"level2_threshold_{unit}"] = l2
         return attrs
 
 

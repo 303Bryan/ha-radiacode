@@ -37,8 +37,10 @@ async def async_get_config_entry_diagnostics(
     coordinator: RadiaCodeCoordinator = hass.data[DOMAIN][entry.entry_id]
     data = coordinator.data
     sensors = asdict(data.sensors) if data is not None else None
-    if sensors is not None and sensors.get("measurement_time") is not None:
-        sensors["measurement_time"] = sensors["measurement_time"].isoformat()
+    if sensors is not None:
+        for key in ("measurement_time", "temperature_time", "accumulated_dose_time"):
+            if sensors.get(key) is not None:
+                sensors[key] = sensors[key].isoformat()
 
     return {
         "entry": {

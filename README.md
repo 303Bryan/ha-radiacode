@@ -46,6 +46,24 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 
 The **Radiation Alarm** sensor shows `No Alarm`, `L1 Alarm`, or `L2 Alarm` based on the device's own L1/L2 dose rate thresholds (exposed as attributes in µSv/h). The comparison runs in HA, so automations trigger even when device sound/vibration are off.
 
+**1XX beta 2026.10.4b1:** Count Rate Alarm and Accumulated Dose Alarm provide the same calculated levels for their respective measurements. All three expose `source: calculated`; these values do not represent the device's latched, silenced, or acknowledged alarm state. Accumulated Dose Alarm expires after 180 seconds without an advancing dose record. Existing Radiation Alarm entity IDs are preserved.
+
+### Measurement quality and detector temperature (1XX beta)
+
+Dose Rate and Count Rate include `uncertainty_percent`, `quality`, `quality_reasons`, and `quality_source: calculated`. The new **Dose Rate Quality** and **Count Rate Quality** diagnostic sensors make the same status available to automations. A fresh low-confidence reading remains visible; this feature does not smooth or clamp measurements.
+
+| Quality | Meaning |
+|---------|---------|
+| `normal` | Uncertainty is within its limit and a recent detector-temperature observation supports normal quality |
+| `reduced` | Dose-rate uncertainty exceeds 30%, count-rate uncertainty exceeds 50%, or detector temperature exceeds 45 °C |
+| `unknown` | Required information is missing, stale, or inconclusive; the quality entities show HA's unknown state |
+
+The error percentage follows the exact accepted reading. Raw-data fallbacks lack an uncertainty field. Temperature evidence expires after 180 seconds; missing data is never treated as zero error. At exactly 45 °C, quality remains unknown because the manufacturer manual and release notes differ at that boundary. Values below −20 °C also cannot establish normal quality. MCU temperature is not used.
+
+**Detector Temperature Status** shows `normal`, `low` (below −20 °C), or `high` (above 45 °C), with calculated source, limits, and observation age in attributes. It becomes unknown when temperature evidence expires. Its inclusive range boundaries describe the documented temperature alarm limits, while the quality indicator handles the separate 45 °C uncertainty described above.
+
+Firmware is checked again after reconnect with bounded retries. A confirmed change refreshes dependent configuration and cached metadata. Recent raw device-event codes/flags are available in downloadable diagnostics; their acknowledgment semantics are not inferred. These changes target 1XX detectors; ZERO support remains a separate update. See the [beta testing guide](docs/1xx-quality-beta-2026-10-30.md).
+
 ### Gamma Spectrum
 
 The **Spectrum** sensor exposes the device's gamma spectrum (default: refreshed every 60 s, configurable in the options). Its state is the total count; the full per-channel histogram and the channel→keV calibration live in attributes:

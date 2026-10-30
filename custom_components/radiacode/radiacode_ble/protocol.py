@@ -222,6 +222,31 @@ class RareData:
     flags: int = 0         # opaque device status flags
 
 
+@dataclass(frozen=True)
+class EventField:
+    """An optional event channel validated against the device declaration."""
+    channel_id: int
+    fmt: str
+    scale: float = 1.0
+    offset: float = 0.0
+
+
+@dataclass(frozen=True)
+class EventSchema:
+    """Ordered optional channels; fixed fields are event, mask and flags."""
+    fields: tuple[EventField, ...]
+
+
+@dataclass
+class DeviceEvent:
+    """Device event with opaque code/flags and values in declared native units."""
+    dt: datetime.datetime
+    code: int
+    channel_mask: int
+    flags: int
+    values: dict[int, float]
+
+
 @dataclass
 class RadiaCodeData:
     """Aggregated sensor readings for one poll cycle.
@@ -241,6 +266,11 @@ class RadiaCodeData:
     measurement_flags: Optional[int] = None
     dose_counter: Optional[float] = None  # independent non-resettable counter, µSv
     data_buf_status: dict = field(default_factory=dict)
+    dose_rate_error_percent: Optional[float] = None
+    count_rate_error_percent: Optional[float] = None
+    real_time_flags: Optional[int] = None
+    temperature_time: Optional[datetime.datetime] = None
+    accumulated_dose_time: Optional[datetime.datetime] = None
 
 
 def compute_hardness(
@@ -628,9 +658,104 @@ def parse_group4_format(config_text: str) -> Optional[Group4Format]:
     return None
 
 
+def parse_event_schema(config_text: str) -> Optional[EventSchema]:
+    """Validate the declared 1XX event layout, never infer it from packet size.
+
+    Only the documented fixed prefix, mask expression and known channel
+    types/scales are accepted. Optional channel order comes from the device.
+    Duplicate keys/groups, unknown fields/types and missing values fail closed.
+    """
+    groups: list[dict] = []
+    group = channel = None
+    in_data = False
+    data_sections = 0
+    try:
+        for raw in config_text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith((";", "#")):
+                continue
+            section = re.fullmatch(r"(\[+)([^\[\]]+)(\]+)", line)
+            if section:
+                if len(section[1]) != len(section[3]):
+                    return None
+                depth, name = len(section[1]), section[2].strip()
+                if depth == 1:
+                    in_data = name == "DataStructure"
+                    data_sections += int(in_data)
+                    group = channel = None
+                elif in_data and depth == 2:
+                    group = {"name": name, "channels": []}
+                    groups.append(group)
+                    channel = None
+                elif in_data and depth == 3 and group is not None:
+                    channel = {"name": name}
+                    group["channels"].append(channel)
+                elif in_data:
+                    return None
+                continue
+            if line.startswith("["):
+                return None
+            if not in_data or group is None:
+                continue
+            key, sep, value = line.partition("=")
+            if not sep:
+                return None
+            target = channel if channel is not None else group
+            key = key.strip()
+            if key in target:
+                return None
+            target[key] = value.strip()
+        matching = [g for g in groups if int(g.get("Id", "-1"), 0) == 7]
+        if data_sections != 1 or len(matching) != 1:
+            return None
+        group = matching[0]
+        channels = group["channels"]
+        if group["name"] != "GRP_Event" or not 3 <= len(channels) <= 11:
+            return None
+        expected_prefix = [("CHN_Event", 14, 2), ("CHN_EventChnMsk", 15, 2), ("CHN_Flags", 0, 4)]
+        for ch, expected in zip(channels, expected_prefix):
+            if (ch["name"], int(ch["Id"], 0), int(ch["DType"], 0)) != expected:
+                return None
+        for ch in (channels[0], channels[2]):
+            if int(ch.get("Expr", "0"), 0) != 0 or "P1" in ch or "P2" in ch:
+                return None
+        mask = channels[1]
+        if (int(mask["Expr"], 0), float(mask["P1"]), float(mask["P2"])) != (1, 8.0, 7.0):
+            return None
+        known = {
+            "CHN_CountRate": (3, 1, "f", 1.0, 0.0),
+            "CHN_CountRateErr": (16, 4, "H", 0.1, 0.0),
+            "CHN_DoseRate": (4, 1, "f", 1.0, 0.0),
+            "CHN_DoseRateErr": (5, 4, "H", 0.1, 0.0),
+            "CHN_Duration": (6, 8, "I", 1.0, 0.0),
+            "CHN_Dose": (7, 1, "f", 1.0, 0.0),
+            "CHN_Temperature": (8, 5, "h", 0.01, -20.0),
+            "CHN_ChargeLevel": (9, 4, "H", 0.01, 0.0),
+        }
+        fields = []
+        seen = {0, 14, 15}
+        for ch in channels[3:]:
+            channel_id, dtype, fmt, scale, offset = known[ch["name"]]
+            if int(ch["Id"], 0) != channel_id or int(ch["DType"], 0) != dtype or channel_id in seen:
+                return None
+            expr = int(ch.get("Expr", "0"), 0)
+            if (scale, offset) == (1.0, 0.0):
+                if expr != 0 or "P1" in ch or "P2" in ch:
+                    return None
+            elif (expr, float(ch["P1"]), float(ch.get("P2", "0"))) != (1, scale, offset):
+                return None
+            seen.add(channel_id)
+            fields.append(EventField(channel_id, fmt, scale, offset))
+        return EventSchema(tuple(fields))
+    except (KeyError, ValueError, TypeError, OverflowError):
+        return None
+
+
 def decode_data_buf(
     data: bytes, base_time: datetime.datetime, diagnostics: Optional[dict] = None,
     *, group4_format: Optional[Group4Format] = None,
+    event_schema: Optional[EventSchema] = None,
+    event_schema_required: bool = False,
 ) -> list:
     """
     Decode the raw DATA_BUF byte stream into a list of typed records.
@@ -702,7 +827,7 @@ def decode_data_buf(
                 ))
 
             elif eid == 0 and gid == 3:     # GRP_RareData
-                _dur, dose, temperature, charge_level, flags = buf.unpack("<IfHHH")
+                _dur, dose, temperature, charge_level, flags = buf.unpack("<IfhHH")
                 records.append(RareData(
                     dt=dt,
                     dose=dose,
@@ -730,6 +855,22 @@ def decode_data_buf(
 
             elif eid == 0 and gid == 7:     # GRP_Event (skip)
                 event_code, channel_mask, flags = buf.unpack("<BBH")
+                if event_schema is not None:
+                    if channel_mask >> len(event_schema.fields):
+                        stop_reason = f"unsupported_event_mask(mask=0x{channel_mask:02x})"
+                        stop_offset = record_offset
+                        break
+                    values = {}
+                    for bit, channel in enumerate(event_schema.fields):
+                        if channel_mask & (1 << bit):
+                            (value,) = buf.unpack("<" + channel.fmt)
+                            values[channel.channel_id] = value * channel.scale + channel.offset
+                    records.append(DeviceEvent(dt, event_code, channel_mask, flags, values))
+                    continue
+                if event_schema_required:
+                    stop_reason = "unsupported_event_schema"
+                    stop_offset = record_offset
+                    break
                 # A captured count alarm (mask 3) and documented dose alarms
                 # (mask 12) carry a float reading plus a uint16 error after
                 # the fixed fields. See cdump/radiacode issue #45. Other mask
@@ -939,6 +1080,7 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     dose_counter: Optional[float] = None
     dose_counter_time: Optional[datetime.datetime] = None
     rare_time: Optional[datetime.datetime] = None
+    events: list[dict] = []
     measurement: Optional[RealTimeData | RawData | DoseRateDB] = None
     measurement_key = None
     priorities = {RealTimeData: 2, RawData: 1, DoseRateDB: 0}
@@ -989,6 +1131,14 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
             if dose_counter_time is None or r.dt >= dose_counter_time:
                 dose_counter = r.dose_uR / 100.0  # µR → µSv
                 dose_counter_time = r.dt
+        elif isinstance(r, DeviceEvent):
+            events.append({
+                "device_time": r.dt.isoformat(), "code": r.code,
+                "channel_mask": r.channel_mask, "flags": r.flags,
+                # Preserve native-unit values without asserting alarm meanings.
+                "channels": {str(k): v for k, v in r.values.items() if math.isfinite(v)},
+            })
+            events = events[-5:]
 
     if measurement is not None:
         dose_rate = measurement.dose_rate * _R_TO_uSv  # R/h → µSv/h
@@ -1003,9 +1153,52 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
         measurement_time=measurement.dt if measurement is not None else None,
         measurement_type=type(measurement).__name__ if measurement is not None else None,
         measurement_flags=getattr(measurement, "flags", None),
+        dose_rate_error_percent=_measurement_error(getattr(measurement, "dose_rate_err", None)),
+        count_rate_error_percent=_measurement_error(getattr(measurement, "count_rate_err", None)),
+        real_time_flags=getattr(measurement, "real_time_flags", None),
+        temperature_time=rare_time,
+        accumulated_dose_time=rare_time,
         dose_counter=dose_counter,
-        data_buf_status={"measurement_candidates": candidates},
+        data_buf_status={"measurement_candidates": candidates, "device_events": events},
     )
+
+
+def _measurement_error(value: Optional[float]) -> Optional[float]:
+    """A missing/invalid uncertainty does not invalidate a finite measurement."""
+    return value if value is not None and math.isfinite(value) and value >= 0 else None
+
+
+def measurement_quality(
+    error_percent: Optional[float], limit: float, temperature: Optional[float],
+) -> dict:
+    """Calculated 1XX quality; firmware alarm/acknowledgment bits stay opaque.
+
+    Temperature must already have passed the caller's freshness check. At
+    exactly 45 C the manufacturer manual and release notes differ, so do not
+    infer normal quality. Missing evidence never establishes normal quality.
+    """
+    reasons = []
+    reduced = False
+    error = _measurement_error(error_percent)
+    if error is None:
+        reasons.append("uncertainty_unknown")
+    elif error > limit:
+        reasons.append("statistical_uncertainty")
+        reduced = True
+    if temperature is None or not math.isfinite(temperature):
+        reasons.append("temperature_unknown")
+    elif temperature > 45:
+        reasons.append("high_temperature")
+        reduced = True
+    elif temperature == 45:
+        reasons.append("temperature_boundary")
+    elif temperature < -20:
+        reasons.append("low_temperature")
+    return {
+        "quality": "reduced" if reduced else "unknown" if reasons else "normal",
+        "quality_reasons": reasons,
+        "quality_source": "calculated",
+    }
 
 
 # ── Gamma spectrum ────────────────────────────────────────────────────────────

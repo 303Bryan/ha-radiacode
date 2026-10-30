@@ -97,6 +97,7 @@ from .protocol import (
     extract_sensor_values,
     decode_serial_number,
     parse_firmware_version,
+    parse_event_schema,
 )
 
 
@@ -216,11 +217,16 @@ class RadiaCodeBLEClient:
         self._configuration_loaded = False
         self._configuration_next_retry = 0.0
         self._group4_format: Optional[Group4Format] = None
+        self._event_schema = None
+        self._configuration_generation = -1
+        self._firmware_check_pending = False
 
         # Temperature changes slowly; DATA_BUF also carries RareData samples.
         # Avoid a separate register command on every regular sensor poll.
         self._temperature: Optional[float] = None
         self._last_temperature_read: Optional[float] = None
+        self._temperature_observed_monotonic: Optional[float] = None
+        self._temperature_record_time: Optional[datetime.datetime] = None
 
     # ── Connection management ─────────────────────────────────────────────────
 
@@ -288,6 +294,9 @@ class RadiaCodeBLEClient:
             self._configuration_loaded = False
             self._configuration_next_retry = 0.0
             self._group4_format = None
+            self._event_schema = None
+            self._temperature = None
+            self._temperature_observed_monotonic = None
             if self._configuration_address is not None:
                 self._spectrum_format_version = 0
                 self._spectrum_format_loaded = False
@@ -298,6 +307,8 @@ class RadiaCodeBLEClient:
         self._seq = 0
         self._reset_notification_state()
         self._connection_generation += 1
+        self._firmware_check_pending = True
+        self._temperature_record_time = None
         self._initialization_steps = []
         # Preserve the optional temperature deadline across reconnects.
         # Repeated failed temperature reads must not force every poll to
@@ -603,6 +614,10 @@ class RadiaCodeBLEClient:
             "spectrum_format_source": self._spectrum_format_source,
             "configuration": {
                 "loaded": self._configuration_loaded,
+                "firmware_check_pending": self._firmware_check_pending,
+                "schema_usable": self._record_schema_usable,
+                "event_schema": self._event_schema is not None,
+                "firmware_version": self._firmware_version,
                 "group4_schema": (
                     self._group4_format.value if self._group4_format is not None else None
                 ),
@@ -625,6 +640,19 @@ class RadiaCodeBLEClient:
 
     # ── High-level API ────────────────────────────────────────────────────────
 
+    @property
+    def _record_schema_usable(self) -> bool:
+        """A previous link's schema awaits firmware confirmation after reconnect."""
+        return (
+            not self._firmware_check_pending
+            or self._configuration_generation == self._connection_generation
+        )
+
+    @property
+    def temperature_observed_monotonic(self) -> Optional[float]:
+        """Last actual temperature observation, never the last failed attempt."""
+        return self._temperature_observed_monotonic
+
     async def get_data(self) -> RadiaCodeData:
         """
         Poll the device and return the latest sensor readings.
@@ -646,14 +674,22 @@ class RadiaCodeBLEClient:
         raw = await self._read_vs(VS.DATA_BUF)
         status = {}
         records = decode_data_buf(
-            raw, self._base_time, diagnostics=status, group4_format=self._group4_format
+            raw, self._base_time, diagnostics=status,
+            group4_format=self._group4_format if self._record_schema_usable else None,
+            event_schema=self._event_schema if self._record_schema_usable else None,
+            event_schema_required=self._configuration_loaded or self._firmware_check_pending,
         )
         buf_data = extract_sensor_values(records)
         buf_data.data_buf_status.update(status)
         now = asyncio.get_running_loop().time()
-        if buf_data.temperature is not None:
+        if (
+            buf_data.temperature is not None and buf_data.temperature_time is not None
+            and (self._temperature_record_time is None or buf_data.temperature_time > self._temperature_record_time)
+        ):
             self._temperature = buf_data.temperature
             self._last_temperature_read = now
+            self._temperature_observed_monotonic = now
+            self._temperature_record_time = buf_data.temperature_time
         # Preserve provenance: a cached register temperature is not a new
         # RareData sample. The coordinator owns the displayed-value cache.
         result = buf_data
@@ -699,6 +735,7 @@ class RadiaCodeBLEClient:
         values = await self._read_vsfr_batch([VSFR.TEMP_degC])
         if values[0] is not None:
             self._temperature = values[0]
+            self._temperature_observed_monotonic = now
         return self._temperature
 
     async def get_serial_number(self) -> str:
@@ -711,12 +748,22 @@ class RadiaCodeBLEClient:
         payload = await self._execute(CMD.GET_VERSION)
         firmware = parse_firmware_version(payload)
         if firmware != "unknown" and self._firmware_version is not None and firmware != self._firmware_version:
-            _LOGGER.debug("Firmware changed %s -> %s; clearing cached spectrum encoding", self._firmware_version, firmware)
+            _LOGGER.debug("Firmware changed %s -> %s; invalidating protocol metadata", self._firmware_version, firmware)
+            self._configuration_loaded = False
+            self._configuration_next_retry = 0.0
+            self._configuration_generation = -1
+            self._group4_format = None
+            self._event_schema = None
             self._spectrum_format_loaded = False
             self._spectrum_format_authoritative = False
             self._spectrum_format_source = None
+            self._temperature = None
+            self._temperature_observed_monotonic = None
+            self._temperature_record_time = None
+            self._last_temperature_read = None
         if firmware != "unknown":
             self._firmware_version = firmware
+            self._firmware_check_pending = False
         return firmware
 
     async def get_settings(self) -> RadiaCodeSettings:
@@ -748,6 +795,8 @@ class RadiaCodeBLEClient:
     def _cache_record_configuration(self, config: str) -> None:
         """Unknown complete schemas remain unknown; do not infer from payloads."""
         self._group4_format = parse_group4_format(config)
+        self._event_schema = parse_event_schema(config)
+        self._configuration_generation = self._connection_generation
         self._configuration_loaded = True
         self._configuration_next_retry = 0.0
 

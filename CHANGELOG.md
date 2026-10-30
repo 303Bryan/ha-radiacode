@@ -11,6 +11,28 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.10.4b1] — 2026-10-30
+
+Beta for testing the 1XX measurement-quality and alarm improvements prompted by Windows 1.16.01 / firmware 4.15. ZERO support is not included.
+
+### Added
+- **Measurement uncertainty and quality** — Dose Rate and Count Rate expose `uncertainty_percent`, calculated `quality`, reasons, and opaque measurement flags. New Dose Rate Quality and Count Rate Quality diagnostic sensors show `normal`, `reduced`, or unknown. Error metadata stays attached to the accepted measurement; reduced accuracy does not suppress the reading or renew its freshness.
+- **Calculated alarm/status entities** — Count Rate Alarm and Accumulated Dose Alarm compare readings against the device's configured thresholds. Detector Temperature Status reports `normal`, `low`, or `high`; it becomes unknown after 180 seconds without an actual observation. Accumulated Dose Alarm becomes unavailable after its own 180-second observation window. These are calculated conditions, not firmware acknowledgment or latched alarm states.
+- **Device event diagnostics** — retain up to ten recent decoded events with opaque codes/flags and native-unit channel values. Event-only traffic cannot renew radiation freshness.
+
+### Fixed
+- **Additional alarm-event payloads** — use a validated device configuration to decode optional and combined event channels, including temperature, so later live readings in the same buffer remain readable. Reject malformed/unknown schemas, undeclared mask bits, and truncated events. Existing limited legacy layouts remain available before configuration is known.
+- **Temperature below −20 °C** — decode the documented signed temperature field instead of wrapping a negative raw value into a large positive temperature.
+- **Firmware changes after reconnect** — recheck firmware with bounded optional maintenance; a previous connection's record schema waits for confirmation. On a detected change, invalidate configuration, spectrum metadata/snapshot, register directory, settings, and temperature freshness, then refresh them. Reconnect failures retain existing backoff and primary-poll priority.
+
+### Validation and limits
+- Protocol, transport, coordinator, entity and HA runtime regressions cover the new behavior. New alarm fixtures are synthetic representations of the inspected manufacturer schema, not captured firmware 4.15 alarms.
+- Quality uses the documented 30% dose-rate / 50% count-rate uncertainty limits and detector temperature. Missing/stale evidence produces unknown quality; exactly 45 °C remains unknown because the manufacturer documents disagree at that boundary. MCU temperature is not used.
+- Dose/count values, numerical unit conversions, BLE chunking, write mode, and transfer deadlines are unchanged. No fix for proxy notification loss is claimed. No firmware flashing or ZERO support is added.
+- Physical 1XX / firmware 4.15 and Bluetooth-proxy testing is pending. See [beta test guide](docs/1xx-quality-beta-2026-10-30.md) for the checks and diagnostics to collect.
+
+---
+
 ## [2026.10.3] — 2026-10-11
 
 Promotes the tested RC5 implementation to stable. This release includes the cumulative connectivity, measurement-selection, dose-counter and spectrum-status improvements from RC1–RC5; runtime behavior is unchanged from RC5.
