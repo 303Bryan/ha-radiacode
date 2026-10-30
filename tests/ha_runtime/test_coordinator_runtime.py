@@ -45,6 +45,7 @@ async def runtime(tmp_path, monkeypatch):
     hass = HomeAssistant(str(tmp_path))
     # Enum sensors consult the registry during platform setup. Load the same
     # registries HA initializes before integrations, with empty test storage.
+    dr.async_setup(hass)
     await dr.async_load(hass, load_empty=True)
     await er.async_load(hass, load_empty=True)
     entry = ConfigEntry(
