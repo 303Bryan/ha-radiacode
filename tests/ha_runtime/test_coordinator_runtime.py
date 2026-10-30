@@ -20,6 +20,7 @@ pytest_asyncio = pytest.importorskip("pytest_asyncio")
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
@@ -42,6 +43,10 @@ from custom_components.radiacode.diagnostics import async_get_config_entry_diagn
 async def runtime(tmp_path, monkeypatch):
     """Use real coordinator/entity lifecycles without starting Bluetooth."""
     hass = HomeAssistant(str(tmp_path))
+    # Enum sensors consult the registry during platform setup. Load the same
+    # registries HA initializes before integrations, with empty test storage.
+    await dr.async_load(hass, load_empty=True)
+    await er.async_load(hass, load_empty=True)
     entry = ConfigEntry(
         data={"address": "AA:BB:CC:DD:EE:FF", "name": "Test detector"},
         options={"poll_interval": 5, "spectrum_interval": 60},
