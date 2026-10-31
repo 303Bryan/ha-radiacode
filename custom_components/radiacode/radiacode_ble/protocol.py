@@ -707,7 +707,7 @@ def describe_record_layout(config_text: str) -> list[dict]:
             if unit in {"uR", "µR", "μR", "urem", "µrem", "μrem", "R", "rem", "R/h", "rem/h", "%", "°C", "cps", "s"}:
                 target[key] = unit
             continue
-        if not sep or key not in {"Id", "DType", "Expr", "P1", "P2"}:
+        if not sep or key not in {"Id", "DType", "RType", "Expr", "P1", "P2"}:
             continue
         try:
             number = float(value) if key in {"P1", "P2"} else int(value.strip(), 0)
@@ -716,6 +716,149 @@ def describe_record_layout(config_text: str) -> list[dict]:
         except (ValueError, OverflowError):
             continue
     return groups
+
+
+@dataclass(frozen=True)
+class ScalarField:
+    """A validated 1XX scalar channel, in its declared wire order."""
+
+    channel_id: int
+    fmt: str
+    scale: float
+    offset: float
+
+
+@dataclass(frozen=True)
+class ScalarSchema:
+    fields: tuple[ScalarField, ...]
+
+    def read(self, buf: _Buf) -> dict[int, float | int]:
+        values = {}
+        for field in self.fields:
+            (value,) = buf.unpack("<" + field.fmt)
+            values[field.channel_id] = (
+                value if (field.scale, field.offset) == (1, 0)
+                else value * field.scale + field.offset
+            )
+        return values
+
+
+def parse_scalar_schemas(config_text: str) -> dict[int, Optional[ScalarSchema]]:
+    """Read supported scalar groups without guessing widths from firmware.
+
+    An explicitly unsupported declaration blocks that group. Undeclared groups
+    retain the documented legacy fallback. Malformed structure blocks all four
+    groups. Limits apply before parsing, including to unrelated declarations.
+    RType describes the represented value; DType determines the wire width.
+    """
+    blocked = dict.fromkeys(range(4))
+    if isinstance(config_text, str) and not config_text.strip():
+        return {}  # Older devices may return no declarations at all.
+    if not isinstance(config_text, str) or not 0 < len(config_text) <= 65536:
+        return blocked
+    groups = []
+    group = channel = None
+    in_data = False
+    data_sections = 0
+    try:
+        for raw in config_text.splitlines():
+            if len(raw) > 2048:
+                return blocked
+            line = raw.strip()
+            if not line or line.startswith((";", "#")):
+                continue
+            section = re.fullmatch(r"(\[+)([^\[\]]+)(\]+)", line)
+            if section:
+                if len(section[1]) != len(section[3]):
+                    return blocked
+                depth, name = len(section[1]), section[2].strip()
+                if depth == 1:
+                    in_data = name == "DataStructure"
+                    data_sections += int(in_data)
+                    group = channel = None
+                elif in_data and depth == 2:
+                    if len(groups) >= 32:
+                        return blocked
+                    group = {"name": name, "channels": []}
+                    groups.append(group)
+                    channel = None
+                elif in_data and depth == 3 and group is not None:
+                    if len(group["channels"]) >= 32:
+                        return blocked
+                    channel = {"name": name}
+                    group["channels"].append(channel)
+                elif in_data:
+                    return blocked
+                continue
+            if line.startswith("["):
+                return blocked
+            if not in_data or group is None:
+                continue
+            key, sep, value = line.partition("=")
+            target = channel if channel is not None else group
+            key = key.strip()
+            if not sep or key in target:
+                return blocked
+            target[key] = value.strip()
+        group_ids = [int(g["Id"], 0) for g in groups]
+        if data_sections != 1:
+            return blocked if any(g in range(4) for g in group_ids) else {}
+        if len(set(group_ids)) != len(group_ids) or any(not 0 <= g <= 255 for g in group_ids):
+            return blocked if any(g in range(4) for g in group_ids) else {}
+        # name, ID, wire types, representation, scale, offset, unit
+        known = {
+            "CHN_CountRate": (3, {1: "f"}, 1, 1, 0, "cps"),
+            "CHN_DoseRate": (4, {1: "f"}, 1, 1, 0, "R/h"),
+            "CHN_CountRateErr": (16, {4: "H"}, 1, .1, 0, "%"),
+            "CHN_DoseRateErr": (5, {4: "H"}, 1, .1, 0, "%"),
+            "CHN_Flags": (0, {4: "H"}, 8, 1, 0, None),
+            "CHN_RealTimeFlags": (17, {2: "B", 4: "H"}, 8, 1, 0, None),
+            "CHN_Count": (2, {8: "I"}, 8, 1, 0, None),
+            "CHN_Duration": (6, {8: "I"}, 8, 1, 0, "s"),
+            "CHN_Dose": (7, {1: "f"}, 1, 1, 0, "R"),
+            "CHN_Temperature": (8, {5: "h"}, 1, .01, -20, "°C"),
+            "CHN_ChargeLevel": (9, {4: "H"}, 1, .01, 0, "%"),
+        }
+        expected = {
+            0: ("GRP_RealTimeData", {3, 4, 16, 5, 0, 17}),
+            1: ("GRP_RawData", {3, 4}),
+            2: ("GRP_DoseRateDB", {2, 3, 4, 5, 0}),
+            3: ("GRP_RareData", {6, 7, 8, 9, 0}),
+        }
+        result = {}
+        for group, gid in zip(groups, group_ids):
+            if gid not in expected:
+                # A known name under an unexpected ID is contradictory.
+                if group["name"] in {item[0] for item in expected.values()}:
+                    return blocked
+                continue
+            result[gid] = None
+            name, ids = expected[gid]
+            if group["name"] != name:
+                continue
+            fields = []
+            try:
+                for ch in group["channels"]:
+                    cid, types, rtype, scale, offset, unit = known[ch["name"]]
+                    fmt = types[int(ch["DType"], 0)]
+                    if int(ch["Id"], 0) != cid or int(ch["RType"], 0) != rtype:
+                        raise ValueError("Unsupported channel")
+                    if unit is not None and ch.get("Unit", "").strip('"').split("|", 1)[0].strip() != unit:
+                        raise ValueError("Unsupported unit")
+                    expr = int(ch.get("Expr", "0"), 0)
+                    if (scale, offset) == (1, 0):
+                        if expr != 0 or "P1" in ch or "P2" in ch:
+                            raise ValueError("Unexpected expression")
+                    elif (expr, float(ch["P1"]), float(ch.get("P2", "0"))) != (1, scale, offset):
+                        raise ValueError("Unsupported expression")
+                    fields.append(ScalarField(cid, fmt, scale, offset))
+                if len(fields) == len(ids) and {f.channel_id for f in fields} == ids:
+                    result[gid] = ScalarSchema(tuple(fields))
+            except (KeyError, ValueError, TypeError, OverflowError):
+                continue
+        return result
+    except (KeyError, ValueError, TypeError, OverflowError):
+        return blocked
 
 
 def parse_event_schema(config_text: str) -> Optional[EventSchema]:
@@ -816,6 +959,7 @@ def decode_data_buf(
     *, group4_format: Optional[Group4Format] = None,
     event_schema: Optional[EventSchema] = None,
     event_schema_required: bool = False,
+    scalar_schemas: Optional[dict[int, Optional[ScalarSchema]]] = None,
 ) -> list:
     """
     Decode the raw DATA_BUF byte stream into a list of typed records.
@@ -855,6 +999,22 @@ def decode_data_buf(
         record_group_counts[group_key] = record_group_counts.get(group_key, 0) + 1
 
         try:
+            if eid == 0 and scalar_schemas is not None and gid in scalar_schemas:
+                schema = scalar_schemas[gid]
+                if schema is None:
+                    stop_reason = f"unsupported_scalar_schema(group={gid})"
+                    stop_offset = record_offset
+                    break
+                values = schema.read(buf)
+                if gid == 0:
+                    records.append(RealTimeData(dt, values[3], values[16], values[4], values[5], values[0], values[17]))
+                elif gid == 1:
+                    records.append(RawData(dt, values[3], values[4]))
+                elif gid == 2:
+                    records.append(DoseRateDB(dt, values[2], values[3], values[4], values[5], values[0]))
+                elif gid == 3:
+                    records.append(RareData(dt, values[7], values[9], values[8], values[0]))
+                continue
             if eid == 0 and gid == 0:       # GRP_RealTimeData
                 count_rate, dose_rate, cps_err, dr_err, flags, rt_flags = buf.unpack("<ffHHHB")
                 records.append(RealTimeData(

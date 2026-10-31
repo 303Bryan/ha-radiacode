@@ -54,7 +54,9 @@ the old BleakClient:
 
 import asyncio
 import datetime
+import hashlib
 import logging
+import re
 import struct
 import time
 from collections import Counter, deque
@@ -99,6 +101,7 @@ from .protocol import (
     parse_firmware_version,
     parse_event_schema,
     describe_record_layout,
+    parse_scalar_schemas,
 )
 
 
@@ -222,6 +225,9 @@ class RadiaCodeBLEClient:
         self._group4_format: Optional[Group4Format] = None
         self._event_schema = None
         self._record_layout: list[dict] = []
+        self._scalar_schemas: dict = {}
+        self._configuration_text: Optional[str] = None
+        self._configuration_source: Optional[str] = None
         self._configuration_generation = -1
         self._firmware_check_pending = False
 
@@ -295,6 +301,9 @@ class RadiaCodeBLEClient:
 
         address = ble_device.address.upper()
         if self._configuration_address != address:
+            self._configuration_text = None
+            self._configuration_source = None
+            self._scalar_schemas = {}
             self._configuration_loaded = False
             self._configuration_next_retry = 0.0
             self._configuration_attempts = 0
@@ -618,6 +627,8 @@ class RadiaCodeBLEClient:
                 "schema_usable": self._record_schema_usable,
                 "event_schema": self._event_schema is not None,
                 "record_layout": self._record_layout,
+                "source": self._configuration_source,
+                "scalar_groups": {str(gid): schema is not None for gid, schema in self._scalar_schemas.items()},
                 "firmware_version": self._firmware_version,
                 "group4_schema": (
                     self._group4_format.value if self._group4_format is not None else None
@@ -680,6 +691,10 @@ class RadiaCodeBLEClient:
             group4_format=self._group4_format if self._record_schema_usable else None,
             event_schema=self._event_schema if self._record_schema_usable else None,
             event_schema_required=self._configuration_loaded or self._firmware_check_pending,
+            scalar_schemas=(
+                self._scalar_schemas if self._record_schema_usable
+                else dict.fromkeys(self._scalar_schemas)
+            ),
         )
         buf_data = extract_sensor_values(records)
         buf_data.data_buf_status.update(status)
@@ -752,6 +767,9 @@ class RadiaCodeBLEClient:
         if firmware != "unknown" and self._firmware_version is not None and firmware != self._firmware_version:
             _LOGGER.debug("Firmware changed %s -> %s; invalidating protocol metadata", self._firmware_version, firmware)
             self._configuration_loaded = False
+            self._configuration_text = None
+            self._configuration_source = None
+            self._scalar_schemas = {}
             self._configuration_next_retry = 0.0
             self._configuration_attempts = 0
             self._configuration_generation = -1
@@ -807,6 +825,9 @@ class RadiaCodeBLEClient:
 
     def _cache_record_configuration(self, config: str) -> None:
         """Unknown complete schemas remain unknown; do not infer from payloads."""
+        self._scalar_schemas = parse_scalar_schemas(config)
+        self._configuration_text = config if len(config) <= 65536 else None
+        self._configuration_source = "device"
         self._group4_format = parse_group4_format(config)
         self._event_schema = parse_event_schema(config)
         self._record_layout = describe_record_layout(config)
@@ -814,6 +835,64 @@ class RadiaCodeBLEClient:
         self._configuration_loaded = True
         self._configuration_next_retry = 0.0
         self._configuration_attempts = 0
+
+    def configuration_snapshot(self, serial: str) -> Optional[dict]:
+        """Export only supported, complete 1XX metadata after firmware checks.
+
+        This is an integrity check, not an authenticity claim. Storage is private
+        to HA; raw configuration and identity are never added to diagnostics.
+        """
+        if (
+            not isinstance(serial, str) or not re.fullmatch(r"RC-1\d\d[A-Z]?-\d{1,16}", serial)
+            or not self._configuration_text or not self._configuration_loaded
+            or self._firmware_check_pending or not self._firmware_version
+            or not self._configuration_address
+            or not all(self._scalar_schemas.get(gid) is not None for gid in (0, 3))
+            or any(schema is None for schema in self._scalar_schemas.values())
+        ):
+            return None
+        return {
+            "parser_version": 1, "address": self._configuration_address,
+            "serial": serial, "firmware": self._firmware_version,
+            "configuration": self._configuration_text,
+            "sha256": hashlib.sha256(self._configuration_text.encode("utf-8")).hexdigest(),
+        }
+
+    def restore_configuration_snapshot(self, snapshot: dict, serial: str) -> bool:
+        """Apply a stored schema only after this detector's identity is verified."""
+        if (
+            not isinstance(snapshot, dict) or self._firmware_check_pending
+            or not self._firmware_version or self._firmware_version == "unknown"
+            or not self._configuration_address
+        ):
+            return False
+        config = snapshot.get("configuration")
+        if not isinstance(config, str) or not 0 < len(config) <= 65536:
+            return False
+        try:
+            digest = hashlib.sha256(config.encode("utf-8")).hexdigest()
+        except UnicodeError:
+            return False
+        if (
+            type(snapshot.get("parser_version")) is not int or snapshot["parser_version"] != 1
+            or snapshot.get("address") != self._configuration_address
+            or snapshot.get("serial") != serial
+            or snapshot.get("firmware") != self._firmware_version
+            or not isinstance(serial, str) or not re.fullmatch(r"RC-1\d\d[A-Z]?-\d{1,16}", serial)
+            or snapshot.get("sha256") != digest
+        ):
+            return False
+        schemas = parse_scalar_schemas(config)
+        if not all(schemas.get(gid) is not None for gid in (0, 3)) or any(s is None for s in schemas.values()):
+            return False
+        self._cache_record_configuration(config)
+        self._configuration_source = "storage"
+        try:
+            self._apply_spectrum_configuration(config.encode("cp1251"))
+        except (ValueError, UnicodeError):
+            # Spectrum format has its own validation; do not infer authority.
+            self._spectrum_format_authoritative = False
+        return True
 
     async def refresh_record_configuration(self) -> None:
         """Retry optional schema discovery without running on the primary path."""

@@ -11,6 +11,23 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.10.4b4] — 2026-10-31
+
+Use validated 1XX device declarations and retain verified configuration across reloads, while preserving the bounded transport and freshness behavior from earlier builds.
+
+### Changed
+- Decode supported realtime, raw, dose-rate database and rare records in their declared channel order. Validate IDs, wire and representation types, units and known scaling before use. Explicit declarations can select one-byte or two-byte realtime flags; firmware version alone cannot select a layout. Unsupported declared groups stop decoding, and absent declarations retain the legacy fallback.
+- Persist complete supported configurations in private, atomic Home Assistant storage. Reuse requires matching address, serial number, confirmed firmware, parser version and SHA-256. Reject corrupt or mismatched caches, invalidate after confirmed firmware changes, and remove storage when the integration is deleted. Cache reads/writes run in maintenance, and storage errors do not retire the Bluetooth connection.
+- Add sanitized configuration source, scalar-group validation results, representation types and storage status to diagnostics. Raw configuration and cache identity are not included.
+
+### Validation and limits
+- Regression coverage includes legacy equivalence, both explicitly declared flag widths, channel reordering, record-tail decoding, every truncated-buffer boundary, unsupported declarations, identity/version/hash rejection, reloads and storage failures. Real HA storage round trips and firmware invalidation are exercised in the pinned runtime matrix.
+- The newest capture contains 227 complete measurement-buffer responses and 18 failed measurement-buffer transfers. There are 207 accepted fresh readings, with a largest observed gap of 37.674 seconds. Configuration and spectrum limits pause as intended; two measurement-buffer failures occur after both pauses. This does not establish a healthy physical link.
+- No complete firmware 4.15 configuration has yet been captured from the affected detector. The new layouts are covered by explicitly labeled synthetic fixtures, not represented as hardware-verified. One successful configuration read is still needed to activate/cache the actual layout. Preserve strict frame validation, command deadlines, write-mode defaults and three-attempt limits. ZERO remains out of scope.
+- See [build comparison and field acceptance steps](docs/beta4-stability-review-2026-10-31.md). This is a testing beta; stable promotion requires fresh evidence from this exact candidate.
+
+---
+
 ## [2026.10.4b3] — 2026-10-30
 
 Bound automatic configuration discovery after the longer stationary 1XX field test.

@@ -1927,6 +1927,7 @@ def test_incomplete_configuration_retires_link_and_backs_off_until_optional_retr
             "event_schema": False, "firmware_version": None, "record_layout": [],
             "automatic_attempts": 1, "automatic_attempt_limit": 3,
             "automatic_paused": False,
+            "source": None, "scalar_groups": {},
         }
 
         # Recovery must perform small init/drain commands and deliver live

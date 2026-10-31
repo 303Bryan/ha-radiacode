@@ -67,6 +67,7 @@ from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -141,6 +142,13 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         )
 
         self._entry_id = entry.entry_id
+        self._configuration_store = Store(
+            hass, 1, f"{DOMAIN}.{entry.entry_id}.configuration",
+            private=True, atomic_writes=True,
+        )
+        self._configuration_store_loaded = False
+        self._stored_configuration = None
+        self._configuration_storage_error = False
         # Spectrum polling cadence in elapsed seconds. 0 disables.
         spectrum_interval = entry.options.get(
             CONF_SPECTRUM_INTERVAL, DEFAULT_SPECTRUM_INTERVAL
@@ -509,7 +517,14 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     @property
     def transport_status(self) -> dict:
         """Expose the client's bounded transport diagnostics for downloads."""
-        return self._client.transport_diagnostics
+        return {
+            **self._client.transport_diagnostics,
+            "configuration_storage": {
+                "checked": self._configuration_store_loaded,
+                "saved": self._stored_configuration is not None,
+                "error": self._configuration_storage_error,
+            },
+        }
 
     async def async_shutdown(self) -> None:
         """Stop polling and tear down the BLE connection.
@@ -922,6 +937,37 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     async def _refresh_protocol_configuration(self) -> None:
         """Schema retries share maintenance backoff and primary-poll priority."""
         await self._client.refresh_record_configuration()
+        await self._async_save_configuration()
+
+    async def _async_restore_configuration(self) -> None:
+        """Read private storage once, after a successful identity exchange."""
+        if self._configuration_store_loaded:
+            return
+        self._configuration_store_loaded = True
+        try:
+            snapshot = await self._configuration_store.async_load()
+            if snapshot is not None:
+                if self._client.restore_configuration_snapshot(snapshot, self._serial_number):
+                    self._stored_configuration = snapshot
+                else:
+                    await self._configuration_store.async_remove()
+        except Exception:  # noqa: BLE001
+            self._configuration_storage_error = True
+            _LOGGER.warning("Could not restore protocol configuration cache; device discovery remains available")
+
+    async def _async_save_configuration(self) -> None:
+        """Persist validated metadata without making storage a BLE failure."""
+        snapshot = self._client.configuration_snapshot(self._serial_number)
+        if snapshot is None or snapshot == self._stored_configuration:
+            return
+        try:
+            await self._configuration_store.async_save(snapshot)
+        except Exception:  # noqa: BLE001
+            self._configuration_storage_error = True
+            _LOGGER.warning("Could not save protocol configuration cache; current connection can continue")
+        else:
+            self._stored_configuration = snapshot
+            self._configuration_storage_error = False
 
     def _publish_maintenance_cache(self) -> None:
         """Notify optional changes without rewriting radiation freshness/cadence."""
@@ -999,6 +1045,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 raise ValueError("Firmware version unavailable")
             self._identity_connection = connection
             if previous_firmware is not None and self._fw_version != previous_firmware:
+                # Recheck the stored identity/version once on a confirmed change.
+                self._configuration_store_loaded = False
+                self._stored_configuration = None
                 self._sfr_file = None
                 self._sfr_attempted = False
                 self._next_sfr_read = 0.0
@@ -1019,6 +1068,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 self._next_diagnostics_read = self._next_temperature_read = 0.0
                 self._schedule_status_expiry()
                 self._publish_maintenance_cache()
+            await self._async_restore_configuration()
             _LOGGER.debug(
                 "Device identity: serial=%s  firmware=%s",
                 self._serial_number,
