@@ -1035,6 +1035,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         try:
             connection = self._connection_count
             previous_firmware = self._fw_version
+            previous_build = getattr(self._client, "firmware_build", None)
             if self._serial_number is None:
                 self._serial_number = await self._client.get_serial_number()
             self._check_user_disconnected("after serial number")
@@ -1044,7 +1045,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 self._fw_version = previous_firmware
                 raise ValueError("Firmware version unavailable")
             self._identity_connection = connection
-            if previous_firmware is not None and self._fw_version != previous_firmware:
+            if previous_firmware is not None and (
+                self._fw_version != previous_firmware
+                or getattr(self._client, "firmware_build", None) != previous_build
+            ):
                 # Recheck the stored identity/version once on a confirmed change.
                 self._configuration_store_loaded = False
                 self._stored_configuration = None

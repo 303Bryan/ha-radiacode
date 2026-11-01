@@ -99,10 +99,12 @@ from .protocol import (
     extract_sensor_values,
     decode_serial_number,
     parse_firmware_version,
+    parse_firmware_build,
     parse_event_schema,
     describe_record_layout,
     parse_scalar_schemas,
 )
+from .firmware_profiles import PROFILES, RECORD_CONFIGURATION
 
 
 class RadiaCodeInitError(Exception):
@@ -216,8 +218,11 @@ class RadiaCodeBLEClient:
         self._spectrum_format_authoritative: bool = False
         self._spectrum_format_source: Optional[str] = None
         self._firmware_version: Optional[str] = None
-        # Cache only a complete, actual device configuration. Reconnects to
-        # the same detector retain it; optional failures back off across links.
+        self._firmware_build: Optional[str] = None
+        self._serial_number: Optional[str] = None
+        self._firmware_profile: Optional[dict] = None
+        # Complete device declarations and exact known-build record profiles
+        # have distinct provenance. Reconnects require firmware confirmation.
         self._configuration_address: Optional[str] = None
         self._configuration_loaded = False
         self._configuration_next_retry = 0.0
@@ -301,6 +306,9 @@ class RadiaCodeBLEClient:
 
         address = ble_device.address.upper()
         if self._configuration_address != address:
+            self._serial_number = None
+            self._firmware_build = None
+            self._firmware_profile = None
             self._configuration_text = None
             self._configuration_source = None
             self._scalar_schemas = {}
@@ -630,6 +638,8 @@ class RadiaCodeBLEClient:
                 "source": self._configuration_source,
                 "scalar_groups": {str(gid): schema is not None for gid, schema in self._scalar_schemas.items()},
                 "firmware_version": self._firmware_version,
+                "firmware_build": self._firmware_build,
+                "firmware_profile": self._firmware_profile,
                 "group4_schema": (
                     self._group4_format.value if self._group4_format is not None else None
                 ),
@@ -658,7 +668,10 @@ class RadiaCodeBLEClient:
         """A previous link's schema awaits firmware confirmation after reconnect."""
         return (
             not self._firmware_check_pending
-            or self._configuration_generation == self._connection_generation
+            or (
+                self._configuration_generation == self._connection_generation
+                and self._configuration_source != "firmware_profile"
+            )
         )
 
     @property
@@ -758,17 +771,27 @@ class RadiaCodeBLEClient:
     async def get_serial_number(self) -> str:
         """Return the device serial number string, e.g. 'RC-103-012345'."""
         raw = await self._read_vs(VS.SERIAL_NUMBER)
-        return decode_serial_number(raw)
+        self._serial_number = decode_serial_number(raw)
+        return self._serial_number
+
+    @property
+    def firmware_build(self) -> Optional[str]:
+        """Application build confirmed by the latest complete version reply."""
+        return self._firmware_build
 
     async def get_firmware_version(self) -> str:
         """Return the firmware version string, e.g. '4.8'."""
         payload = await self._execute(CMD.GET_VERSION)
         firmware = parse_firmware_version(payload)
-        if firmware != "unknown" and self._firmware_version is not None and firmware != self._firmware_version:
-            _LOGGER.debug("Firmware changed %s -> %s; invalidating protocol metadata", self._firmware_version, firmware)
+        build = parse_firmware_build(payload)
+        if firmware != "unknown" and self._firmware_version is not None and (
+            firmware != self._firmware_version or build != self._firmware_build
+        ):
+            _LOGGER.debug("Firmware version/build changed; invalidating protocol metadata")
             self._configuration_loaded = False
             self._configuration_text = None
             self._configuration_source = None
+            self._firmware_profile = None
             self._scalar_schemas = {}
             self._configuration_next_retry = 0.0
             self._configuration_attempts = 0
@@ -785,8 +808,47 @@ class RadiaCodeBLEClient:
             self._last_temperature_read = None
         if firmware != "unknown":
             self._firmware_version = firmware
+            self._firmware_build = build
             self._firmware_check_pending = False
+            self._apply_firmware_profile()
+        else:
+            self._firmware_check_pending = True
         return firmware
+
+    def _apply_firmware_profile(self) -> None:
+        """Use a vendor layout only for an exact model/version/target-build match.
+
+        GET_VERSION describes the application, unlike an update-image query.
+        No extra BLE commands, settings writes or flash reads are introduced.
+        A complete device configuration (including unsupported declarations)
+        remains authoritative. Profiles are not exported as device snapshots.
+        """
+        if self._configuration_loaded or self._firmware_check_pending:
+            return
+        serial = re.fullmatch(r"(RC-1\d\d[A-Z]?)-\d{1,16}", self._serial_number or "")
+        if serial is None:
+            return
+        profile = next((p for p in PROFILES if (
+            p.model, p.version, p.build
+        ) == (serial[1], self._firmware_version, self._firmware_build)), None)
+        if profile is None:
+            return
+        # Guard the embedded declaration with the same validators as device data.
+        schemas = parse_scalar_schemas(RECORD_CONFIGURATION)
+        if (
+            hashlib.sha256(RECORD_CONFIGURATION.encode("utf-8")).hexdigest() != profile.layout_sha256
+            or not all(schemas.get(gid) is not None for gid in (0, 1, 2, 3, 5))
+            or parse_group4_format(RECORD_CONFIGURATION) is None
+            or parse_event_schema(RECORD_CONFIGURATION) is None
+        ):
+            return
+        self._cache_record_configuration(RECORD_CONFIGURATION)
+        self._configuration_source = "firmware_profile"
+        self._firmware_profile = {
+            "name": profile.name,
+            "container_sha256": profile.container_sha256,
+            "layout_sha256": profile.layout_sha256,
+        }
 
     async def get_settings(self) -> RadiaCodeSettings:
         """Read all device settings via a single VSFR batch read.
@@ -828,6 +890,7 @@ class RadiaCodeBLEClient:
         self._scalar_schemas = parse_scalar_schemas(config)
         self._configuration_text = config if len(config) <= 65536 else None
         self._configuration_source = "device"
+        self._firmware_profile = None
         self._group4_format = parse_group4_format(config)
         self._event_schema = parse_event_schema(config)
         self._record_layout = describe_record_layout(config)
@@ -847,13 +910,15 @@ class RadiaCodeBLEClient:
             or not self._configuration_text or not self._configuration_loaded
             or self._firmware_check_pending or not self._firmware_version
             or not self._configuration_address
+            or self._configuration_source == "firmware_profile"
             or not all(self._scalar_schemas.get(gid) is not None for gid in (0, 3))
             or any(schema is None for schema in self._scalar_schemas.values())
         ):
             return None
         return {
-            "parser_version": 1, "address": self._configuration_address,
+            "parser_version": 2, "address": self._configuration_address,
             "serial": serial, "firmware": self._firmware_version,
+            "firmware_build": self._firmware_build,
             "configuration": self._configuration_text,
             "sha256": hashlib.sha256(self._configuration_text.encode("utf-8")).hexdigest(),
         }
@@ -874,10 +939,12 @@ class RadiaCodeBLEClient:
         except UnicodeError:
             return False
         if (
-            type(snapshot.get("parser_version")) is not int or snapshot["parser_version"] != 1
+            type(snapshot.get("parser_version")) is not int or snapshot["parser_version"] != 2
             or snapshot.get("address") != self._configuration_address
             or snapshot.get("serial") != serial
             or snapshot.get("firmware") != self._firmware_version
+            or "firmware_build" not in snapshot
+            or snapshot["firmware_build"] != self._firmware_build
             or not isinstance(serial, str) or not re.fullmatch(r"RC-1\d\d[A-Z]?-\d{1,16}", serial)
             or snapshot.get("sha256") != digest
         ):

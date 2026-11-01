@@ -204,11 +204,11 @@ class RawData:
 class DoseCounterData:
     """Independent non-resettable dose counter (DATA_BUF gid=4).
 
-    Firmware 4.13+ exposes this separate history counter in increments of
-    10 µR. It must not replace RareData's accumulated dose since reset.
+    The validated declaration supplies the native micro-dose unit (legacy µR
+    or µrem). It must not replace RareData's accumulated dose since reset.
     """
     dt: datetime.datetime
-    dose_uR: int           # independent counter, unsigned 32-bit µR
+    dose_uR: int           # compatibility name; unsigned native micro-dose units
     flags: int = 0         # opaque device history flags
 
 
@@ -216,7 +216,7 @@ class DoseCounterData:
 class RareData:
     """Periodic status snapshot (data_buf gid=3, appears ~every minute)."""
     dt: datetime.datetime
-    dose: float            # accumulated dose since reset, R
+    dose: float            # accumulated dose since reset, declared R or rem
     charge_level: float    # battery, 0–100 percent
     temperature: float     # device temperature, °C
     flags: int = 0         # opaque device status flags
@@ -252,12 +252,13 @@ class RadiaCodeData:
     """Aggregated sensor readings for one poll cycle.
 
     All dose values are already converted to µSv-based units by
-    extract_sensor_values (raw floating readings are in Roentgen; the
-    independent integer dose counter is in micro-Roentgen).
+    extract_sensor_values using the supported device dose conventions. New
+    firmware declares rem/µrem; older firmware uses R/µR labels. The latter
+    conversion is retained for compatibility, not a universal R/rem equivalence.
     """
-    dose_rate: Optional[float]         # µSv/h   (converted from R/h)
+    dose_rate: Optional[float]         # µSv/h, converted from native dose units
     count_rate: Optional[float]        # CPS      (paired with dose-rate sample)
-    accumulated_dose: Optional[float]  # µSv      (converted from R)
+    accumulated_dose: Optional[float]  # µSv, converted from native dose units
     battery: Optional[float]           # percent  (from RareData)
     temperature: Optional[float]       # °C       (from RareData)
     hardness: Optional[float] = None   # dimensionless (µR/h per cps), derived
@@ -642,7 +643,7 @@ def parse_group4_format(config_text: str) -> Optional[Group4Format]:
         group["name"] == "GRP_DoseCounter"
         and [(item["name"], item["id"], item["dtype"]) for item in channels]
         == [("CHN_DoseCounter", 22, 8), ("CHN_Flags", 0, 4)]
-        and channels[0]["unit"] in ("uR", "µR", "μR")
+        and channels[0]["unit"] in ("uR", "µR", "μR", "urem", "µrem", "μrem")
         # The app applies Expr=1 using P1/P2 before returning channel values.
         # Our supported counter and flags are raw integers without that scale.
         and all(item["expr"] in (None, 0) for item in channels)
@@ -667,12 +668,13 @@ def describe_record_layout(config_text: str) -> list[dict]:
     """
     known_groups = {"GRP_" + name for name in (
         "RealTimeData", "RawData", "DoseRateDB", "RareData", "DoseCounter",
-        "UserData", "ScheduleData", "AccelData", "Event", "RawCountRate", "RawDoseRate",
+        "UserData", "ScheduleData", "MeasData", "AccelData", "Event", "RawCountRate", "RawDoseRate",
     )}
     known_channels = {"CHN_" + name for name in (
         "CountRate", "DoseRate", "CountRateErr", "DoseRateErr", "Flags",
         "RealTimeFlags", "Count", "Duration", "Dose", "Temperature",
         "ChargeLevel", "DoseCounter", "Event", "EventChnMsk",
+        "MeasTime", "MeasSID", "MeasCount", "MeasFlags",
     )}
     groups: list[dict] = []
     in_data = False
@@ -726,6 +728,7 @@ class ScalarField:
     fmt: str
     scale: float
     offset: float
+    unit: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -747,11 +750,12 @@ def parse_scalar_schemas(config_text: str) -> dict[int, Optional[ScalarSchema]]:
     """Read supported scalar groups without guessing widths from firmware.
 
     An explicitly unsupported declaration blocks that group. Undeclared groups
-    retain the documented legacy fallback. Malformed structure blocks all four
+    retain the documented legacy fallback. Malformed structure blocks all supported
     groups. Limits apply before parsing, including to unrelated declarations.
     RType describes the represented value; DType determines the wire width.
     """
-    blocked = dict.fromkeys(range(4))
+    supported_groups = {0, 1, 2, 3, 5}
+    blocked = dict.fromkeys(sorted(supported_groups))
     if isinstance(config_text, str) and not config_text.strip():
         return {}  # Older devices may return no declarations at all.
     if not isinstance(config_text, str) or not 0 < len(config_text) <= 65536:
@@ -802,28 +806,33 @@ def parse_scalar_schemas(config_text: str) -> dict[int, Optional[ScalarSchema]]:
             target[key] = value.strip()
         group_ids = [int(g["Id"], 0) for g in groups]
         if data_sections != 1:
-            return blocked if any(g in range(4) for g in group_ids) else {}
+            return blocked if any(g in supported_groups for g in group_ids) else {}
         if len(set(group_ids)) != len(group_ids) or any(not 0 <= g <= 255 for g in group_ids):
-            return blocked if any(g in range(4) for g in group_ids) else {}
+            return blocked if any(g in supported_groups for g in group_ids) else {}
         # name, ID, wire types, representation, scale, offset, unit
         known = {
             "CHN_CountRate": (3, {1: "f"}, 1, 1, 0, "cps"),
-            "CHN_DoseRate": (4, {1: "f"}, 1, 1, 0, "R/h"),
+            "CHN_DoseRate": (4, {1: "f"}, 1, 1, 0, ("R/h", "rem/h")),
             "CHN_CountRateErr": (16, {4: "H"}, 1, .1, 0, "%"),
             "CHN_DoseRateErr": (5, {4: "H"}, 1, .1, 0, "%"),
             "CHN_Flags": (0, {4: "H"}, 8, 1, 0, None),
             "CHN_RealTimeFlags": (17, {2: "B", 4: "H"}, 8, 1, 0, None),
             "CHN_Count": (2, {8: "I"}, 8, 1, 0, None),
             "CHN_Duration": (6, {8: "I"}, 8, 1, 0, "s"),
-            "CHN_Dose": (7, {1: "f"}, 1, 1, 0, "R"),
+            "CHN_Dose": (7, {1: "f"}, 1, 1, 0, ("R", "rem")),
             "CHN_Temperature": (8, {5: "h"}, 1, .01, -20, "°C"),
             "CHN_ChargeLevel": (9, {4: "H"}, 1, .01, 0, "%"),
+            "CHN_MeasTime": (23, {4: "H"}, 4, 1, 0, "s"),
+            "CHN_MeasSID": (24, {2: "B"}, 2, 1, 0, None),
+            "CHN_MeasCount": (25, {2: "B"}, 2, 1, 0, None),
+            "CHN_MeasFlags": (26, {2: "B"}, 2, 1, 0, None),
         }
         expected = {
             0: ("GRP_RealTimeData", {3, 4, 16, 5, 0, 17}),
             1: ("GRP_RawData", {3, 4}),
             2: ("GRP_DoseRateDB", {2, 3, 4, 5, 0}),
             3: ("GRP_RareData", {6, 7, 8, 9, 0}),
+            5: ("GRP_MeasData", {3, 4, 16, 5, 23, 24, 25, 26, 0}),
         }
         result = {}
         for group, gid in zip(groups, group_ids):
@@ -834,6 +843,8 @@ def parse_scalar_schemas(config_text: str) -> dict[int, Optional[ScalarSchema]]:
                 continue
             result[gid] = None
             name, ids = expected[gid]
+            if gid == 5 and group["name"] == "GRP_ScheduleData":
+                name, ids = "GRP_ScheduleData", expected[2][1]
             if group["name"] != name:
                 continue
             fields = []
@@ -843,7 +854,9 @@ def parse_scalar_schemas(config_text: str) -> dict[int, Optional[ScalarSchema]]:
                     fmt = types[int(ch["DType"], 0)]
                     if int(ch["Id"], 0) != cid or int(ch["RType"], 0) != rtype:
                         raise ValueError("Unsupported channel")
-                    if unit is not None and ch.get("Unit", "").strip('"').split("|", 1)[0].strip() != unit:
+                    declared_unit = ch.get("Unit", "").strip('"').split("|", 1)[0].strip()
+                    allowed_units = unit if isinstance(unit, tuple) else (unit,)
+                    if unit is not None and declared_unit not in allowed_units:
                         raise ValueError("Unsupported unit")
                     expr = int(ch.get("Expr", "0"), 0)
                     if (scale, offset) == (1, 0):
@@ -851,7 +864,7 @@ def parse_scalar_schemas(config_text: str) -> dict[int, Optional[ScalarSchema]]:
                             raise ValueError("Unexpected expression")
                     elif (expr, float(ch["P1"]), float(ch.get("P2", "0"))) != (1, scale, offset):
                         raise ValueError("Unsupported expression")
-                    fields.append(ScalarField(cid, fmt, scale, offset))
+                    fields.append(ScalarField(cid, fmt, scale, offset, declared_unit or None))
                 if len(fields) == len(ids) and {f.channel_id for f in fields} == ids:
                     result[gid] = ScalarSchema(tuple(fields))
             except (KeyError, ValueError, TypeError, OverflowError):
@@ -1014,6 +1027,8 @@ def decode_data_buf(
                     records.append(DoseRateDB(dt, values[2], values[3], values[4], values[5], values[0]))
                 elif gid == 3:
                     records.append(RareData(dt, values[7], values[9], values[8], values[0]))
+                # Group 5 is consumed in its validated declared order. Session
+                # measurements are not live samples and cannot renew freshness.
                 continue
             if eid == 0 and gid == 0:       # GRP_RealTimeData
                 count_rate, dose_rate, cps_err, dr_err, flags, rt_flags = buf.unpack("<ffHHHB")
@@ -1289,8 +1304,9 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
     timestamps are device offsets anchored at connection initialization,
     not independently verified wall-clock freshness measurements.
     """
-    # Conversion factor: R/h → µSv/h  (and R → µSv).
-    _R_TO_uSv = 10_000
+    # rem/h -> µSv/h and rem -> µSv. Preserve the established conversion for
+    # older device R labels; this is not a general exposure-to-dose conversion.
+    _DOSE_TO_uSv = 10_000
 
     dose_rate: Optional[float] = None
     count_rate: Optional[float] = None
@@ -1340,7 +1356,7 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
                 _LOGGER.debug("Skipping implausible RareData record: %s", r)
                 continue
             if rare_time is None or r.dt >= rare_time:
-                accumulated_dose = r.dose * _R_TO_uSv  # R → µSv
+                accumulated_dose = r.dose * _DOSE_TO_uSv
                 battery = r.charge_level           # already 0–100 percent
                 temperature = r.temperature      # °C, already converted in decoder
                 rare_time = r.dt
@@ -1349,7 +1365,7 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
                 _LOGGER.debug("Skipping implausible DoseCounterData record: %s", r)
                 continue
             if dose_counter_time is None or r.dt >= dose_counter_time:
-                dose_counter = r.dose_uR / 100.0  # µR → µSv
+                dose_counter = r.dose_uR / 100.0  # native micro-dose -> µSv
                 dose_counter_time = r.dt
         elif isinstance(r, DeviceEvent):
             events.append({
@@ -1361,7 +1377,7 @@ def extract_sensor_values(records: list) -> RadiaCodeData:
             events = events[-5:]
 
     if measurement is not None:
-        dose_rate = measurement.dose_rate * _R_TO_uSv  # R/h → µSv/h
+        dose_rate = measurement.dose_rate * _DOSE_TO_uSv
         count_rate = measurement.count_rate
 
     return RadiaCodeData(
@@ -1611,6 +1627,38 @@ def decode_sfr_file(data: bytes) -> str:
 
 
 # ── Firmware version decoder ─────────────────────────────────────────────────
+
+def parse_firmware_build(data: bytes) -> Optional[str]:
+    """Read the application build from a complete two-tuple GET_VERSION reply.
+
+    The bootloader build is never used as the application identity. Reject
+    truncation, trailing bytes, embedded NULs and malformed dates. A known
+    version without a complete build cannot authorize a bundled profile.
+    """
+    offset = 0
+    build = None
+    for _ in range(2):
+        if len(data) < offset + 5:
+            return None
+        length = data[offset + 4]
+        offset += 5
+        if not 0 < length <= 64 or len(data) < offset + length:
+            return None
+        value = data[offset:offset + length]
+        offset += length
+        if value.endswith(b"\0"):
+            value = value[:-1]
+        try:
+            build = value.decode("ascii")
+        except UnicodeError:
+            return None
+        if not re.fullmatch(
+            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [ 0-9][0-9] "
+            r"[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}", build
+        ):
+            return None
+    return build if offset == len(data) else None
+
 
 def parse_firmware_version(data: bytes) -> str:
     """Parse a GET_VERSION response into a ``'major.minor'`` string.

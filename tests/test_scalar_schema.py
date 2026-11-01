@@ -71,7 +71,7 @@ def test_unsupported_declared_realtime_group_stops_before_publishing(protocol, o
 
 @pytest.mark.parametrize("config", [CONFIG + CONFIG, "x" * 65537, "[DataStructure]\n" + "x" * 2049])
 def test_global_schema_limits_fail_closed(protocol, config):
-    assert protocol.parse_scalar_schemas(config) == dict.fromkeys(range(4))
+    assert protocol.parse_scalar_schemas(config) == dict.fromkeys((0, 1, 2, 3, 5))
 
 
 def test_truncated_declared_records_never_publish_partial_values(protocol):

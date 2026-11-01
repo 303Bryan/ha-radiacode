@@ -12,6 +12,12 @@ from custom_components.radiacode.coordinator import RadiaCodeCoordinator
 from custom_components.radiacode.radiacode_ble.client import RadiaCodeBLEClient
 from test_coordinator_runtime import runtime
 
+
+def application_version(build):
+    boot = b"Feb  6 2023 15:49:14"
+    target = build.encode("ascii") + b"\0"
+    return struct.pack("<HHB", 0, 4, len(boot)) + boot + struct.pack("<HHB", 15, 4, len(target)) + target
+
 CONFIG = (Path(__file__).parents[1] / "fixtures/scalar-1xx.txt").read_text()
 
 
@@ -71,6 +77,43 @@ async def test_store_identity_mismatch_keeps_discovery_available(runtime):
         await c._fetch_device_identity()
         assert not c._client._configuration_loaded
         assert c._client.configuration_retry_due
+        assert await c._configuration_store.async_load() is None
+    finally:
+        await c.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_known_build_bootstrap_and_same_version_build_invalidation(runtime):
+    hass, original, _, _, _ = runtime
+    c = RadiaCodeCoordinator(hass, original.config_entry)
+    client = RadiaCodeBLEClient()
+    client._configuration_address = c.address
+    client._connection_generation = 1
+    client._firmware_check_pending = True
+    client._read_vs = AsyncMock(return_value=b"RC-103-000123\0")
+    client._execute = AsyncMock(return_value=application_version("Oct 15 2026 10:18:10"))
+    c._client = client
+    try:
+        await c._fetch_device_identity()
+        assert c._fw_version == "4.15"
+        assert c.transport_status["configuration"]["source"] == "firmware_profile"
+        assert not client.configuration_retry_due
+        # No bundled declaration is saved under the guise of a device download.
+        await c._async_save_configuration()
+        assert await c._configuration_store.async_load() is None
+        client._read_vs.assert_awaited_once()
+        assert len(client._execute.await_args_list) == 1
+        # A later complete device read can be saved with this exact target build.
+        actual = (Path(__file__).parents[1] / "fixtures/firmware/rc103-4.15-apple.txt").read_text()
+        client._cache_record_configuration(actual)
+        await c._async_save_configuration()
+        assert (await c._configuration_store.async_load())["firmware_build"] == "Oct 15 2026 10:18:10"
+        # Same numeric version, new build: invalidate memory and the real HA Store.
+        c._sfr_attempted = True
+        client._execute.return_value = application_version("Oct 15 2026 10:18:11")
+        await c._fetch_device_identity()
+        assert not client._configuration_loaded and client.configuration_retry_due
+        assert not c._sfr_attempted
         assert await c._configuration_store.async_load() is None
     finally:
         await c.async_shutdown()

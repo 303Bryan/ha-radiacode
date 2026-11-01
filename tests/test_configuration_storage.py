@@ -42,7 +42,7 @@ def test_snapshot_requires_complete_supported_schema_and_verified_firmware(clien
 
 @pytest.mark.parametrize("field,value", [
     ("serial", "RC-103-999999"), ("address", "11:22:33:44:55:66"),
-    ("firmware", "4.14"), ("parser_version", 2), ("sha256", "wrong"),
+    ("firmware", "4.14"), ("parser_version", 1), ("parser_version", 3), ("firmware_build", "wrong"), ("sha256", "wrong"),
     ("configuration", CONFIG + "corrupt"), ("configuration", None),
     ("configuration", "\ud800"), ("parser_version", True),
 ])

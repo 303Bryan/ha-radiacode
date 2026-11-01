@@ -11,6 +11,27 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.11.1b1] — 2026-11-01
+
+Decode the vendor's 1XX firmware 4.15 layouts and avoid the large configuration download when the detector reports an exact known application build. Continues the October beta series under the November calendar release line.
+
+### Fixed
+- Accept declared `rem/h`, `rem` and `urem` dose units alongside the supported legacy declarations. Preserve existing numerical conversion factors and expose the declared units in layout diagnostics.
+- Decode the declared 16-bit real-time flags, preserving following battery, temperature, accumulated-dose and counter records. The configuration-driven 8-bit legacy layout remains supported.
+- Consume group-5 measurement-session records using their validated 19-byte payload instead of the legacy 16-byte skip. Session-only traffic cannot renew live radiation freshness. Unknown or malformed declared layouts stop decoding.
+
+### Added
+- Bundled record declarations for the exact RC-101, RC-102, RC-103, RC-103G and RC-110 4.15 vendor builds. Selection requires the serial model, firmware version and complete application build timestamp from the existing `GET_VERSION` reply. It adds no BLE command and avoids automatic configuration downloads for a matching build. Unknown builds retain bounded discovery.
+- Diagnostics identify `source: firmware_profile`, the application build and the bundled layout's provenance hashes. These hashes describe the source files; they are not a live flash checksum or cryptographic attestation. A complete device configuration remains authoritative, and bundled declarations are never saved as downloaded device configuration.
+- Reconfirm profiles after reconnect and invalidate metadata on application-build changes even when the numeric firmware version is unchanged. Private configuration storage now also matches the build timestamp; older cache envelopes are discarded and rediscovered or replaced by a matching profile.
+
+### Validation and limits
+- Regression fixtures include configuration extracted from all five CRC-verified 4.15 vendor containers and a captured 1,009-byte 4.14 measurement buffer. Tests cover following-record alignment, both flag widths, unit validation, group-5 truncation, exact build/model selection, corrupt bundles, reconnects, cache precedence and same-version build changes. Generated 4.15 record streams are explicitly synthetic.
+- Complete-frame rejection, write mode, command deadlines, primary-poll priority, freshness limits and optional-transfer retry budgets remain in place. The earlier proxy/discovery failures are not claimed fixed. ZERO remains outside this release.
+- Physical 4.15/proxy acceptance remains pending. See [firmware evidence and beta test steps](docs/firmware-415-beta-2026-11-01.md).
+
+---
+
 ## [2026.10.4b4] — 2026-10-31
 
 Use validated 1XX device declarations and retain verified configuration across reloads, while preserving the bounded transport and freshness behavior from earlier builds.
