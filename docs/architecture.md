@@ -32,7 +32,7 @@ Turning off BLE Connection cancels maintenance and releases the link. Unload and
 
 Primary acquisition publishes dose/count values as a pair from one accepted sample. It prefers valid live records; raw/database records are fallbacks. Replayed or regressed timestamps, empty buffers, and suppressed outliers do not renew freshness. Device-relative timestamps and HA receipt time serve different purposes.
 
-An independent timer expires radiation availability after `max(60 seconds, 3 × poll interval)`. Cached readings can bridge a brief reconnect but cannot renew themselves. User-disabled Bluetooth makes measurements unavailable immediately. Temperature status and accumulated-dose alarm evidence have separate 180-second freshness rules.
+An independent timer expires radiation availability after `max(60 seconds, 3 × poll interval)`. Cached readings can bridge a brief reconnect but cannot renew themselves. User-disabled Bluetooth makes measurements unavailable immediately. Temperature status and accumulated-dose evidence have separate 180-second freshness rules. Accumulated Dose and its alarm share the same observation. Advancing RareData defers a fallback individual dose-register read for 60 seconds; a successful unchanged register value is a new observation. Failed reads retain the one-minute cooldown and cannot extend freshness. A successful reset establishes a bounded zero observation, and an older in-flight read cannot replace it. Dose observations never renew the live paired-rate lease.
 
 A reading more than 50× above baseline is held for confirmation. Changing this policy, unit conversions, or sample selection requires targeted regression coverage and field evidence.
 
@@ -40,7 +40,7 @@ Calculated quality and alarm states are Home Assistant interpretations. Opaque d
 
 ## Optional work and spectra
 
-Settings, identity, temperature, device diagnostics, configuration, register-directory, and spectrum operations run as bounded maintenance around primary acquisition. Preserve primary-poll priority.
+Settings, identity, temperature, accumulated dose, device diagnostics, configuration, register-directory, and spectrum operations run as bounded maintenance around primary acquisition. Preserve primary-poll priority.
 
 Incomplete spectra are rejected. The previous complete histogram and acquisition timestamp remain available; failed transfers do not create a fresh spectrum. Automatic spectrum acquisition backs off and pauses after three consecutive failures. A successful manual current-spectrum read clears the pause; an accumulated-spectrum read does not replace the current snapshot. A configured spectrum interval of zero still disables automatic acquisition.
 

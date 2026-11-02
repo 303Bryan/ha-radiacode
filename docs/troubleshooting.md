@@ -96,3 +96,9 @@ The manufacturer's manuals describe log entries being deleted after reading and 
 Device controls use the active Bluetooth link independently of radiation freshness. A connected device's known settings and reset buttons remain usable while radiation is stale. Unknown settings, an inactive link, user-disabled BLE and shutdown keep the corresponding controls unavailable. Radiation still expires on its own bounded freshness window.
 
 Connection establishment has a 30-second total deadline around connector retries, followed by separately bounded cleanup when necessary. Device initialization commands and the coordinator's single retry have their own deadlines; 30 seconds is not a bound on the complete poll/recovery cycle. See the [October 9 connectivity review](connectivity-review-2026-10-09.md) for the supplied evidence and next hardware test.
+
+## Accumulated Dose Alarm becomes unavailable every three minutes
+
+In versions before 2026.11.2b1, this alarm could expire while live dose/count readings continued because the periodic dose records were sparse. The beta adds a bounded individual dose-register read and gives the numeric Accumulated Dose sensor the same freshness rule as its alarm. Both still become unavailable after 180 seconds without a successful observation.
+
+Inspect `measurement_source`, `measurement_age_seconds`, and `fresh` on the accumulated-dose entities. Downloaded diagnostics include the same information under `runtime.accumulated_dose`, plus optional read errors under `runtime.maintenance.errors`. Export histories for Accumulated Dose, its alarm, Dose Rate, Count Rate, and BLE Connected together to distinguish a missing dose observation from a wider stream outage. See the [beta field review](alarm-availability-beta-2026-11-02.md).

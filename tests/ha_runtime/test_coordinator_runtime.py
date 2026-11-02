@@ -69,6 +69,7 @@ async def runtime(tmp_path, monkeypatch):
             measurement_flags=0x0040,
         )),
         get_temperature=AsyncMock(return_value=25.0),
+        get_accumulated_dose=AsyncMock(return_value=None),
         get_settings=AsyncMock(return_value=RadiaCodeSettings()),
         get_diagnostics=AsyncMock(return_value=RadiaCodeDiagnostics()),
         get_serial_number=AsyncMock(return_value="TEST-DEVICE"),

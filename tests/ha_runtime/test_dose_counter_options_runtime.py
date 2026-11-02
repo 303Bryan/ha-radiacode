@@ -81,14 +81,14 @@ async def test_dose_counter_publishes_separately_and_survives_dose_reset(tmp_pat
             dose_rate=0.12, count_rate=3.0, accumulated_dose=2.0,
             battery=None, temperature=None, dose_counter=1060.09,
             measurement_time=dt.datetime(2026, 1, 1, 12),
+            accumulated_dose_time=dt.datetime(2026, 1, 1, 12),
             measurement_type="RealTimeData",
         )),
         write_vsfr=AsyncMock(return_value=True), disconnect=AsyncMock(),
     )
     coordinator._client = client
-    coordinator._serial_number = "TEST-DEVICE"
-    for name in ("settings", "diagnostics", "temperature"):
-        setattr(coordinator, "_next_" + name + "_read", float("inf"))
+    # This test isolates stream publication and reset from optional register I/O.
+    coordinator._schedule_maintenance = lambda: None
     platform = EntityPlatform(
         hass=hass, logger=logging.getLogger(__name__), domain="sensor",
         platform_name="radiacode", platform=None,

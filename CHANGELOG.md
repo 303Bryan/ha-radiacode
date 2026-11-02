@@ -17,6 +17,26 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.11.2b1] — 2026-11-02
+
+Beta for consistent alarm naming and accumulated-dose availability with sparse device status records.
+
+### Fixed
+- Read the resettable accumulated-dose register individually when RareData has not refreshed it within 60 seconds. Successful unchanged readings renew only the dose observation; rejected, malformed or failed reads do not. Keep primary radiation polling ahead of this small maintenance read and retain its cooldown across reconnects.
+- Give Accumulated Dose and its alarm the same independent 180-second expiry. A successful device reset establishes a bounded zero observation; an older in-flight register read cannot undo it. Non-resettable Dose Counter data and live dose/count-rate freshness remain separate.
+- Expand accumulated-dose threshold inputs to 10,000,000 µSv so the RC-103/4.15 firmware default of 9,999,999.99 µSv fits. Existing thresholds are read from the device, never reset on upgrade.
+
+### Improved
+- Use Accumulated Dose Alarm, Count Rate Alarm and Dose Rate Alarm consistently across sensor names, threshold controls and documentation. Rename reset actions to Reset Accumulated Dose / Reset Spectrum and align count-threshold units with the cps sensor. Preserve unique IDs, existing entity IDs, alarm state strings and threshold attribute keys.
+- Expose accumulated-dose observation source, age and expiry in entity attributes and downloadable diagnostics.
+- Include a dashboard card with Sensors followed by Alarms, grouping the three alarm states and their L1/L2 thresholds. Home Assistant's standard device page does not permit a custom Alarms subsection; its Sensors/Configuration classification remains correct.
+
+### Testing and limits
+- Regression coverage includes a simulated 30-minute live stream without RareData, unchanged/zero dose reads, rejected and incomplete register replies, expiry/recovery, a reset during an in-flight read, unit conversions and existing entity identities. The pinned Home Assistant runtime matrix exercises actual entity publication and default threshold controls.
+- Physical AIR-1 testing is still required. The supplied history contains short BLE disconnects as well as the separate three-minute dose-alarm expiry pattern; this beta does not claim to eliminate proxy disconnects or implement firmware alarm acknowledgment/out-of-scale states. See [the field review and test plan](docs/alarm-availability-beta-2026-11-02.md).
+
+---
+
 ## [2026.11.1] — 2026-11-02
 
 Stable release of the tested 1XX firmware 4.15 decoding, measurement-quality and bounded-maintenance improvements. Relative to the overnight-tested beta, production changes are limited to diagnostic labels and release metadata.

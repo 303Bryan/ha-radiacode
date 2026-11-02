@@ -6,7 +6,7 @@ Sensors per device:
   • Accumulated Dose   µSv     — total dose since last reset
   • Dose Counter       µSv     — independent non-resettable counter (supported firmware)
   • Hardness           —       — spectral hardness coefficient (µR/h ÷ cps)
-  • Radiation Alarm    enum    — No Alarm / L1 Alarm / L2 Alarm
+  • Dose Rate / Count Rate / Accumulated Dose Alarm — calculated L1/L2 levels
   • Battery            %       — device battery level (diagnostic)
   • Temperature        °C      — device temperature (diagnostic)
   • RSSI               dBm     — BLE signal strength from advertisements (diagnostic)
@@ -15,6 +15,7 @@ Sensors per device:
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Optional
 
@@ -215,11 +216,15 @@ class RadiaCodeSensor(CoordinatorEntity[RadiaCodeCoordinator], SensorEntity):
     @property
     def available(self) -> bool:
         """Hold a recent sample during brief BLE recovery, then expire it."""
+        if self.entity_description.key == SENSOR_ACCUMULATED_DOSE:
+            return self.coordinator.accumulated_dose_fresh
         return self.coordinator.measurement_available
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Distinguish a cached measurement from current acquisition."""
+        if self.entity_description.key == SENSOR_ACCUMULATED_DOSE:
+            return self.coordinator.accumulated_dose_status
         freshness = self.coordinator.runtime_status["freshness"]
         attrs = {
             "using_cached_measurement": freshness["using_cached_measurement"],
@@ -427,16 +432,16 @@ class RadiaCodeRadiationAlarmSensor(
     """Calculated threshold level, not the firmware's latched alarm state.
 
     States: "No Alarm", "L1 Alarm", "L2 Alarm" — compared against the
-    device's own L1/L2 dose rate thresholds, so HA alarms even if device
-    sound/vibration are switched off.  Both thresholds (converted to
-    µSv/h) are exposed as attributes for automations.
+    device's own L1/L2 thresholds for the selected measurement, independently
+    of sound/vibration. Threshold attributes use µSv/h, cps, or µSv.
 
     Replaces the Safe/Unsafe binary sensor from 1.0.0; an enum sensor can
     represent the L1/L2 distinction directly in its state.
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Radiation Alarm"
+    _attr_name = "Dose Rate Alarm"
+    _unrecorded_attributes = frozenset({"measurement_age_seconds"})
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = [ALARM_STATE_NONE, ALARM_STATE_L1, ALARM_STATE_L2]
 
@@ -449,7 +454,7 @@ class RadiaCodeRadiationAlarmSensor(
         super().__init__(coordinator)
         self._kind = kind
         key, self._attr_name = {
-            SENSOR_DOSE_RATE: (SENSOR_RADIATION_ALARM, "Radiation Alarm"),
+            SENSOR_DOSE_RATE: (SENSOR_RADIATION_ALARM, "Dose Rate Alarm"),
             SENSOR_COUNT_RATE: ("count_rate_alarm", "Count Rate Alarm"),
             SENSOR_ACCUMULATED_DOSE: ("accumulated_dose_alarm", "Accumulated Dose Alarm"),
         }[kind]
@@ -468,8 +473,8 @@ class RadiaCodeRadiationAlarmSensor(
             return self.coordinator.accumulated_dose_fresh
         return self.coordinator.measurement_available
 
-    def _thresholds_uSv_h(self) -> tuple[Optional[float], Optional[float]]:
-        """Return the (L1, L2) alarm thresholds in µSv/h, or None if unknown."""
+    def _thresholds(self) -> tuple[Optional[float], Optional[float]]:
+        """Return (L1, L2) in the selected measurement units, or None if unknown."""
         if self.coordinator.data is None:
             return None, None
         settings = self.coordinator.data.settings
@@ -490,13 +495,13 @@ class RadiaCodeRadiationAlarmSensor(
         """Return the current alarm state."""
         if self.coordinator.data is None:
             return None
-        dose_rate = getattr(self.coordinator.data.sensors, self._kind)
-        l1, l2 = self._thresholds_uSv_h()
-        if dose_rate is None or l1 is None or l1 <= 0:
+        value = getattr(self.coordinator.data.sensors, self._kind)
+        l1, l2 = self._thresholds()
+        if value is None or not math.isfinite(value) or l1 is None or l1 <= 0:
             return None
-        if l2 is not None and l2 > 0 and dose_rate >= l2:
+        if l2 is not None and l2 > 0 and value >= l2:
             return ALARM_STATE_L2
-        if dose_rate >= l1:
+        if value >= l1:
             return ALARM_STATE_L1
         return ALARM_STATE_NONE
 
@@ -513,9 +518,11 @@ class RadiaCodeRadiationAlarmSensor(
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose the alarm thresholds for automations."""
-        l1, l2 = self._thresholds_uSv_h()
+        l1, l2 = self._thresholds()
         unit = {SENSOR_DOSE_RATE: "usv_h", SENSOR_COUNT_RATE: "cps", SENSOR_ACCUMULATED_DOSE: "usv"}[self._kind]
         attrs: dict[str, Any] = {"source": "calculated", "measurement": self._kind}
+        if self._kind == SENSOR_ACCUMULATED_DOSE:
+            attrs.update(self.coordinator.accumulated_dose_status)
         if l1 is not None:
             attrs[f"level1_threshold_{unit}"] = l1
         if l2 is not None:

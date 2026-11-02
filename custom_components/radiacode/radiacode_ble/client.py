@@ -768,6 +768,16 @@ class RadiaCodeBLEClient:
             self._temperature_observed_monotonic = now
         return self._temperature
 
+    async def get_accumulated_dose(self) -> float:
+        """Read resettable dose in µSv, using the single-register command.
+
+        DS_uR (called DS_urem on newer firmware) is rejected by batch reads
+        on supported firmware. The single-register response is validated by
+        the existing parser; failed reads must not become a zero observation.
+        This is separate from the non-resettable group-4 Dose Counter.
+        """
+        return float(await self._read_vsfr(VSFR.DS_uR)) / 100.0
+
     async def get_serial_number(self) -> str:
         """Return the device serial number string, e.g. 'RC-103-012345'."""
         raw = await self._read_vs(VS.SERIAL_NUMBER)
