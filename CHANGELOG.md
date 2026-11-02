@@ -10,7 +10,7 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 ## [Unreleased]
 
 ### Changed
-- Add a consolidated README source bibliography covering manufacturer resources, protocol research, Bluetooth/proxy references, dashboards, release tooling, and project field reports.
+- Add an external-reference bibliography to the README covering manufacturer resources, protocol research, Bluetooth/proxy references, dashboards, and release tooling.
 - Reorganize installation, compatibility, usage, troubleshooting, architecture, and contributor documentation; retain dated field evidence and archive the superseded initial specification.
 - Add repository instructions, issue/PR templates, and automated local-documentation link checks.
 - Classify the integration under Sensors in its manifest.
