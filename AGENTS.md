@@ -13,6 +13,7 @@ Check branch, base commit, and working-tree status. Preserve unrelated edits. Do
 - Preserve the domain, existing entity unique IDs, configuration entries, and established units unless the task explicitly requires a migration.
 - Follow the HA minimum in `hacs.json` and the runtime matrix in `.github/workflows/validate.yml`.
 - Keep documentation cleanup separate from runtime behavior changes.
+- Write the README for someone installing and using the integration. Keep testing history, compatibility evidence, and implementation details in supporting guides. Include prerequisites only where they help the user complete setup.
 
 ## Behavior that must remain covered
 

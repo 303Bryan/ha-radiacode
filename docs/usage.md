@@ -1,6 +1,10 @@
 # Using Radiacode
 
-[Documentation index](README.md) · [Installation and compatibility](../README.md)
+[Documentation index](README.md) · [Installation](../README.md)
+
+## Setup notes
+
+Use Home Assistant 2026.9.4 or newer with a Radiacode 1XX detector and a local Bluetooth adapter or ESPHome proxy. Active Bluetooth connections must be enabled on the proxy. Close other Bluetooth clients before connecting; pairing through the Radiacode phone app is not required. Radiacode ZERO is not supported by this release.
 
 ## Sensors
 
@@ -71,7 +75,7 @@ For a graph within an existing dashboard view, paste [examples/spectrum-card.yam
 
 Large spectrum reads can fail on weak or busy Bluetooth links. The integration keeps the previous complete histogram and backs off retries, pausing after three consecutive failures. Check acquisition time, pause status, and diagnostics; see [spectrum recovery](troubleshooting.md#spectrum-stays-unchanged-through-a-bluetooth-proxy).
 
-Firmware layout selection and private configuration caching are automatic. Exact known 4.15 builds can use bundled declarations; other builds use bounded configuration discovery. See [compatibility](../README.md#requirements-and-compatibility) and [firmware architecture](architecture.md#firmware-declarations-and-private-storage) for scope and implementation details.
+Firmware layout selection and private configuration caching are automatic. Exact known 4.15 builds can use bundled declarations; other builds use bounded configuration discovery. See [firmware declarations](firmware-415-beta-2026-11-01.md) and [firmware architecture](architecture.md#firmware-declarations-and-private-storage) for details.
 
 ### Binary Sensors
 
@@ -171,3 +175,9 @@ If multiple detectors are configured, add `address: "AA:BB:CC:DD:EE:FF"` under `
 A current-spectrum read (`accumulated: false`) updates the current snapshot and, when successful, clears an automatic-acquisition pause. An accumulated-spectrum read returns the long-term spectrum without replacing the current snapshot or resuming its automatic acquisition.
 
 For connection failures, stale measurements, or paused spectrum acquisition, see [troubleshooting](troubleshooting.md).
+
+## Updates and removal
+
+Update through HACS, then restart Home Assistant. Stable releases do not require enabling beta versions. Release notes identify the minimum Home Assistant version and any migration steps.
+
+To remove a detector, delete its entry under **Settings → Devices & Services → Radiacode**. This also removes its private configuration cache. To uninstall the integration, remove all its entries, remove its files through HACS (or delete the manually installed `custom_components/radiacode/` directory), and restart Home Assistant.

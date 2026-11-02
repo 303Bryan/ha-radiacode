@@ -50,7 +50,7 @@ CI also runs HACS validation and hassfest without ignored checks. Both can be ru
 
 ## Documentation
 
-- Keep the root README focused on installation, compatibility, and common tasks.
+- Keep the root README focused on features, installation, and everyday use. Put test evidence, firmware details, and implementation caveats in supporting guides; avoid repeating what the setup instructions already make clear.
 - Put current user instructions in `docs/usage.md` and `docs/troubleshooting.md`.
 - Explain implementation decisions in `docs/architecture.md`.
 - Index new guides and dated field reports in `docs/README.md`.

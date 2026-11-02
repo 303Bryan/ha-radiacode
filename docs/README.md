@@ -1,6 +1,6 @@
 # Documentation
 
-Start with the [installation and compatibility guide](../README.md).
+Start with the [installation guide](../README.md).
 
 ## Current guides
 
