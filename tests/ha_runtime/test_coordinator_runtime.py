@@ -9,6 +9,7 @@ import asyncio
 import datetime as dt
 import logging
 import json
+from copy import deepcopy
 from datetime import timedelta
 from dataclasses import replace
 from types import MappingProxyType, SimpleNamespace
@@ -369,6 +370,56 @@ async def test_downloadable_diagnostics_serialize_and_redact_sources(runtime):
     assert "AA:BB:CC:DD:EE:FF" not in serialized
     assert result["sensors"]["measurement_time"] == "2026-01-01T12:00:00"
     assert result["transport"]["recent_commands"][0]["received_body_bytes"] == 1254
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["device", "storage", "firmware_profile"])
+async def test_diagnostics_keep_protocol_labels_but_hide_identities(runtime, source):
+    from custom_components.radiacode.radiacode_ble.firmware_profiles import PROFILES
+
+    hass, coordinator, client, _, _ = runtime
+    profile_name = next(p.name for p in PROFILES if p.model == "RC-103")
+    client.transport_diagnostics = {
+        "configuration": {
+            "source": source,
+            "firmware_profile": {"name": profile_name} if source == "firmware_profile" else None,
+        },
+        "transport": {
+            "source": "Private proxy source",
+            "name": "Private proxy name",
+            "connection_request_source": "AA:BB:CC:DD:EE:FF",
+        },
+        "recent_commands": [{"source": source, "name": profile_name}],
+    }
+    before = deepcopy(client.transport_diagnostics)
+    hass.data["radiacode"] = {coordinator._entry_id: coordinator}
+    result = await async_get_config_entry_diagnostics(hass, coordinator.config_entry)
+    config = result["transport"]["configuration"]
+    assert config["source"] == source
+    if source == "firmware_profile":
+        assert config["firmware_profile"]["name"] == profile_name
+    serialized = json.dumps(result)
+    assert "Private proxy" not in serialized and "AA:BB:CC:DD:EE:FF" not in serialized
+    # Known labels are public only at their specific configuration paths.
+    assert result["transport"]["recent_commands"][0] == {"source": "**REDACTED**", "name": "**REDACTED**"}
+    assert client.transport_diagnostics == before
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_do_not_restore_arbitrary_profile_names(runtime):
+    hass, coordinator, client, _, _ = runtime
+    client.transport_diagnostics = {
+        "configuration": {
+            "source": "firmware_profile",
+            "firmware_profile": {"name": "RC-103-PRIVATE-SERIAL"},
+        },
+    }
+    hass.data["radiacode"] = {coordinator._entry_id: coordinator}
+    result = await async_get_config_entry_diagnostics(hass, coordinator.config_entry)
+    assert "PRIVATE-SERIAL" not in json.dumps(result)
+    client.transport_diagnostics["configuration"]["source"] = "Private source"
+    result = await async_get_config_entry_diagnostics(hass, coordinator.config_entry)
+    assert result["transport"]["configuration"]["source"] == "**REDACTED**"
 
 
 @pytest.mark.asyncio

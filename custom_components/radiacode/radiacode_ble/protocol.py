@@ -1178,7 +1178,15 @@ def decode_data_buf(
             data[stop_offset:stop_offset + 32].hex(),
         )
     # Log record type distribution and dose_rate values for diagnostics.
-    # Raw dose_rate is in R/h; show converted µSv/h (×10000) for readability.
+    # Log the declared native unit; absent declarations retain the legacy label.
+    # Conversion factors and record values are unchanged by these debug labels.
+    dose_units = {}
+    for gid in (0, 1, 2):
+        schema = (scalar_schemas or {}).get(gid)
+        dose_units[gid] = next(
+            (field.unit for field in schema.fields if field.channel_id == 4),
+            "R/h",
+        ) if schema is not None else "R/h"
     _LOGGER.debug(
         "decode_data_buf: bytes=%d gid_counts=%s total_records=%d stop_reason=%s",
         len(data), gid_counts, len(records), stop_reason,
@@ -1186,18 +1194,18 @@ def decode_data_buf(
     for r in records:
         if isinstance(r, RealTimeData):
             _LOGGER.debug(
-                "  RealTimeData: count_rate=%.2f dose_rate=%.6e R/h (%.4f µSv/h) err=%.1f%%",
-                r.count_rate, r.dose_rate, r.dose_rate * 10_000, r.dose_rate_err,
+                "  RealTimeData: count_rate=%.2f dose_rate=%.6e %s (%.4f µSv/h) err=%.1f%%",
+                r.count_rate, r.dose_rate, dose_units[0], r.dose_rate * 10_000, r.dose_rate_err,
             )
         elif isinstance(r, DoseRateDB):
             _LOGGER.debug(
-                "  DoseRateDB: count=%d count_rate=%.2f dose_rate=%.6e R/h (%.4f µSv/h) err=%.1f%%",
-                r.count, r.count_rate, r.dose_rate, r.dose_rate * 10_000, r.dose_rate_err,
+                "  DoseRateDB: count=%d count_rate=%.2f dose_rate=%.6e %s (%.4f µSv/h) err=%.1f%%",
+                r.count, r.count_rate, r.dose_rate, dose_units[2], r.dose_rate * 10_000, r.dose_rate_err,
             )
         elif isinstance(r, RawData):
             _LOGGER.debug(
-                "  RawData: count_rate=%.2f dose_rate=%.6e R/h (%.4f µSv/h)",
-                r.count_rate, r.dose_rate, r.dose_rate * 10_000,
+                "  RawData: count_rate=%.2f dose_rate=%.6e %s (%.4f µSv/h)",
+                r.count_rate, r.dose_rate, dose_units[1], r.dose_rate * 10_000,
             )
 
     return records

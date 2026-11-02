@@ -14,7 +14,7 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 ## Features
 
 - **Real-time radiation monitoring** — dose rate (µSv/h) and count rate (CPS), polled every 5 seconds by default (configurable 5–300 s)
-- **Radiation alarm** — binary sensor that trips when the dose rate crosses the device's alarm thresholds, for HA automations
+- **Calculated radiation alarms** — dose-rate, count-rate and accumulated-dose levels based on the device's configured thresholds, for HA automations
 - **Accumulated dose tracking** — total dose since the device was last reset
 - **Device diagnostics** — battery level, internal temperature, BLE signal strength, and downloadable diagnostics
 - **Device controls** — adjust display settings, alarm thresholds, sound/vibration, and more directly from HA
@@ -46,9 +46,9 @@ Connects wirelessly using HA's built-in Bluetooth stack — works with local Blu
 
 The **Radiation Alarm** sensor shows `No Alarm`, `L1 Alarm`, or `L2 Alarm` based on the device's own L1/L2 dose rate thresholds (exposed as attributes in µSv/h). The comparison runs in HA, so automations trigger even when device sound/vibration are off.
 
-**1XX beta 2026.10.4b1:** Count Rate Alarm and Accumulated Dose Alarm provide the same calculated levels for their respective measurements. All three expose `source: calculated`; these values do not represent the device's latched, silenced, or acknowledged alarm state. Accumulated Dose Alarm expires after 180 seconds without an advancing dose record. Existing Radiation Alarm entity IDs are preserved.
+**1XX firmware support:** Count Rate Alarm and Accumulated Dose Alarm provide the same calculated levels for their respective measurements. All three expose `source: calculated`; these values do not represent the device's latched, silenced, or acknowledged alarm state. Accumulated Dose Alarm expires after 180 seconds without an advancing dose record. Existing Radiation Alarm entity IDs are preserved.
 
-### Measurement quality and detector temperature (1XX beta)
+### Measurement quality and detector temperature (1XX)
 
 Dose Rate and Count Rate include `uncertainty_percent`, `quality`, `quality_reasons`, and `quality_source: calculated`. The new **Dose Rate Quality** and **Count Rate Quality** diagnostic sensors make the same status available to automations. A fresh low-confidence reading remains visible; this feature does not smooth or clamp measurements.
 
@@ -62,7 +62,7 @@ The error percentage follows the exact accepted reading. Raw-data fallbacks lack
 
 **Detector Temperature Status** shows `normal`, `low` (below −20 °C), or `high` (above 45 °C), with calculated source, limits, and observation age in attributes. It becomes unknown when temperature evidence expires. Its inclusive range boundaries describe the documented temperature alarm limits, while the quality indicator handles the separate 45 °C uncertainty described above.
 
-Firmware is checked again after reconnect with bounded retries. A confirmed change refreshes dependent configuration and cached metadata. Recent raw device-event codes/flags are available in downloadable diagnostics; their acknowledgment semantics are not inferred. These changes target 1XX detectors; ZERO support remains a separate update. See the [beta testing guide](docs/1xx-quality-beta-2026-10-30.md).
+Firmware is checked again after reconnect with bounded retries. A confirmed change refreshes dependent configuration and cached metadata. Recent raw device-event codes/flags are available in downloadable diagnostics; their acknowledgment semantics are not inferred. These changes target 1XX detectors; ZERO support remains a separate update. See the [stable field assessment](docs/stable-field-review-2026-11-02.md).
 
 ### Gamma Spectrum
 
@@ -143,7 +143,7 @@ For a graph within an existing dashboard view, paste [examples/spectrum-card.yam
 
 Firmware identity checks run after reconnect. The diagnostic register directory is a separate bulk operation with one automatic attempt per integration load or confirmed firmware change; failures are not retried on every reconnect. Configuration discovery runs in background maintenance after primary publication, with a five-minute retry delay after failure, and pauses after three unsuccessful attempts. Reconnects and the BLE Connection switch preserve that pause. Reload the integration after improving the Bluetooth path to retry; a confirmed firmware change also resets the budget. Diagnostics include `transport.configuration.automatic_paused`, the attempt count/limit, and `record_layout` from a complete configuration to inspect the actual firmware declarations without exposing device identity.
 
-**2026.11.1b1 / 1XX firmware:** supported records follow validated declarations for channel order, widths, units and scaling, including the 4.15 two-byte real-time flags, rem-based units and longer measurement-session record. Exact known combinations of serial model, firmware version and application build timestamp can select a bundled vendor layout without the large configuration download. The existing version query supplies the build, so no additional BLE command is needed. Unknown builds retain bounded configuration discovery; explicitly unsupported device declarations stop decoding that group. Undeclared groups retain the documented legacy fallback. See [firmware provenance and beta testing](docs/firmware-415-beta-2026-11-01.md).
+**2026.11.1 / 1XX firmware:** supported records follow validated declarations for channel order, widths, units and scaling, including the 4.15 two-byte real-time flags, rem-based units and longer measurement-session record. Exact known combinations of serial model, firmware version and application build timestamp can select a bundled vendor layout without the large configuration download. The existing version query supplies the build, so no additional BLE command is needed. Unknown builds retain bounded configuration discovery; explicitly unsupported device declarations stop decoding that group. Undeclared groups retain the documented legacy fallback. See the [stable field assessment](docs/stable-field-review-2026-11-02.md) and [firmware provenance](docs/firmware-415-beta-2026-11-01.md).
 
 A complete configuration with supported realtime and rare-data layouts can be saved in private HA storage. After a reload, it is used only after the detector address, serial number, firmware version/build, parser version and content hash match. A confirmed firmware version or build change invalidates it; deleting the integration removes its cache. Diagnostics show configuration `source`, `scalar_groups`, `RType` and units in `record_layout`, and `configuration_storage` status without exporting raw configuration text. Storage failure does not interrupt BLE polling. Older cache envelopes are rejected; a matching bundled layout can supply the decoder while no verified device cache exists.
 

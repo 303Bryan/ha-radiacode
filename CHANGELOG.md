@@ -11,6 +11,28 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.11.1] — 2026-11-02
+
+Stable release of the tested 1XX firmware 4.15 decoding, measurement-quality and bounded-maintenance improvements. Relative to the overnight-tested beta, production changes are limited to diagnostic labels and release metadata.
+
+### Added and improved since 2026.10.3
+- Decode validated device declarations for channel order, widths, units and scaling, including 4.15's two-byte real-time flags, rem-based dose units and longer measurement-session records. Preserve following battery, temperature, accumulated-dose and counter records; session-only traffic cannot extend live-reading freshness.
+- Select bundled record layouts for exact known RC-101, RC-102, RC-103, RC-103G and RC-110 application builds using existing identity replies, avoiding a large configuration download. Unknown builds retain bounded discovery; complete device declarations remain authoritative. Reconnects and application-build changes revalidate or invalidate metadata as appropriate.
+- Add dose/count uncertainty and calculated quality, count-rate and accumulated-dose alarm levels, temperature status and opaque device-event diagnostics. These calculated conditions do not claim to reproduce firmware alarm acknowledgment or latching.
+- Bound configuration downloads to three automatic attempts and separate the diagnostic register-directory download from firmware checks. Persist validated complete device configuration in private Home Assistant storage with device, firmware/build, parser and integrity checks.
+
+### Final corrections
+- Retain allowlisted configuration-source and bundled-profile labels in downloadable diagnostics while continuing to redact device and Bluetooth-proxy identities. Arbitrary source/name values remain redacted.
+- Show the declared native dose unit in debug logs (`rem/h` for the supported new firmware, `R/h` for the legacy convention). Numerical readings and conversion factors are unchanged.
+
+### Field acceptance and limits
+- The RC-103/4.15 overnight run recorded 8,420 successful ordinary measurement reads, 8,416 fresh readings and a maximum 15.05-second fresh-reading gap over 11 hours 42 minutes. There were no freshness expirations or recurring byte-22 alignment failures, and no configuration downloads.
+- Spectrum acquisition succeeded on 630 of 634 attempts. Each incomplete response was rejected, the connection recovered, and the next scheduled spectrum attempt succeeded. Complete-frame validation, timing, write mode and freshness behavior are unchanged from the tested beta.
+- Regression coverage includes privacy-preserving diagnostic labels and setup/unload/reload profile activation in the pinned Home Assistant runtime matrix. The physical capture begins after startup; reload coverage is automated with controlled identity replies, not a separate new physical soak.
+- Requires Home Assistant 2026.9.4 or newer. Other device/proxy combinations can still lose notifications; spectrum age and retry state remain visible. ZERO is not included. See the [stable field assessment](docs/stable-field-review-2026-11-02.md).
+
+---
+
 ## [2026.11.1b1] — 2026-11-01
 
 Decode the vendor's 1XX firmware 4.15 layouts and avoid the large configuration download when the detector reports an exact known application build. Continues the October beta series under the November calendar release line.
@@ -583,3 +605,5 @@ Initial public release.
 [0.3.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.3.0
 [0.2.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.2.0
 [0.1.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.1.0
+
+[2026.11.1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2026.11.1
