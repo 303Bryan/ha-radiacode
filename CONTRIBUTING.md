@@ -59,6 +59,10 @@ CI also runs HACS validation and hassfest without ignored checks. Both can be ru
 - Keep supported-device claims tied to physical evidence or explicitly labeled automated coverage.
 - Update the relevant guide and the Unreleased changelog when behavior or maintenance procedures change.
 
+### External references and credit
+
+Follow the [source-maintenance and attribution policy](AGENTS.md#external-references-and-attribution). Review affected README references in each PR and the complete list before a release. Keep only external sources relevant to the resulting build, explain each source's contribution, and remove obsolete entries. Preserve applicable attribution and license notices for retained third-party material. An older source can remain relevant; a recent publication does not make an unused source current. Verify new or changed external links separately from the local-link checker.
+
 ## Bug reports and field evidence
 
 Include the integration, HA, detector model, firmware, proxy project, and ESPHome build versions. Describe the expected behavior, actual behavior, steps, and relevant timestamps.
