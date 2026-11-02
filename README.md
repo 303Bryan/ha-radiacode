@@ -33,6 +33,10 @@ Dose and count readings update every five seconds by default; spectra update onc
 
 To connect the Radiacode mobile app, turn off the **BLE Connection** switch in Home Assistant. Turn it back on when you want Home Assistant to reconnect.
 
+## Alarm dashboard
+
+Use [the alarm card example](examples/alarms-card.yaml) to place **Alarms** below **Sensors**, with Accumulated Dose Alarm, Count Rate Alarm, Dose Rate Alarm, and their threshold controls. It uses built-in cards; replace the example entity IDs with your detector's IDs. See [alarm behavior and device-page grouping](docs/usage.md#alarms).
+
 ## Spectrum dashboard
 
 ![Example gamma spectrum showing counts by energy in keV](docs/images/spectrum-dashboard.png)

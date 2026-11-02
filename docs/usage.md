@@ -24,11 +24,25 @@ Use Home Assistant 2026.9.4 or newer with a Radiacode 1XX detector and a local B
 
 > Device-health sensors are read once per minute and are hardware-verified on RC-103 firmware 4.14. Enable the disabled-by-default entities under the entity settings if you want them.
 
-### Radiation Alarm
+### Alarms
 
-The **Radiation Alarm** sensor shows `No Alarm`, `L1 Alarm`, or `L2 Alarm` based on the device's own L1/L2 dose rate thresholds (exposed as attributes in µSv/h). The comparison runs in HA, so automations trigger even when device sound/vibration are off.
+The three calculated alarm sensors use consistent names across Sensors and Configuration:
 
-**1XX firmware support:** Count Rate Alarm and Accumulated Dose Alarm provide the same calculated levels for their respective measurements. All three expose `source: calculated`; these values do not represent the device's latched, silenced, or acknowledged alarm state. Accumulated Dose Alarm expires after 180 seconds without an advancing dose record. Existing Radiation Alarm entity IDs are preserved.
+| Alarm sensor | Threshold controls | Unit |
+|---|---|---|
+| Accumulated Dose Alarm | Accumulated Dose Alarm L1 / L2 | µSv |
+| Count Rate Alarm | Count Rate Alarm L1 / L2 | cps |
+| Dose Rate Alarm | Dose Rate Alarm L1 / L2 | µSv/h |
+
+Each shows `No Alarm`, `L1 Alarm`, or `L2 Alarm`, comparing its measurement with the thresholds **read from the device**. All expose `source: calculated`; they do not reproduce the firmware's latched, silenced, acknowledged, or out-of-scale states. Sound/vibration settings do not suppress these calculated states. Missing measurements or thresholds do not imply `No Alarm`.
+
+**Names and existing automations:** Dose Rate Alarm was previously named Radiation Alarm; the accumulated-dose threshold controls were Dose Alarm L1/L2. Unique IDs, existing entity IDs, state strings and threshold attribute keys are preserved. User-customized display names remain user-controlled. The reset buttons are now Reset Accumulated Dose and Reset Spectrum.
+
+**Grouping:** Home Assistant fixes the device-page sections (Sensors, Configuration, Diagnostic); an integration cannot insert its own Alarms subsection beneath Sensors. Alarm states remain primary sensors, and writable thresholds remain configuration entities. For a dedicated **Alarms** section below **Sensors** on a dashboard, use [the built-in-card example](../examples/alarms-card.yaml). It groups each alarm with its two threshold controls and requires no custom frontend integration. Replace the example IDs with the existing IDs from your device.
+
+**Freshness:** Accumulated Dose and Accumulated Dose Alarm share an independent 180-second observation limit. An advancing RareData record refreshes it. When those records are sparse, a small individual `DS_uR`/`DS_urem` register read is scheduled after 60 seconds, behind primary polling. A successful read refreshes the observation even if the dose has not changed; failures retain the cached value but do not extend availability. The separate non-resettable Dose Counter is never substituted. Source and age appear in entity attributes and diagnostics. Dose Rate Alarm and Count Rate Alarm retain the live paired-sample lease.
+
+The RC-103/4.15 firmware defaults are **0.40 / 1.20 µSv/h**, **20 / 60 cps**, and **9,999,999.99 / 9,999,999.99 µSv** for dose-rate, count-rate and accumulated-dose thresholds respectively. These are device defaults, not recommended exposure limits. The integration reads the actual settings and does not reset them during installation. The accumulated-dose input range includes those defaults.
 
 ### Measurement quality and detector temperature (1XX)
 
@@ -56,10 +70,10 @@ The **Spectrum** sensor exposes the device's gamma spectrum (default: refreshed 
 | `calibration_a0/a1/a2` | Energy calibration: E(ch) = a0 + a1·ch + a2·ch² keV |
 | `duration_s` | Spectrum accumulation time in seconds |
 | `truncated` | False for published snapshots; incomplete reads keep the previous complete snapshot |
-| `acquired_at` | UTC time the last complete current-spectrum snapshot was received; empty before the first acquisition or after Spectrum Reset |
+| `acquired_at` | UTC time the last complete current-spectrum snapshot was received; empty before the first acquisition or after Reset Spectrum |
 | `automatic_paused` | True when automatic spectrum reads have stopped after repeated failures |
 
-A **Spectrum Reset** button clears the accumulation, and the **`radiacode.get_spectrum` action** returns the spectrum as response data (`accumulated: true` for the device's long-term accumulated spectrum) for use in scripts and automations.
+A **Reset Spectrum** button clears the accumulation, and the **`radiacode.get_spectrum` action** returns the spectrum as response data (`accumulated: true` for the device's long-term accumulated spectrum) for use in scripts and automations.
 
 Open the Spectrum entity to inspect `acquired_at` and `automatic_paused`. Acquisition time is when Home Assistant received the complete snapshot, not when accumulation started; `duration_s` describes the accumulation period. Failed reads retain the last complete histogram and its acquisition time. A successful current-spectrum read advances the time and clears the pause; an accumulated-spectrum action does not replace it. These attributes also appear before a histogram is available. A false pause flag does not override a spectrum interval of 0, which disables automatic reads.
 
@@ -83,7 +97,7 @@ Firmware layout selection and private configuration caching are automatic. Exact
 |--------|-------------|
 | BLE Connected | True while the BLE link is active; exposes `last_error`, `connection_count`, and `last_poll_duration` attributes *(diagnostic)* |
 
-> **Note:** Dose Rate and Count Rate update on every poll (default every 5 s, configurable). Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates. The independent Dose Counter updates much less often at background radiation levels and is cached separately. It remains Unknown on firmware without a recognized counter schema.
+> **Note:** Dose Rate and Count Rate update on every poll (default every 5 s, configurable). Battery, Temperature, and Accumulated Dose arrive in periodic device status records and are cached between updates. Sparse accumulated-dose records use the bounded register fallback described above. The independent Dose Counter updates much less often at background radiation levels and is cached separately. It remains Unknown on firmware without a recognized counter schema.
 
 ---
 
@@ -110,8 +124,8 @@ The integration exposes the following device settings and reset controls.
 | Dose Rate Alarm L2 | µSv/h | 0–10,000 | Level 2 dose rate alarm threshold |
 | Count Rate Alarm L1 | cps | 0–100,000 | Level 1 count rate alarm threshold |
 | Count Rate Alarm L2 | cps | 0–100,000 | Level 2 count rate alarm threshold |
-| Dose Alarm L1 | µSv | 0–1,000,000 | Level 1 accumulated dose alarm threshold |
-| Dose Alarm L2 | µSv | 0–1,000,000 | Level 2 accumulated dose alarm threshold |
+| Accumulated Dose Alarm L1 | µSv | 0–10,000,000 | Level 1 accumulated dose alarm threshold |
+| Accumulated Dose Alarm L2 | µSv | 0–10,000,000 | Level 2 accumulated dose alarm threshold |
 
 ### Selects
 
@@ -125,7 +139,7 @@ The integration exposes the following device settings and reset controls.
 | Entity | Description |
 |--------|-------------|
 | Reset Accumulated Dose | Clears the resettable accumulated dose; does not reset the independent Dose Counter |
-| Spectrum Reset | Clears the current spectrum accumulation |
+| Reset Spectrum | Clears the current spectrum accumulation |
 
 ---
 
