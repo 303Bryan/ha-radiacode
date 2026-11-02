@@ -103,11 +103,11 @@ show_icon_and_title: false
 
 ## License
 
-[MIT](LICENSE) © Bryan Fleming. Protocol implementation builds on work from [cdump/radiacode](https://github.com/cdump/radiacode) and [mkgeiger/RadiaCode](https://github.com/mkgeiger/RadiaCode).
+[MIT](LICENSE) © Bryan Fleming.
 
 ## External references
 
-External sources supporting the current implementation, supported configurations, tests, dashboards, and maintenance workflow. Older commit-specific references remain where the current build still relies on that work.
+External sources supporting the current implementation, supported configurations, tests, dashboards, and maintenance workflow.
 
 ### Radiacode documentation and applications
 
