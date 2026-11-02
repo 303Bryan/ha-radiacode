@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest an improvement or additional device support.
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What would this help you do?
+      description: Describe the use case and current limitation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include examples or alternatives if useful.
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Device and evidence
+      description: For device/protocol requests, include model, firmware/build, public references, and whether you can test the change.

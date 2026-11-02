@@ -26,8 +26,14 @@ The historical display-name migration alone did not publish builds. The stable p
 
 1. Choose the next calendar version and update the manifest and matching changelog section together. Check for an existing tag before allocating it.
 2. Complete the release's required checks on the exact candidate commit. Finish physical acceptance before stable promotion.
-3. Run the existing Release workflow on the approved main commit, or publish a checked candidate explicitly with its exact commit. The workflow validates the calendar format, rejects invalid months and zero release numbers, and uses the manifest version for the tag and title.
+3. Wait for the latest **Validate** push run on the exact merged `main` commit to pass, including every runtime matrix job and Repository checks. Run **Actions → Release → Run workflow** on that commit's `main` ref. The workflow rejects other branches, missing/failed/pending validation, skipped jobs, an existing tag, or a missing changelog section. It validates the calendar format and uses the manifest version for the tag and title. If `main` advances before dispatch, wait for validation on the newly selected commit.
 4. Keep candidates marked as prereleases and excluded from latest stable. Verify the tag target, prerelease flag, manifest version and any uploaded package/checksum after publication.
+
+## HACS catalog submission
+
+The integration is installable as a custom HACS repository. Default-catalog inclusion is a separate maintainer task; it is not performed by the Release workflow.
+
+After cleanup is merged and a release is published following passing validation, follow the [current HACS submission requirements](https://github.com/hacs/documentation/blob/main/source/docs/publish/include.md) and [submission template](https://github.com/hacs/default/blob/master/.github/PULL_REQUEST_TEMPLATE.md). Confirm no existing submission, add the exact repository name to the sorted `integration` list in a personal fork of `hacs/default`, and include links to the release and successful HACS/hassfest runs. Keep installation instructions labeled as a custom repository until catalog inclusion is confirmed.
 
 ## Historical display names
 

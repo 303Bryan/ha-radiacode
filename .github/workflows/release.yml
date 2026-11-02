@@ -16,20 +16,33 @@ name: Release
 #   1. Allocate the next calendar version (see docs/release-versioning.md).
 #      Bump "version" in manifest.json and add a CHANGELOG.md section
 #      with the exact same version string; merge to main.
-#   2. Run this workflow on main.
+#   2. Wait for Validate to pass on that exact main commit.
+#   3. Run this workflow on main.
 
 on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: write
+
+concurrency:
+  group: radiacode-release
+  cancel-in-progress: false
 
 jobs:
   release:
     name: Tag and release from manifest version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Require successful validation of this commit
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const validateRelease = require('./.github/scripts/validate-release.cjs');
+            await validateRelease({ github, context, core });
 
       - name: Read version from manifest
         id: version
@@ -62,12 +75,12 @@ jobs:
       - name: Extract changelog section
         run: |
           awk -v ver="${{ steps.version.outputs.version }}" '
-            $0 ~ ("^## \\[" ver "\\]") { flag = 1; next }
+            index($0, "## [" ver "]") == 1 { flag = 1; next }
             /^## \[/ { flag = 0 }
             flag' CHANGELOG.md > release_notes.md
           if ! grep -q '[^[:space:]]' release_notes.md; then
-            echo "::warning::No CHANGELOG.md section found for ${{ steps.version.outputs.version }}"
-            echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details." > release_notes.md
+            echo "::error::No CHANGELOG.md section found for ${{ steps.version.outputs.version }}"
+            exit 1
           fi
           echo "Release notes:"
           cat release_notes.md
