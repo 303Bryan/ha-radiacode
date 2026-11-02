@@ -9,6 +9,12 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ## [Unreleased]
 
+### Changed
+- Reorganize installation, compatibility, usage, troubleshooting, architecture, and contributor documentation; retain dated field evidence and archive the superseded initial specification.
+- Add repository instructions, issue/PR templates, and automated local-documentation link checks.
+- Classify the integration under Sensors in its manifest.
+- Require successful validation of the exact main commit and a matching changelog section before release publication; add release-gate regression tests and update GitHub Actions.
+
 ---
 
 ## [2026.11.1] — 2026-11-02

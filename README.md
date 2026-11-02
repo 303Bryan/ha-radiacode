@@ -1,378 +1,87 @@
 # Radiacode for Home Assistant
 
 [![GitHub Release](https://img.shields.io/github/v/release/303Bryan/ha-radiacode)](https://github.com/303Bryan/ha-radiacode/releases)
-[![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://www.hacs.xyz/docs/faq/custom_repositories/)
 [![Validate](https://github.com/303Bryan/ha-radiacode/actions/workflows/validate.yml/badge.svg)](https://github.com/303Bryan/ha-radiacode/actions/workflows/validate.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A custom Home Assistant integration for **Radiacode** radiation detectors via Bluetooth Low Energy.
+Monitor a Radiacode radiation detector in Home Assistant over Bluetooth Low Energy. Use a local Bluetooth adapter or an [ESPHome Bluetooth proxy](https://esphome.io/components/bluetooth_proxy/).
 
-Connects wirelessly using HA's built-in Bluetooth stack — works with local Bluetooth adapters and [ESPHome Bluetooth proxies](https://esphome.io/components/bluetooth_proxy.html) for whole-home coverage.
+- Dose rate, count rate, accumulated dose, and measurement-quality indicators.
+- Gamma spectrum with dashboard examples and an on-demand action.
+- Battery, temperature, connection, and device-health diagnostics.
+- Display, sound, vibration, alarm-threshold, and reset controls.
+- Bluetooth discovery and a connection switch to release the detector for its mobile app.
 
----
+## Requirements and compatibility
 
-## Features
+- **Home Assistant 2026.9.4 or newer.**
+- A compatible Radiacode 1XX detector and a Bluetooth adapter or an ESPHome proxy with **active connections enabled**.
+- The detector must be free to connect: close other Bluetooth clients first. Pairing through the Radiacode phone app is not required.
 
-- **Real-time radiation monitoring** — dose rate (µSv/h) and count rate (CPS), polled every 5 seconds by default (configurable 5–300 s)
-- **Calculated radiation alarms** — dose-rate, count-rate and accumulated-dose levels based on the device's configured thresholds, for HA automations
-- **Accumulated dose tracking** — total dose since the device was last reset
-- **Device diagnostics** — battery level, internal temperature, BLE signal strength, and downloadable diagnostics
-- **Device controls** — adjust display settings, alarm thresholds, sound/vibration, and more directly from HA
-- **Auto-discovery** — HA automatically detects Radiacode devices over Bluetooth
-- **BT proxy support** — works through ESPHome Bluetooth proxies; no direct Bluetooth adapter required on the HA host
-- **Persistent connection** — keeps the BLE link open between polls to minimise reconnect overhead
+| Device / firmware | Evidence and scope |
+| --- | --- |
+| RC-103 / 4.15 | Physical overnight testing through an ESPHome proxy; see the [stable field assessment](docs/stable-field-review-2026-11-02.md). |
+| RC-103 / 4.14 | Earlier physical testing; see the [October field assessment](docs/stable-field-review-2026-10-11.md). |
+| RC-101, RC-102, RC-103G, RC-110 / exact known 4.15 builds | Bundled layouts and automated fixtures. This does not establish physical acceptance for each model/proxy combination. |
+| Other 1XX firmware builds | Configuration discovery and legacy decoding paths remain available; compatibility depends on the record layout. Report unrecognized builds with diagnostics. |
+| Radiacode ZERO | Not supported by this release. |
 
----
+See [firmware evidence and build matching](docs/firmware-415-beta-2026-11-01.md) for the supported 4.15 declarations. A matching version number alone does not establish a matching firmware build.
 
-## Sensors
+## Install
 
-| Sensor | Unit | Description |
-|--------|------|-------------|
-| Dose Rate | µSv/h | Real-time ambient radiation dose rate |
-| Count Rate | cps | Raw detector counts per second |
-| Accumulated Dose | µSv | Total dose accumulated since last device reset |
-| Dose Counter | µSv | Independent non-resettable counter on supported firmware; unaffected by Reset Accumulated Dose |
-| Hardness | — | Spectral hardness coefficient (µR/h ÷ cps), as in the Radiacode app — characteristic per isotope, useful for pseudo-identification of sources |
-| Battery | % | Device battery level *(diagnostic)* |
-| Temperature | °C | Device internal temperature *(diagnostic)* |
-| Signal Strength | dBm | BLE RSSI from advertisements *(diagnostic)* |
-| SiPM Bias Voltage | mV | Detector bias voltage — drift indicates SiPM aging *(diagnostic)* |
-| MCU Temperature | °C | Processor temperature *(diagnostic, disabled by default)* |
-| MCU Vref | mV | Processor reference voltage *(diagnostic, disabled by default)* |
+### HACS
 
-> Device-health sensors are read once per minute and are hardware-verified on RC-103 firmware 4.14. Enable the disabled-by-default entities under the entity settings if you want them.
+This is currently a **custom repository** in HACS.
 
-### Radiation Alarm
-
-The **Radiation Alarm** sensor shows `No Alarm`, `L1 Alarm`, or `L2 Alarm` based on the device's own L1/L2 dose rate thresholds (exposed as attributes in µSv/h). The comparison runs in HA, so automations trigger even when device sound/vibration are off.
-
-**1XX firmware support:** Count Rate Alarm and Accumulated Dose Alarm provide the same calculated levels for their respective measurements. All three expose `source: calculated`; these values do not represent the device's latched, silenced, or acknowledged alarm state. Accumulated Dose Alarm expires after 180 seconds without an advancing dose record. Existing Radiation Alarm entity IDs are preserved.
-
-### Measurement quality and detector temperature (1XX)
-
-Dose Rate and Count Rate include `uncertainty_percent`, `quality`, `quality_reasons`, and `quality_source: calculated`. The new **Dose Rate Quality** and **Count Rate Quality** diagnostic sensors make the same status available to automations. A fresh low-confidence reading remains visible; this feature does not smooth or clamp measurements.
-
-| Quality | Meaning |
-|---------|---------|
-| `normal` | Uncertainty is within its limit and a recent detector-temperature observation supports normal quality |
-| `reduced` | Dose-rate uncertainty exceeds 30%, count-rate uncertainty exceeds 50%, or detector temperature exceeds 45 °C |
-| `unknown` | Required information is missing, stale, or inconclusive; the quality entities show HA's unknown state |
-
-The error percentage follows the exact accepted reading. Raw-data fallbacks lack an uncertainty field. Temperature evidence expires after 180 seconds; missing data is never treated as zero error. At exactly 45 °C, quality remains unknown because the manufacturer manual and release notes differ at that boundary. Values below −20 °C also cannot establish normal quality. MCU temperature is not used.
-
-**Detector Temperature Status** shows `normal`, `low` (below −20 °C), or `high` (above 45 °C), with calculated source, limits, and observation age in attributes. It becomes unknown when temperature evidence expires. Its inclusive range boundaries describe the documented temperature alarm limits, while the quality indicator handles the separate 45 °C uncertainty described above.
-
-Firmware is checked again after reconnect with bounded retries. A confirmed change refreshes dependent configuration and cached metadata. Recent raw device-event codes/flags are available in downloadable diagnostics; their acknowledgment semantics are not inferred. These changes target 1XX detectors; ZERO support remains a separate update. See the [stable field assessment](docs/stable-field-review-2026-11-02.md).
-
-### Gamma Spectrum
-
-The **Spectrum** sensor exposes the device's gamma spectrum (default: refreshed every 60 s, configurable in the options). Its state is the total count; the full per-channel histogram and the channel→keV calibration live in attributes:
-
-| Attribute | Description |
-|-----------|-------------|
-| `channels` | Per-channel counts (1024 bins; excluded from the recorder database) |
-| `calibration_a0/a1/a2` | Energy calibration: E(ch) = a0 + a1·ch + a2·ch² keV |
-| `duration_s` | Spectrum accumulation time in seconds |
-| `truncated` | False for published snapshots; incomplete reads keep the previous complete snapshot |
-| `acquired_at` | UTC time the last complete current-spectrum snapshot was received; empty before the first acquisition or after Spectrum Reset |
-| `automatic_paused` | True when automatic spectrum reads have stopped after repeated failures |
-
-A **Spectrum Reset** button clears the accumulation, and the **`radiacode.get_spectrum` action** returns the spectrum as response data (`accumulated: true` for the device's long-term accumulated spectrum) for use in scripts and automations.
-
-Open the Spectrum entity to inspect `acquired_at` and `automatic_paused`. Acquisition time is when Home Assistant received the complete snapshot, not when accumulation started; `duration_s` describes the accumulation period. Failed reads retain the last complete histogram and its acquisition time. A successful current-spectrum read advances the time and clears the pause; an accumulated-spectrum action does not replace it. These attributes also appear before a histogram is available. A false pause flag does not override a spectrum interval of 0, which disables automatic reads.
-
-**Plotting the spectrum (recommended panel view)** — install [Plotly Graph Card](https://github.com/dbuezas/lovelace-plotly-graph-card) from HACS, then use a dedicated [Panel view](https://www.home-assistant.io/dashboards/panel/) for a full-width graph. The example sets the graph height to **800 pixels** and reduces the margins to give the spectrum more vertical space.
-
-Replace `sensor.radiacode_spectrum` with your device's actual Spectrum entity ID (shown in Settings → Devices & Services → Entities). Add the YAML below as a **dashboard view**; when editing the full dashboard configuration, add it as an item under `views:` with the appropriate list indentation. The copyable view example is also available in [examples/spectrum-panel.yaml](examples/spectrum-panel.yaml).
-
-```yaml
-type: panel
-path: radiacode-spectrum
-title: RadiaCode Spectrum
-cards:
-  - type: custom:plotly-graph
-    title: Gamma Spectrum
-    refresh_interval: 60
-    raw_plotly_config: true
-    entities:
-      - entity: sensor.radiacode_spectrum
-        name: Counts
-        type: scatter
-        mode: lines
-        x: |
-          $fn ({ hass, getFromConfig }) => {
-            const sensor = hass.states[getFromConfig('.entity')];
-            if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
-            const a = sensor.attributes;
-            return (a.channels || []).map((_, ch) =>
-              a.calibration_a0 + a.calibration_a1 * ch + a.calibration_a2 * ch * ch);
-          }
-        "y": |
-          $fn ({ hass, getFromConfig }) => {
-            const sensor = hass.states[getFromConfig('.entity')];
-            if (!sensor || ['unknown', 'unavailable'].includes(sensor.state)) return [];
-            return sensor.attributes.channels || [];
-          }
-        hovertemplate: '%{x:.1f} keV<br>%{y} counts<extra></extra>'
-    layout:
-      height: 800
-      margin:
-        t: 30
-        b: 60
-        l: 70
-        r: 30
-      xaxis:
-        type: linear
-        title:
-          text: Energy (keV)
-        autorange: true
-      yaxis:
-        title:
-          text: Counts
-        rangemode: tozero
-show_icon_and_title: false
-```
-
-Adjust `layout.height` to suit your screen, for example `600` or `1000`. The height belongs inside the Plotly card's `layout` section. Axis labels use `title.text` for compatibility with current Plotly versions.
-
-For a graph within an existing dashboard view, paste [examples/spectrum-card.yaml](examples/spectrum-card.yaml) into a **Manual card**. It uses the same height and margins without the outer panel-view settings.
-
-> Keep the `"y"` key quoted when copying or editing the card. If a saved card contains a `true` key in its place, rename it to `"y"`; Plotly needs both `x` and `y` arrays when `raw_plotly_config` is enabled.
-
-> **BT proxy note:** spectrum acquisition reads the histogram directly and selects an encoding only after complete validation; a configuration download is no longer a prerequisite. Incomplete or incorrectly framed Bluetooth responses cause the affected connection to be released before another command can reuse it. Invalid spectra are rejected and the last complete snapshot is kept; failed automatic reads retry after 5 minutes, then 10 minutes (or your configured interval if longer), and pause after three consecutive failures. Radiation readings publish before optional maintenance starts. The device still handles one BLE command at a time, so a stalled bulk request can delay the next acquisition until its bounded timeout releases the link. Download diagnostics to see format provenance, errors, transfer sizes/timing and snapshot age. Set the spectrum interval to 0 to disable automatic spectrum reads; the on-demand action remains available and updates the current-spectrum entity.
-
-Firmware identity checks run after reconnect. The diagnostic register directory is a separate bulk operation with one automatic attempt per integration load or confirmed firmware change; failures are not retried on every reconnect. Configuration discovery runs in background maintenance after primary publication, with a five-minute retry delay after failure, and pauses after three unsuccessful attempts. Reconnects and the BLE Connection switch preserve that pause. Reload the integration after improving the Bluetooth path to retry; a confirmed firmware change also resets the budget. Diagnostics include `transport.configuration.automatic_paused`, the attempt count/limit, and `record_layout` from a complete configuration to inspect the actual firmware declarations without exposing device identity.
-
-**2026.11.1 / 1XX firmware:** supported records follow validated declarations for channel order, widths, units and scaling, including the 4.15 two-byte real-time flags, rem-based units and longer measurement-session record. Exact known combinations of serial model, firmware version and application build timestamp can select a bundled vendor layout without the large configuration download. The existing version query supplies the build, so no additional BLE command is needed. Unknown builds retain bounded configuration discovery; explicitly unsupported device declarations stop decoding that group. Undeclared groups retain the documented legacy fallback. See the [stable field assessment](docs/stable-field-review-2026-11-02.md) and [firmware provenance](docs/firmware-415-beta-2026-11-01.md).
-
-A complete configuration with supported realtime and rare-data layouts can be saved in private HA storage. After a reload, it is used only after the detector address, serial number, firmware version/build, parser version and content hash match. A confirmed firmware version or build change invalidates it; deleting the integration removes its cache. Diagnostics show configuration `source`, `scalar_groups`, `RType` and units in `record_layout`, and `configuration_storage` status without exporting raw configuration text. Storage failure does not interrupt BLE polling. Older cache envelopes are rejected; a matching bundled layout can supply the decoder while no verified device cache exists.
-
-Earlier firmware 4.15 captures had no successful configuration download. The matching-build profile now removes that prerequisite for supported record decoding. Missing Bluetooth responses remain a separate issue; the [beta 4 build comparison](docs/beta4-stability-review-2026-10-31.md) retains the earlier field history.
-
-### Binary Sensors
-
-| Entity | Description |
-|--------|-------------|
-| BLE Connected | True while the BLE link is active; exposes `last_error`, `connection_count`, and `last_poll_duration` attributes *(diagnostic)* |
-
-> **Note:** Dose Rate and Count Rate update on every poll (default every 5 s, configurable). Battery, Temperature, and Accumulated Dose are reported by the device approximately once per minute and are cached between updates. The independent Dose Counter updates much less often at background radiation levels and is cached separately. It remains Unknown on firmware without a recognized counter schema.
-
----
-
-## Device Controls
-
-The integration exposes the full Radiacode configuration as writable HA entities.
-
-### Switches
-
-| Entity | Description |
-|--------|-------------|
-| Sound | Enable/disable click sound on detection events |
-| Vibration | Enable/disable vibration on detection events |
-| Display | Turn the device display on or off |
-| Display Backlight | Enable/disable display backlight |
-| BLE Connection | Turn off to release the device so the Radiacode mobile app can connect; turn back on to resume polling |
-
-### Numbers
-
-| Entity | Unit | Range | Description |
-|--------|------|-------|-------------|
-| Display Brightness | — | 0–9 | Screen brightness level |
-| Dose Rate Alarm L1 | µSv/h | 0–10,000 | Level 1 dose rate alarm threshold |
-| Dose Rate Alarm L2 | µSv/h | 0–10,000 | Level 2 dose rate alarm threshold |
-| Count Rate Alarm L1 | cps | 0–100,000 | Level 1 count rate alarm threshold |
-| Count Rate Alarm L2 | cps | 0–100,000 | Level 2 count rate alarm threshold |
-| Dose Alarm L1 | µSv | 0–1,000,000 | Level 1 accumulated dose alarm threshold |
-| Dose Alarm L2 | µSv | 0–1,000,000 | Level 2 accumulated dose alarm threshold |
-
-### Selects
-
-| Entity | Options | Description |
-|--------|---------|-------------|
-| Display Auto-Off | 5 s / 10 s / 15 s / 30 s | Display timeout duration |
-| Display Orientation | Auto / Right / Left | Screen rotation mode |
-
-### Buttons
-
-| Entity | Description |
-|--------|-------------|
-| Reset Accumulated Dose | Clears the accumulated dose counter on the device |
-
----
-
-## Requirements
-
-- **Home Assistant 2026.9.4 or newer**
-- **Radiacode** RC-102, RC-103, or RC-110 (tested with firmware 4.8 and 4.14)
-- **Bluetooth** — one of:
-  - A Bluetooth adapter on your HA host (USB dongle or built-in), **or**
-  - One or more [ESPHome Bluetooth proxies](https://esphome.io/components/bluetooth_proxy.html) within range of the device
-
-The Radiacode does **not** need to be paired with the Radiacode phone app to work with this integration.
-
----
-
-## Installation
-
-### Via HACS (Recommended)
-
-1. Open HACS in Home Assistant → **Integrations**
-2. Click the three-dot menu (⋮) → **Custom repositories**
-3. Add `https://github.com/303Bryan/ha-radiacode` with category **Integration**
-4. Click **Radiacode** in the integration list → **Download**
-5. Restart Home Assistant
+1. Open HACS, then its three-dot menu → **Custom repositories**.
+2. Add `https://github.com/303Bryan/ha-radiacode` with category **Integration**.
+3. Find **Radiacode** and download the latest stable release.
+4. Restart Home Assistant.
+5. Go to **Settings → Devices & Services** and configure the discovered detector. If it is not discovered, select **Add Integration → Radiacode** and enter its Bluetooth address.
 
 ### Manual
 
-1. Download the [latest release](https://github.com/303Bryan/ha-radiacode/releases/latest)
-2. Copy the `custom_components/radiacode/` folder into your HA `config/custom_components/` directory
-3. Restart Home Assistant
+1. Download the installation ZIP or source archive from the [latest release](https://github.com/303Bryan/ha-radiacode/releases/latest).
+2. Extract it and copy its `custom_components/radiacode/` directory to `config/custom_components/radiacode/` in Home Assistant.
+3. Restart Home Assistant and add the integration as described above.
 
----
+## Use
 
-## Release naming
+Dose and count readings poll every five seconds by default. Spectrum acquisition defaults to once per minute. Change these intervals through the integration's **Configure** options; a spectrum interval of `0` disables automatic spectrum reads.
 
-Releases use **YYYY.MM.N**, with `rcN` for release candidates (for example, `2026.10.4rc1`). The stable version `2026.10.3` promotes the RC5 work and uses the calendar version in both its manifest and tag. Older GitHub display names now follow that format while their original tags and installed versions remain valid. See [release versioning and the historical name mapping](docs/release-versioning.md).
+The integration keeps its Bluetooth connection open. Turn off **BLE Connection** to use the mobile app, then turn it on again to resume Home Assistant polling.
 
-## Configuration
+- [Entities, controls, options, and spectrum action](docs/usage.md)
+- [Spectrum dashboard examples](examples/spectrum-panel.yaml)
+- [Troubleshooting, Bluetooth proxies, and diagnostics](docs/troubleshooting.md)
+- [All documentation and field reports](docs/README.md)
 
-### Automatic Discovery
+## Measurement behavior
 
-If HA detects your Radiacode over Bluetooth, a notification will appear on the **Integrations** page:
+- Radiation readings expire after 60 seconds without a new accepted sample, or three poll intervals if longer. Brief reconnects may retain a recent sample; Bluetooth connectivity alone does not mean the measurement is fresh.
+- Calculated alarm levels use the detector's configured thresholds. They do not reproduce the detector's latched, silenced, or acknowledged alarm state.
+- A reading more than 50× above its baseline is held for confirmation by a subsequent measurement. This can delay publication of a sudden increase.
+- Incomplete spectrum transfers keep the previous complete histogram. Check its acquisition time and retry/pause status.
+- Interrupted reads may lose device records; reconnecting cannot guarantee recovery of every missed measurement.
 
-1. Go to **Settings → Devices & Services**
-2. Click **Configure** on the discovered Radiacode device
-3. Confirm to add it
+Details and recovery steps are in [troubleshooting](docs/troubleshooting.md).
 
-### Manual Setup
+## Updates and removal
 
-If auto-discovery doesn't trigger:
+Update through HACS, then restart Home Assistant. Stable releases do not require enabling beta versions. Release notes identify the minimum Home Assistant version and any migration steps.
 
-1. Go to **Settings → Devices & Services → Add Integration**
-2. Search for **Radiacode**
-3. Enter the Bluetooth MAC address of your device (e.g. `AA:BB:CC:DD:EE:FF` — dashes, dots, or no separators are also accepted)
+To remove a detector, delete its entry under **Settings → Devices & Services → Radiacode**. This also removes its private configuration cache. To uninstall the integration, remove all its entries, remove its files through HACS (or delete the manually installed `custom_components/radiacode/` directory), and restart Home Assistant.
 
-### Options
+## Contributing and support
 
-After setup, click **Configure** on the integration to adjust:
+[Report a problem](https://github.com/303Bryan/ha-radiacode/issues/new/choose) with your device, firmware, integration, Home Assistant, and proxy versions. Review logs for identifying information before uploading them.
 
-| Option | Default | Range | Description |
-|--------|---------|-------|-------------|
-| Poll interval | 5 s | 5–300 s | How often sensor data is read over BLE. Longer intervals reduce BT proxy load and device battery drain. |
-| Spectrum poll interval | 60 s | 0–3600 s | How often the gamma spectrum is read. 0 disables spectrum polling (the largest BLE transfer). |
-| Confirm Bluetooth writes (experimental) | Off | On / Off | Requests an acknowledgment for each command chunk. Test this only when comparing connection behavior; some proxies stall with it enabled. Changing the option reloads the integration. |
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for development and testing, [the architecture guide](docs/architecture.md) for implementation details, and [release versioning](docs/release-versioning.md) for publishing procedures.
 
----
+## License and acknowledgments
 
-## ESPHome Bluetooth Proxy Setup
+[MIT](LICENSE) © Bryan Fleming.
 
-For the best results with BT proxies:
-
-1. Flash an ESP32 board with the [ESPHome Bluetooth proxy firmware](https://esphome.github.io/bluetooth-proxies/)
-2. Place the proxy within ~5 m of your Radiacode device
-3. Ensure the proxy is added to HA (it will appear as an ESPHome device)
-
-**Tips for reliable operation:**
-- Keep the proxy within strong signal range of the Radiacode (RSSI better than −80 dBm)
-- Each ESP32 proxy supports up to 3 simultaneous BLE connections — don't overload it with other BLE devices
-- If the sensor becomes unavailable, check measurement freshness and transfer diagnostics as well as Bluetooth signal and proxy capacity
-
----
-
-## Known Limitations
-
-- **Large Bluetooth transfers** — weak links or busy proxies can stall spectrum/configuration transfers. The integration rejects incomplete responses, reconnects for subsequent polls, and backs off failed automatic spectrum reads. A stale data-buffer drain failure aborts initialization instead of continuing on a damaged stream; records sent during an interrupted read may be lost.
-- **Measurement freshness** — dose and count remain paired from the same sample. Empty buffers, repeated device timestamps and suppressed outliers do not renew freshness; after three poll intervals (at least 60 seconds) without a new accepted sample, radiation entities become unavailable, including during a reconnect. Diagnostics distinguish measurement age from a successful Bluetooth request.
-- **Outlier suppression delay** — a dose/count rate reading more than 50× above the current baseline is held for confirmation by a subsequent measurement. Suppressed values are logged as warnings; interrupted transfers and stale readings can extend the interval before confirmation.
-- **Signal Strength while connected** — a connected BLE peripheral stops advertising, so no fresh RSSI is available during an active connection; the sensor holds the last observed value until the next advertisement.
-- **RareData update rate** — Battery, Temperature, and Accumulated Dose are updated by the device approximately once per minute, regardless of the poll interval.
-- **Single connection** — The Radiacode can only maintain one BLE connection at a time. While this integration is connected, the Radiacode mobile app will not be able to connect to the device (and vice versa).
-
----
-
-## Troubleshooting
-
-### Sensor goes unavailable periodically
-
-Unavailable readings can result from dropped connections, incomplete transfers, or a device that has stopped delivering fresh measurements. Recent radiation readings remain available during a brief reconnect for up to 60 seconds (or three configured polling intervals, if longer). Diagnostics mark retained readings as cached; an independent timer expires them if fresh samples do not resume. Turning the BLE Connection switch off makes measurements unavailable immediately.
-
-Check diagnostics for measurement age and command failures, then check:
-- **RSSI** — look in HA logs for `RSSI=` values on the proxy. Below −85 dBm is marginal; below −95 dBm is unreliable. Move the proxy closer.
-- **Proxy slot usage** — the log will show `slots=X/3 free`. If you see `0/3 free` consistently, other BLE devices are competing for the proxy's connection slots.
-- **Device battery** — a low battery can cause the Radiacode to disconnect unexpectedly.
-
-### Integration fails to set up / "Cannot connect"
-
-- Confirm the Radiacode is powered on and not connected to another device (phone app, etc.)
-- Verify the MAC address is correct
-- Check HA logs (`Settings → System → Logs`) for detailed error messages
-- Try moving a Bluetooth proxy closer to the device
-
-### Spectrum stays unchanged through a Bluetooth proxy
-
-An incomplete spectrum read keeps the last complete snapshot; check diagnostics for snapshot age and declared/received bytes. The integration releases the affected connection and backs off automatic retries. After three consecutive failures, it pauses automatic spectrum acquisition so repeated large transfers stop interrupting radiation monitoring. The Spectrum entity shows `acquired_at` and `automatic_paused`; diagnostics also show `consecutive_failures` and `last_error`. `retry_in_seconds` is empty while paused. After addressing the connection problem, a successful manual **current-spectrum** action resumes automatic acquisition. Resetting the current spectrum or reloading the integration also starts a new bounded series of attempts. An accumulated-spectrum read does not resume current-spectrum acquisition.
-
-Spectra, configuration and the register directory have a 30-second transfer deadline once response packets start arriving; ordinary commands and bulk reads without a first reply have ten seconds. A two-second packet stall still fails the transfer. If notification bytes were dropped, a longer timeout cannot recover them.
-
-Correlate the HA command timestamp with the connected proxy's log. `Failed to send notify data response` means the proxy failed to forward a notification to HA. [ESPHome's warning implementation](https://github.com/esphome/esphome/blob/2026.9.0/esphome/components/bluetooth_connection/bluetooth_connection_hub.cpp#L360-L385) logs the first forwarding failure per connection, so one warning can accompany several missing notifications. The warning alone does not establish the underlying TCP-buffer cause.
-
-For an ESP32 proxy already built with ESPHome **2026.9.0 or later**, a controlled test can set the following in its ESPHome configuration (merge into an existing `network:` block):
-
-```yaml
-network:
-  tcp_send_buffer: 16kB
-```
-
-[ESPHome documents this setting](https://esphome.io/components/network/#configuration-variables) for bursty senders, and the [2026.9.0 changelog](https://esphome.io/changelog/2026.9.0/) records its introduction. Its effectiveness for Radiacode remains unverified. Larger buffers use more memory while data is queued. Compare repeated complete 1,024-channel reads and forwarding warnings before/after on the same connected proxy, keeping other settings unchanged.
-
-### Enabling debug logging
-
-Add the following to your `configuration.yaml` and restart HA (or use **Settings → Devices & Services → Radiacode → Enable debug logging** for a temporary session):
-
-```yaml
-logger:
-  logs:
-    custom_components.radiacode: debug
-```
-
-Debug logs include per-poll timings, BLE notification reassembly details, and decoded record distributions — include them when filing an issue.
-
-The command summaries identify the virtual string/register target, response sizes, notification count and size distribution, first-byte latency, maximum gap, lock wait, connection generation and failure category. Radiation logs identify the selected sample type/time, opaque flags and device-versus-receipt progression. Optional-operation errors remain separate from the primary polling result. Histories are bounded; routine logs do not print full spectra or configuration contents.
-
-On the proxy, look for notification-forwarding failures, dropped BLE events, TCP congestion and poor reception. An advertisement's source/RSSI can differ from the connected proxy and can be stale while connected. Record both the proxy project version and ESPHome build version; they are separate versions. [ESPHome's proxy documentation](https://esphome.io/components/bluetooth_proxy/) explains reception and shared-radio constraints.
-
-### Downloading diagnostics
-
-From the device page, click the three-dot menu → **Download diagnostics** to get a JSON dump of connection statistics, the latest sensor/settings snapshot, device-health readings, and the device's self-describing **SFR register directory** — a listing of every register the firmware supports with its address, size, type, and signedness (Bluetooth address and device name are redacted).
-
-The download also includes bounded transport history, maintenance status, measurement freshness and spectrum attempt/success ages. Device and proxy identifiers are redacted. Full research, primary references and hardware acceptance criteria are in [protocol and stability research](docs/protocol-and-stability-research.md).
-
-Starting with 2.0.2rc2, `runtime.data_buf` also includes decoded record types, encountered record groups (`record_group_counts`, keyed by `eid:gid`, including known skipped groups), decoder stopping reason and offset, valid/invalid measurement candidates and their timestamp ranges, and the last 20 sample decisions with UTC receipt times. `runtime.freshness.last_sample_rejection` distinguishes absent pairs/timestamps, repeated or regressed timestamps, and outlier suppression. A successful Bluetooth command can still produce no fresh measurement; these fields explain that distinction without a raw packet capture.
-
-Starting with 2.0.2rc3, live sensors prefer the newest valid `RealTimeData` pair even when raw/database records have later timestamps. Raw/database pairs remain fallbacks when no valid live pair is present. Timestamp replay/regression checks are separate for each record type in the current connection, so a fallback cannot block the next live reading and switching types cannot renew a replayed sample. See the [October 10 RC2 field review](docs/rc2-field-review-2026-10-10.md).
-
-Starting with 2.0.2rc4, the integration reads and caches the detector's configuration to distinguish the modern six-byte dose counter from older group-4 records. It publishes a separate **Dose Counter** sensor; the existing resettable **Accumulated Dose** sensor retains its meaning. Counter-only updates cannot renew live radiation freshness.
-
-Response headers can span notifications, and declared response sizes must fit the detector's negotiated transmit limit. **Confirm Bluetooth writes (experimental)** is disabled by default. When enabled, it uses acknowledged writes only if the characteristic supports them; a stalled write retires the transport without changing modes or replaying the command. Leave proxy settings constant when comparing this option, and turn it off if connection establishment or polling stalls. Reload after changing detector firmware so configuration is read again.
-
-The manufacturer's manuals describe log entries being deleted after reading and connected measurements being forwarded without being stored in autonomous history. Reconnecting restores acquisition but cannot promise to recover every missed measurement. See [RC4 protocol and connectivity evidence](docs/protocol-connectivity-rc4.md) for the source boundaries and device acceptance checks.
-
-Device controls use the active Bluetooth link independently of radiation freshness. A connected device's known settings and reset buttons remain usable while radiation is stale. Unknown settings, an inactive link, user-disabled BLE and shutdown keep the corresponding controls unavailable. Radiation still expires on its own bounded freshness window.
-
-Connection establishment has a 30-second total deadline around connector retries, followed by separately bounded cleanup when necessary. Device initialization commands and the coordinator's single retry have their own deadlines; 30 seconds is not a bound on the complete poll/recovery cycle. See the [October 9 connectivity review](docs/connectivity-review-2026-10-09.md) for the supplied evidence and next hardware test.
-
----
-
-## Contributing
-
-Bug reports and pull requests are welcome! Please open an [issue](https://github.com/303Bryan/ha-radiacode/issues) before starting large changes.
-
-The BLE protocol implementation is based on reverse-engineering work from:
-- [cdump/radiacode](https://github.com/cdump/radiacode) — Python library (MIT)
-- [mkgeiger/RadiaCode](https://github.com/mkgeiger/RadiaCode) — Arduino/ESP32 library (MIT)
-
----
-
-## License
-
-[MIT](LICENSE) © 2025 Bryan Fleming
+The BLE protocol implementation builds on reverse-engineering work from [cdump/radiacode](https://github.com/cdump/radiacode) and [mkgeiger/RadiaCode](https://github.com/mkgeiger/RadiaCode).

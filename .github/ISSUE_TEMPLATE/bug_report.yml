@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a problem with Radiacode in Home Assistant.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the troubleshooting guide first: https://github.com/303Bryan/ha-radiacode/blob/main/docs/troubleshooting.md
+        Review logs before posting. Raw logs can contain device names, Bluetooth addresses, serials, and proxy identifiers.
+  - type: textarea
+    id: versions
+    attributes:
+      label: Device and software versions
+      description: Include the firmware application build if available.
+      value: |
+        Integration:
+        Home Assistant:
+        Detector model:
+        Detector firmware/build:
+        Local Bluetooth adapter or proxy model:
+        Proxy project version:
+        ESPHome build version:
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Expected and actual behavior
+      description: Include reproduction steps, relevant timestamps, and whether this began after an update.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Diagnostics and relevant logs
+      description: Attach downloaded diagnostics and a short reviewed debug-log excerpt. Describe any unavailable evidence.
+  - type: textarea
+    id: settings
+    attributes:
+      label: Connection and options
+      description: Poll/spectrum intervals, write confirmation setting, other connected clients, and troubleshooting already attempted.
