@@ -86,6 +86,9 @@ def coordinator_module(monkeypatch, protocol):
     module("homeassistant.config_entries", ConfigEntry=SimpleNamespace)
     module("homeassistant.core", HomeAssistant=object)
     module("homeassistant.helpers", __path__=[])
+    module("homeassistant.helpers.storage", Store=lambda *a, **k: SimpleNamespace(
+        async_load=AsyncMock(return_value=None), async_save=AsyncMock(), async_remove=AsyncMock(),
+    ))
     module(
         "homeassistant.helpers.device_registry",
         CONNECTION_BLUETOOTH="bluetooth", DeviceInfo=dict,
@@ -169,6 +172,8 @@ def make_coordinator(coordinator_module, protocol, clock):
             )),
             get_serial_number=AsyncMock(return_value="RC-103-000123"),
             get_firmware_version=AsyncMock(return_value="4.14"),
+            configuration_snapshot=Mock(return_value=None),
+            restore_configuration_snapshot=Mock(return_value=False),
             get_sfr_file=AsyncMock(return_value=""),
             connect=AsyncMock(side_effect=connect),
             disconnect=AsyncMock(side_effect=disconnect),
@@ -696,7 +701,10 @@ def test_runtime_diagnostics_are_bounded_and_label_advertisement_source(make_coo
             clock.now += 5
             await refresh_and_settle(coordinator)
         assert len(coordinator.runtime_status["recent_phases"]) == 20
-        assert coordinator.transport_status == {"generation": 1}
+        assert coordinator.transport_status == {
+            "generation": 1,
+            "configuration_storage": {"checked": True, "saved": False, "error": False},
+        }
         assert "channels" not in coordinator.spectrum_status
         assert coordinator.spectrum_status["format_source"] == "direct_spectrum"
         await coordinator.async_shutdown()

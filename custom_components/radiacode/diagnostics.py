@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import CONF_ADDRESS, CONF_NAME, DOMAIN
 from .coordinator import RadiaCodeCoordinator
+from .radiacode_ble.firmware_profiles import PROFILES
 
 TO_REDACT = {
     CONF_ADDRESS,
@@ -29,6 +30,27 @@ TO_REDACT = {
     "connection_request_scanner_source",
 }
 
+_CONFIGURATION_SOURCES = {"device", "storage", "firmware_profile"}
+_PUBLIC_PROFILE_NAMES = {profile.name for profile in PROFILES}
+
+
+def _redact_transport(status: dict[str, Any]) -> dict[str, Any]:
+    """Keep known protocol provenance labels while redacting device identities."""
+    redacted = async_redact_data(status, TO_REDACT)
+    configuration = status.get("configuration")
+    if isinstance(configuration, dict):
+        # The generic source/name keys also describe Bluetooth identities.
+        # Restore only allowlisted values at these precise protocol paths.
+        source = configuration.get("source")
+        if isinstance(source, str) and source in _CONFIGURATION_SOURCES:
+            redacted["configuration"]["source"] = source
+        profile = configuration.get("firmware_profile")
+        if source == "firmware_profile" and isinstance(profile, dict):
+            name = profile.get("name")
+            if isinstance(name, str) and name in _PUBLIC_PROFILE_NAMES:
+                redacted["configuration"]["firmware_profile"]["name"] = name
+    return redacted
+
 
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry
@@ -37,8 +59,10 @@ async def async_get_config_entry_diagnostics(
     coordinator: RadiaCodeCoordinator = hass.data[DOMAIN][entry.entry_id]
     data = coordinator.data
     sensors = asdict(data.sensors) if data is not None else None
-    if sensors is not None and sensors.get("measurement_time") is not None:
-        sensors["measurement_time"] = sensors["measurement_time"].isoformat()
+    if sensors is not None:
+        for key in ("measurement_time", "temperature_time", "accumulated_dose_time"):
+            if sensors.get(key) is not None:
+                sensors[key] = sensors[key].isoformat()
 
     return {
         "entry": {
@@ -71,7 +95,5 @@ async def async_get_config_entry_diagnostics(
         "device_health": asdict(data.diagnostics) if data is not None else None,
         "spectrum": coordinator.spectrum_status,
         "runtime": async_redact_data(coordinator.runtime_status, TO_REDACT),
-        "transport": async_redact_data(
-            coordinator.transport_status, TO_REDACT
-        ),
+        "transport": _redact_transport(coordinator.transport_status),
     }

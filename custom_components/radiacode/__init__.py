@@ -13,6 +13,7 @@ from homeassistant.core import (
 )
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.storage import Store
 
 from .const import (
     ATTR_ACCUMULATED,
@@ -32,6 +33,11 @@ PLATFORMS: list[Platform] = [
     Platform.SELECT,
     Platform.BUTTON,
 ]
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove private protocol metadata when its config entry is deleted."""
+    await Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.configuration").async_remove()
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -9,7 +9,9 @@ import asyncio
 import datetime as dt
 import logging
 import json
+from copy import deepcopy
 from datetime import timedelta
+from dataclasses import replace
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -20,6 +22,7 @@ pytest_asyncio = pytest.importorskip("pytest_asyncio")
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
@@ -42,6 +45,11 @@ from custom_components.radiacode.diagnostics import async_get_config_entry_diagn
 async def runtime(tmp_path, monkeypatch):
     """Use real coordinator/entity lifecycles without starting Bluetooth."""
     hass = HomeAssistant(str(tmp_path))
+    # Enum sensors consult the registry during platform setup. Load the same
+    # registries HA initializes before integrations, with empty test storage.
+    dr.async_setup(hass)
+    await dr.async_load(hass, load_empty=True)
+    await er.async_load(hass, load_empty=True)
     entry = ConfigEntry(
         data={"address": "AA:BB:CC:DD:EE:FF", "name": "Test detector"},
         options={"poll_interval": 5, "spectrum_interval": 60},
@@ -65,6 +73,7 @@ async def runtime(tmp_path, monkeypatch):
         get_diagnostics=AsyncMock(return_value=RadiaCodeDiagnostics()),
         get_serial_number=AsyncMock(return_value="TEST-DEVICE"),
         get_firmware_version=AsyncMock(return_value="4.14"),
+        get_sfr_file=AsyncMock(return_value=""),
         get_spectrum=AsyncMock(return_value=Spectrum(
             duration_s=60, a0=-2, a1=3, a2=0.001, counts=[1] * 1024,
         )),
@@ -128,6 +137,42 @@ async def test_radiation_reaches_ha_before_blocked_spectrum(runtime):
     assert state.attributes["channel_count"] == 1024
     assert state.attributes["channels"] == [2] * 1024
     assert coordinator._unsub_refresh is scheduled_refresh
+
+
+@pytest.mark.asyncio
+async def test_failed_directory_is_independent_of_reconnect_identity(runtime):
+    hass, c, client, dose, _ = runtime
+    c._spectrum_interval = 0
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def incomplete_directory():
+        entered.set()
+        await release.wait()
+        client.is_connected = False
+        raise TimeoutError("SFR_FILE incomplete")
+
+    client.get_sfr_file.side_effect = incomplete_directory
+    await c.async_refresh()
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert hass.states.get(dose.entity_id).state == "0.12"
+    release.set()
+    await c._maintenance_task
+    assert c._sfr_attempted
+    assert c.runtime_status["maintenance"]["errors"]["register_directory"] == "SFR_FILE incomplete"
+    client.is_connected = True
+    c._connection_count += 1
+    client.get_data.return_value = replace(
+        client.get_data.return_value,
+        measurement_time=client.get_data.return_value.measurement_time + timedelta(seconds=5),
+        dose_rate=0.13,
+    )
+    await c.async_refresh()
+    if c._maintenance_task is not None:
+        await c._maintenance_task
+    client.get_firmware_version.assert_awaited_once()
+    client.get_sfr_file.assert_awaited_once()
+    assert hass.states.get(dose.entity_id).state == "0.13"
+    assert client.is_connected
 
 
 @pytest.mark.asyncio
@@ -325,6 +370,56 @@ async def test_downloadable_diagnostics_serialize_and_redact_sources(runtime):
     assert "AA:BB:CC:DD:EE:FF" not in serialized
     assert result["sensors"]["measurement_time"] == "2026-01-01T12:00:00"
     assert result["transport"]["recent_commands"][0]["received_body_bytes"] == 1254
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["device", "storage", "firmware_profile"])
+async def test_diagnostics_keep_protocol_labels_but_hide_identities(runtime, source):
+    from custom_components.radiacode.radiacode_ble.firmware_profiles import PROFILES
+
+    hass, coordinator, client, _, _ = runtime
+    profile_name = next(p.name for p in PROFILES if p.model == "RC-103")
+    client.transport_diagnostics = {
+        "configuration": {
+            "source": source,
+            "firmware_profile": {"name": profile_name} if source == "firmware_profile" else None,
+        },
+        "transport": {
+            "source": "Private proxy source",
+            "name": "Private proxy name",
+            "connection_request_source": "AA:BB:CC:DD:EE:FF",
+        },
+        "recent_commands": [{"source": source, "name": profile_name}],
+    }
+    before = deepcopy(client.transport_diagnostics)
+    hass.data["radiacode"] = {coordinator._entry_id: coordinator}
+    result = await async_get_config_entry_diagnostics(hass, coordinator.config_entry)
+    config = result["transport"]["configuration"]
+    assert config["source"] == source
+    if source == "firmware_profile":
+        assert config["firmware_profile"]["name"] == profile_name
+    serialized = json.dumps(result)
+    assert "Private proxy" not in serialized and "AA:BB:CC:DD:EE:FF" not in serialized
+    # Known labels are public only at their specific configuration paths.
+    assert result["transport"]["recent_commands"][0] == {"source": "**REDACTED**", "name": "**REDACTED**"}
+    assert client.transport_diagnostics == before
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_do_not_restore_arbitrary_profile_names(runtime):
+    hass, coordinator, client, _, _ = runtime
+    client.transport_diagnostics = {
+        "configuration": {
+            "source": "firmware_profile",
+            "firmware_profile": {"name": "RC-103-PRIVATE-SERIAL"},
+        },
+    }
+    hass.data["radiacode"] = {coordinator._entry_id: coordinator}
+    result = await async_get_config_entry_diagnostics(hass, coordinator.config_entry)
+    assert "PRIVATE-SERIAL" not in json.dumps(result)
+    client.transport_diagnostics["configuration"]["source"] = "Private source"
+    result = await async_get_config_entry_diagnostics(hass, coordinator.config_entry)
+    assert result["transport"]["configuration"]["source"] == "**REDACTED**"
 
 
 @pytest.mark.asyncio

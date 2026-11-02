@@ -11,6 +11,118 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.11.1] — 2026-11-02
+
+Stable release of the tested 1XX firmware 4.15 decoding, measurement-quality and bounded-maintenance improvements. Relative to the overnight-tested beta, production changes are limited to diagnostic labels and release metadata.
+
+### Added and improved since 2026.10.3
+- Decode validated device declarations for channel order, widths, units and scaling, including 4.15's two-byte real-time flags, rem-based dose units and longer measurement-session records. Preserve following battery, temperature, accumulated-dose and counter records; session-only traffic cannot extend live-reading freshness.
+- Select bundled record layouts for exact known RC-101, RC-102, RC-103, RC-103G and RC-110 application builds using existing identity replies, avoiding a large configuration download. Unknown builds retain bounded discovery; complete device declarations remain authoritative. Reconnects and application-build changes revalidate or invalidate metadata as appropriate.
+- Add dose/count uncertainty and calculated quality, count-rate and accumulated-dose alarm levels, temperature status and opaque device-event diagnostics. These calculated conditions do not claim to reproduce firmware alarm acknowledgment or latching.
+- Bound configuration downloads to three automatic attempts and separate the diagnostic register-directory download from firmware checks. Persist validated complete device configuration in private Home Assistant storage with device, firmware/build, parser and integrity checks.
+
+### Final corrections
+- Retain allowlisted configuration-source and bundled-profile labels in downloadable diagnostics while continuing to redact device and Bluetooth-proxy identities. Arbitrary source/name values remain redacted.
+- Show the declared native dose unit in debug logs (`rem/h` for the supported new firmware, `R/h` for the legacy convention). Numerical readings and conversion factors are unchanged.
+
+### Field acceptance and limits
+- The RC-103/4.15 overnight run recorded 8,420 successful ordinary measurement reads, 8,416 fresh readings and a maximum 15.05-second fresh-reading gap over 11 hours 42 minutes. There were no freshness expirations or recurring byte-22 alignment failures, and no configuration downloads.
+- Spectrum acquisition succeeded on 630 of 634 attempts. Each incomplete response was rejected, the connection recovered, and the next scheduled spectrum attempt succeeded. Complete-frame validation, timing, write mode and freshness behavior are unchanged from the tested beta.
+- Regression coverage includes privacy-preserving diagnostic labels and setup/unload/reload profile activation in the pinned Home Assistant runtime matrix. The physical capture begins after startup; reload coverage is automated with controlled identity replies, not a separate new physical soak.
+- Requires Home Assistant 2026.9.4 or newer. Other device/proxy combinations can still lose notifications; spectrum age and retry state remain visible. ZERO is not included. See the [stable field assessment](docs/stable-field-review-2026-11-02.md).
+
+---
+
+## [2026.11.1b1] — 2026-11-01
+
+Decode the vendor's 1XX firmware 4.15 layouts and avoid the large configuration download when the detector reports an exact known application build. Continues the October beta series under the November calendar release line.
+
+### Fixed
+- Accept declared `rem/h`, `rem` and `urem` dose units alongside the supported legacy declarations. Preserve existing numerical conversion factors and expose the declared units in layout diagnostics.
+- Decode the declared 16-bit real-time flags, preserving following battery, temperature, accumulated-dose and counter records. The configuration-driven 8-bit legacy layout remains supported.
+- Consume group-5 measurement-session records using their validated 19-byte payload instead of the legacy 16-byte skip. Session-only traffic cannot renew live radiation freshness. Unknown or malformed declared layouts stop decoding.
+
+### Added
+- Bundled record declarations for the exact RC-101, RC-102, RC-103, RC-103G and RC-110 4.15 vendor builds. Selection requires the serial model, firmware version and complete application build timestamp from the existing `GET_VERSION` reply. It adds no BLE command and avoids automatic configuration downloads for a matching build. Unknown builds retain bounded discovery.
+- Diagnostics identify `source: firmware_profile`, the application build and the bundled layout's provenance hashes. These hashes describe the source files; they are not a live flash checksum or cryptographic attestation. A complete device configuration remains authoritative, and bundled declarations are never saved as downloaded device configuration.
+- Reconfirm profiles after reconnect and invalidate metadata on application-build changes even when the numeric firmware version is unchanged. Private configuration storage now also matches the build timestamp; older cache envelopes are discarded and rediscovered or replaced by a matching profile.
+
+### Validation and limits
+- Regression fixtures include configuration extracted from all five CRC-verified 4.15 vendor containers and a captured 1,009-byte 4.14 measurement buffer. Tests cover following-record alignment, both flag widths, unit validation, group-5 truncation, exact build/model selection, corrupt bundles, reconnects, cache precedence and same-version build changes. Generated 4.15 record streams are explicitly synthetic.
+- Complete-frame rejection, write mode, command deadlines, primary-poll priority, freshness limits and optional-transfer retry budgets remain in place. The earlier proxy/discovery failures are not claimed fixed. ZERO remains outside this release.
+- Physical 4.15/proxy acceptance remains pending. See [firmware evidence and beta test steps](docs/firmware-415-beta-2026-11-01.md).
+
+---
+
+## [2026.10.4b4] — 2026-10-31
+
+Use validated 1XX device declarations and retain verified configuration across reloads, while preserving the bounded transport and freshness behavior from earlier builds.
+
+### Changed
+- Decode supported realtime, raw, dose-rate database and rare records in their declared channel order. Validate IDs, wire and representation types, units and known scaling before use. Explicit declarations can select one-byte or two-byte realtime flags; firmware version alone cannot select a layout. Unsupported declared groups stop decoding, and absent declarations retain the legacy fallback.
+- Persist complete supported configurations in private, atomic Home Assistant storage. Reuse requires matching address, serial number, confirmed firmware, parser version and SHA-256. Reject corrupt or mismatched caches, invalidate after confirmed firmware changes, and remove storage when the integration is deleted. Cache reads/writes run in maintenance, and storage errors do not retire the Bluetooth connection.
+- Add sanitized configuration source, scalar-group validation results, representation types and storage status to diagnostics. Raw configuration and cache identity are not included.
+
+### Validation and limits
+- Regression coverage includes legacy equivalence, both explicitly declared flag widths, channel reordering, record-tail decoding, every truncated-buffer boundary, unsupported declarations, identity/version/hash rejection, reloads and storage failures. Real HA storage round trips and firmware invalidation are exercised in the pinned runtime matrix.
+- The newest capture contains 227 complete measurement-buffer responses and 18 failed measurement-buffer transfers. There are 207 accepted fresh readings, with a largest observed gap of 37.674 seconds. Configuration and spectrum limits pause as intended; two measurement-buffer failures occur after both pauses. This does not establish a healthy physical link.
+- No complete firmware 4.15 configuration has yet been captured from the affected detector. The new layouts are covered by explicitly labeled synthetic fixtures, not represented as hardware-verified. One successful configuration read is still needed to activate/cache the actual layout. Preserve strict frame validation, command deadlines, write-mode defaults and three-attempt limits. ZERO remains out of scope.
+- See [build comparison and field acceptance steps](docs/beta4-stability-review-2026-10-31.md). This is a testing beta; stable promotion requires fresh evidence from this exact candidate.
+
+---
+
+## [2026.10.4b3] — 2026-10-30
+
+Bound automatic configuration discovery after the longer stationary 1XX field test.
+
+### Fixed
+- **Five-minute configuration reconnect loop** — pause automatic configuration downloads after three unsuccessful attempts, retaining the five-minute delay between attempts. The budget survives reconnects and the BLE Connection switch, including cancelled transfers. Reloading the integration, changing detectors or detecting a confirmed firmware change permits new attempts. A successful explicit configuration read clears the pause and caches only the complete reply.
+- Expose `automatic_attempts`, `automatic_attempt_limit` and `automatic_paused` in `transport.configuration` diagnostics. A paused download has no scheduled retry; one warning explains how to retry it. Primary radiation polling and other maintenance continue.
+
+### Evidence and limits
+- In the later 28-minute segment of the supplied log, all 344 measurement-buffer commands succeeded and 336 fresh dose/count pairs were accepted. Five configuration downloads failed and each retired its connection at roughly five-minute intervals. The largest accepted-reading gap in that segment was 15 seconds. See [field findings and beta 3 test steps](docs/beta3-connection-review-2026-10-30.md).
+- Regressions cover incomplete framed replies, repeated reconnects, cancellation, successful recovery and firmware/address/reload reset behavior. Hardware acceptance of this beta remains pending.
+- This change prevents indefinite automatic retries; it does not repair missing Bluetooth notifications or the firmware 4.15 record-boundary mismatch. No speculative decoder change, transfer-timeout increase or ZERO support is included.
+
+---
+
+## [2026.10.4b2] — 2026-10-30
+
+Connection recovery follow-up for 1XX devices after the first firmware 4.15 field capture.
+
+### Fixed
+- **Register-directory reconnect loop** — separate the large diagnostic SFR download from the small firmware check. Attempt it once per integration load/confirmed firmware version, including when it fails or is cancelled. Reconnecting no longer retries that failed download every minute; firmware checks still run after reconnect.
+- **Configuration blocking connection setup** — defer configuration discovery to optional maintenance after primary publication. An incomplete configuration response still retires its connection and backs off, but cannot fail connection initialization or trigger its immediate retry path.
+
+### Diagnostics and validation
+- Include a bounded record-layout summary from the actual device configuration: known group/channel names, numeric IDs/types/scales, and recognized units. Device identity and unrelated configuration text are excluded.
+- Add reconnect-loop/cancellation regressions and HA 2026.10.4 to the runtime matrix.
+- The supplied field log also shows incomplete spectrum transfers and a firmware 4.15 record-boundary mismatch. These remain unresolved; no speculative record-width or dose-counter-unit change is included. Live radiation readings continued during the later capture, while battery/accumulated-dose/counter data were missing. See [field findings and b2 testing](docs/beta2-connection-review-2026-10-30.md).
+
+---
+
+## [2026.10.4b1] — 2026-10-30
+
+Beta for testing the 1XX measurement-quality and alarm improvements prompted by Windows 1.16.01 / firmware 4.15. ZERO support is not included.
+
+### Added
+- **Measurement uncertainty and quality** — Dose Rate and Count Rate expose `uncertainty_percent`, calculated `quality`, reasons, and opaque measurement flags. New Dose Rate Quality and Count Rate Quality diagnostic sensors show `normal`, `reduced`, or unknown. Error metadata stays attached to the accepted measurement; reduced accuracy does not suppress the reading or renew its freshness.
+- **Calculated alarm/status entities** — Count Rate Alarm and Accumulated Dose Alarm compare readings against the device's configured thresholds. Detector Temperature Status reports `normal`, `low`, or `high`; it becomes unknown after 180 seconds without an actual observation. Accumulated Dose Alarm becomes unavailable after its own 180-second observation window. These are calculated conditions, not firmware acknowledgment or latched alarm states.
+- **Device event diagnostics** — retain up to ten recent decoded events with opaque codes/flags and native-unit channel values. Event-only traffic cannot renew radiation freshness.
+
+### Fixed
+- **Additional alarm-event payloads** — use a validated device configuration to decode optional and combined event channels, including temperature, so later live readings in the same buffer remain readable. Reject malformed/unknown schemas, undeclared mask bits, and truncated events. Existing limited legacy layouts remain available before configuration is known.
+- **Temperature below −20 °C** — decode the documented signed temperature field instead of wrapping a negative raw value into a large positive temperature.
+- **Firmware changes after reconnect** — recheck firmware with bounded optional maintenance; a previous connection's record schema waits for confirmation. On a detected change, invalidate configuration, spectrum metadata/snapshot, register directory, settings, and temperature freshness, then refresh them. Reconnect failures retain existing backoff and primary-poll priority.
+
+### Validation and limits
+- Protocol, transport, coordinator, entity and HA runtime regressions cover the new behavior. New alarm fixtures are synthetic representations of the inspected manufacturer schema, not captured firmware 4.15 alarms.
+- Quality uses the documented 30% dose-rate / 50% count-rate uncertainty limits and detector temperature. Missing/stale evidence produces unknown quality; exactly 45 °C remains unknown because the manufacturer documents disagree at that boundary. MCU temperature is not used.
+- Dose/count values, numerical unit conversions, BLE chunking, write mode, and transfer deadlines are unchanged. No fix for proxy notification loss is claimed. No firmware flashing or ZERO support is added.
+- Physical 1XX / firmware 4.15 and Bluetooth-proxy testing is pending. See [beta test guide](docs/1xx-quality-beta-2026-10-30.md) for the checks and diagnostics to collect.
+
+---
+
 ## [2026.10.3] — 2026-10-11
 
 Promotes the tested RC5 implementation to stable. This release includes the cumulative connectivity, measurement-selection, dose-counter and spectrum-status improvements from RC1–RC5; runtime behavior is unchanged from RC5.
@@ -493,3 +605,5 @@ Initial public release.
 [0.3.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.3.0
 [0.2.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.2.0
 [0.1.0]: https://github.com/303Bryan/ha-radiacode/releases/tag/v0.1.0
+
+[2026.11.1]: https://github.com/303Bryan/ha-radiacode/releases/tag/v2026.11.1

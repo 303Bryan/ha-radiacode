@@ -208,7 +208,7 @@ def test_establishment_uses_cache_client_without_ineffective_timeout_kwarg(
         monkeypatch.setattr(client_module, "establish_connection", establish)
         await client.connect(device)
         assert len(transports) == 1
-        assert len(transports[0].requests) == 5
+        assert len(transports[0].requests) == 4
         assert client.is_connected
         await client.disconnect()
         assert transports[0].disconnect_count == 1
@@ -241,7 +241,7 @@ def test_internal_connection_retry_clears_failed_attempt_disconnect_event(
         monkeypatch.setattr(client_module, "establish_connection", establish)
         await client.connect(device)
         assert len(transports) == 1
-        assert len(transports[0].requests) == 5
+        assert len(transports[0].requests) == 4
         assert transports[0].disconnect_count == 0
         assert not client._disconnected_event.is_set()
         assert client.is_connected
@@ -344,7 +344,7 @@ def test_cancelled_establishment_finishes_cleanup_before_queued_reconnect(
             await connecting
         await reconnect
         assert transports[0].disconnect_count == 1
-        assert len(transports[1].requests) == 5
+        assert len(transports[1].requests) == 4
         assert client.is_connected
         assert not client._cmd_lock.locked()
         await client.disconnect()
@@ -534,7 +534,7 @@ def test_repeated_cancellation_finishes_cleanup_before_queued_reconnect(
         await reconnect
         assert old.disconnect_count == 1
         assert not old.is_connected
-        assert len(fresh.requests) == 5
+        assert len(fresh.requests) == 4
         assert client.is_connected
         assert not client._cmd_lock.locked()
     asyncio.run(scenario())
@@ -760,7 +760,7 @@ def test_reconnect_filters_old_callbacks_during_new_command(client_module, monke
         device = supply_connection(monkeypatch, client_module, fresh)
         await client.connect(device)
         assert client.is_connected
-        assert len(fresh.requests) == 5  # handshake, time, device time, configuration, drain
+        assert len(fresh.requests) == 4  # handshake, time, device time, drain
 
         def ghost_then_reply(transport, request):
             old.notify(b"late unframed continuation from old connection")
@@ -915,7 +915,7 @@ def test_spectrum_reads_directly_and_keeps_observed_encoding_across_reconnect(cl
         assert client.spectrum_format_version == 0
         assert client._spectrum_format_loaded
         assert len((await client.get_spectrum()).counts) == 1024
-        assert calls.count(client_module.VS.CONFIGURATION) == 1
+        assert calls.count(client_module.VS.CONFIGURATION) == 0
 
     asyncio.run(scenario())
 
@@ -1467,7 +1467,7 @@ def test_set_exchange_retains_legacy_and_current_negotiated_limits(
             "interface_type": None if interface is None else 2,
         }
         assert metadata["response_body_limit"] == 2048
-        assert len(transport.requests) == 5
+        assert len(transport.requests) == 4
         assert all(mode is False for mode in transport.write_responses)
         metadata["exchange"]["target_id"] = 0
         assert client.transport_diagnostics["transport"]["exchange"]["target_id"] == target
@@ -1537,7 +1537,7 @@ def test_negotiated_limit_accepts_boundary_and_rejects_oversize_reply(
         assert stats["received_body_bytes"] == 0
         assert stats["error_category"] == "invalid_frame"
         assert transport.disconnect_count == 1
-        assert len(transport.requests) == 7
+        assert len(transport.requests) == 6
 
     asyncio.run(scenario())
 
@@ -1632,7 +1632,7 @@ def test_default_unacknowledged_mode_accepts_characteristic_without_write_suppor
         transport.services.characteristic.properties = ["write-without-response"]
         device = supply_connection(monkeypatch, client_module, transport)
         await client.connect(device)
-        assert len(transport.requests) == 5
+        assert len(transport.requests) == 4
         assert all(response is False for response in transport.write_responses)
         await client.disconnect()
 
@@ -1747,7 +1747,7 @@ def _virtual_string_requests(module, transport):
     ]
 
 
-def test_initial_configuration_decodes_counter_and_following_live_without_spectrum(
+def test_optional_configuration_decodes_counter_and_following_live_without_spectrum(
     client_module, monkeypatch,
 ):
     async def scenario():
@@ -1760,12 +1760,14 @@ def test_initial_configuration_decodes_counter_and_following_live_without_spectr
         device = supply_connection(monkeypatch, client_module, transport)
         await client.connect(device)
         assert _virtual_string_requests(client_module, transport) == [
-            client_module.VS.CONFIGURATION, client_module.VS.DATA_BUF,
+            client_module.VS.DATA_BUF,
         ]
         assert [step["step"] for step in client.transport_diagnostics["initialization_steps"]] == [
             "establish_connection", "start_notify", "set_exchange", "set_time",
-            "device_time", "configuration", "data_buf",
+            "device_time", "data_buf",
         ]
+        assert client.configuration_retry_due
+        await client.refresh_record_configuration()
         schema = client.transport_diagnostics["configuration"]
         assert schema["loaded"] is True
         assert schema["group4_schema"] == client_module.Group4Format.DOSE_COUNTER.value
@@ -1783,7 +1785,7 @@ def test_initial_configuration_decodes_counter_and_following_live_without_spectr
             "DoseCounterData": 1, "RealTimeData": 1,
         }
         assert _virtual_string_requests(client_module, transport) == [
-            client_module.VS.CONFIGURATION, client_module.VS.DATA_BUF, client_module.VS.DATA_BUF,
+            client_module.VS.DATA_BUF, client_module.VS.CONFIGURATION, client_module.VS.DATA_BUF,
         ]
         assert client.is_connected
         assert transport.disconnect_count == 0
@@ -1804,6 +1806,8 @@ def test_complete_record_configuration_is_cached_across_same_address_reconnect(
         first = FakeBLETransport(client_module, handler)
         device = supply_connection(monkeypatch, client_module, first)
         await client.connect(device)
+        assert len(first.requests) == 4
+        await client.refresh_record_configuration()
         assert len(first.requests) == 5
         assert (await client.get_data()).dose_counter == pytest.approx(1060.09)
 
@@ -1814,9 +1818,17 @@ def test_complete_record_configuration_is_cached_across_same_address_reconnect(
         assert first.disconnect_count == 1
         assert len(second.requests) == 4
         assert _virtual_string_requests(client_module, second) == [client_module.VS.DATA_BUF]
+        # Retained schema cannot decode counters on a new link until firmware
+        # is confirmed (or configuration is obtained on the current link).
+        assert (await client.get_data()).dose_counter is None
+        async def version_reply(cmd, args=b""):
+            assert cmd == client_module.CMD.GET_VERSION
+            return struct.pack("<HH", 1, 4) + bytes([0]) + struct.pack("<HH", 14, 4) + bytes([0])
+        monkeypatch.setattr(client, "_execute", version_reply)
+        assert await client.get_firmware_version() == "4.14"
         assert (await client.get_data()).dose_counter == pytest.approx(1060.09)
         assert _virtual_string_requests(client_module, second) == [
-            client_module.VS.DATA_BUF, client_module.VS.DATA_BUF,
+            client_module.VS.DATA_BUF, client_module.VS.DATA_BUF, client_module.VS.DATA_BUF,
         ]
         assert client.transport_diagnostics["configuration"]["group4_schema"] == (
             client_module.Group4Format.DOSE_COUNTER.value
@@ -1837,6 +1849,7 @@ def test_different_address_invalidates_the_record_configuration_cache(
         )
         device = supply_connection(monkeypatch, client_module, first)
         await client.connect(device)
+        await client.refresh_record_configuration()
         assert client._group4_format is client_module.Group4Format.DOSE_COUNTER
 
         unknown_handler = _sensor_configuration_handler(
@@ -1854,9 +1867,12 @@ def test_different_address_invalidates_the_record_configuration_cache(
         second = FakeBLETransport(client_module, second_handler)
         supply_connection(monkeypatch, client_module, second)
         await client.connect(types.SimpleNamespace(address="11:22:33:44:55:66"))
+        assert len(second.requests) == 4
+        assert not client._configuration_loaded
+        await client.refresh_record_configuration()
         assert len(second.requests) == 5
         assert _virtual_string_requests(client_module, second) == [
-            client_module.VS.CONFIGURATION, client_module.VS.DATA_BUF,
+            client_module.VS.DATA_BUF, client_module.VS.CONFIGURATION,
         ]
         assert client.transport_diagnostics["configuration"]["loaded"] is True
         assert client.transport_diagnostics["configuration"]["group4_schema"] is None
@@ -1883,6 +1899,9 @@ def test_incomplete_configuration_retires_link_and_backs_off_until_optional_retr
         def incomplete_configuration(transport, request):
             command = struct.unpack_from("<H", request, 4)[0]
             if command == client_module.CMD.RD_VIRT_STRING:
+                if struct.unpack_from("<I", request, 8)[0] == client_module.VS.DATA_BUF:
+                    transport.reply(request, struct.pack("<II", 1, 0))
+                    return
                 assert struct.unpack_from("<I", request, 8)[0] == client_module.VS.CONFIGURATION
                 transport.notify(struct.pack("<i", 80) + request[4:8] + b"partial")
             else:
@@ -1890,19 +1909,26 @@ def test_incomplete_configuration_retires_link_and_backs_off_until_optional_retr
 
         first = FakeBLETransport(client_module, incomplete_configuration)
         device = supply_connection(monkeypatch, client_module, first)
-        with pytest.raises(client_module.RadiaCodeInitError) as error:
-            await client.connect(device)
-        assert error.value.step == "configuration"
-        assert isinstance(error.value.__cause__, TimeoutError)
+        await client.connect(device)
+        assert client.is_connected
+        assert _virtual_string_requests(client_module, first) == [client_module.VS.DATA_BUF]
+        with pytest.raises(TimeoutError):
+            await client.refresh_record_configuration()
         assert first.disconnect_count == 1
-        assert len(first.requests) == 4
-        assert _virtual_string_requests(client_module, first) == [client_module.VS.CONFIGURATION]
+        assert len(first.requests) == 5
+        assert _virtual_string_requests(client_module, first) == [client_module.VS.DATA_BUF, client_module.VS.CONFIGURATION]
         assert not client.is_connected
         assert not client._cmd_lock.locked()
         assert not client.configuration_retry_due
         assert client.transport_diagnostics["configuration"] == {
             "loaded": False, "group4_schema": None,
             "retry_in_seconds": client_module._CONFIGURATION_RETRY_INTERVAL,
+            "firmware_check_pending": True, "schema_usable": False,
+            "event_schema": False, "firmware_version": None, "record_layout": [],
+            "firmware_build": None, "firmware_profile": None,
+            "automatic_attempts": 1, "automatic_attempt_limit": 3,
+            "automatic_paused": False,
+            "source": None, "scalar_groups": {},
         }
 
         # Recovery must perform small init/drain commands and deliver live
@@ -1974,6 +2000,7 @@ def test_unknown_complete_schema_preserves_prior_live_record_and_stops_at_group4
         )
         device = supply_connection(monkeypatch, client_module, transport)
         await client.connect(device)
+        await client.refresh_record_configuration()
         schema = client.transport_diagnostics["configuration"]
         assert schema["loaded"] is True
         assert schema["group4_schema"] is None
@@ -2015,6 +2042,7 @@ def test_record_schema_discovery_does_not_poison_observed_spectrum_encoding(
         fresh = FakeBLETransport(client_module, handler)
         device = supply_connection(monkeypatch, client_module, fresh)
         await client.connect(device)
+        await client.refresh_record_configuration()
         assert client.spectrum_format_version == 1
         assert client.spectrum_format_source == "complete_payload"
         assert not client._spectrum_format_authoritative

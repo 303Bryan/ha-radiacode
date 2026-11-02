@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -66,6 +67,7 @@ from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -87,6 +89,7 @@ from .radiacode_ble.protocol import (
     Spectrum,
     SpikeFilter,
     compute_hardness,
+    measurement_quality,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -104,6 +107,7 @@ _SETTINGS_INTERVAL = 60.0
 _DIAGNOSTICS_INTERVAL = 60.0
 _IDENTITY_RETRY_INTERVAL = 60.0
 _TEMPERATURE_INTERVAL = 60.0
+_STATUS_FRESHNESS = 180.0
 _SPECTRUM_RETRY_MIN = 300.0
 _SPECTRUM_RETRY_MAX = 3600.0
 _SPECTRUM_FAILURE_LIMIT = 3
@@ -138,6 +142,13 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         )
 
         self._entry_id = entry.entry_id
+        self._configuration_store = Store(
+            hass, 1, f"{DOMAIN}.{entry.entry_id}.configuration",
+            private=True, atomic_writes=True,
+        )
+        self._configuration_store_loaded = False
+        self._stored_configuration = None
+        self._configuration_storage_error = False
         # Spectrum polling cadence in elapsed seconds. 0 disables.
         spectrum_interval = entry.options.get(
             CONF_SPECTRUM_INTERVAL, DEFAULT_SPECTRUM_INTERVAL
@@ -162,6 +173,12 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # Independent non-resettable counter; never merge with since-reset dose.
         self._last_dose_counter: Optional[float] = None
         self._last_temperature: Optional[float] = None
+        self._temperature_observed: Optional[float] = None
+        self._rare_record_time: Optional[datetime] = None
+        self._rare_connection = 0
+        self._dose_observed: Optional[float] = None
+        self._status_expiry_handle: Optional[asyncio.TimerHandle] = None
+        self._device_events: deque[dict] = deque(maxlen=10)
 
         # Keep one accepted measurement pair across brief record-less polls.
         # A valid zero is a fresh measurement, not a reconnect placeholder.
@@ -170,6 +187,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._last_measurement_time: Optional[datetime] = None
         self._last_measurement_type: Optional[str] = None
         self._last_measurement_flags: Optional[int] = None
+        self._last_dose_rate_error: Optional[float] = None
+        self._last_count_rate_error: Optional[float] = None
+        self._last_real_time_flags: Optional[int] = None
         self._last_fresh_monotonic: Optional[float] = None
         self._last_measurement_connection = 0
         # Raw/database offsets can lead the live stream. A fallback must not
@@ -219,10 +239,13 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._serial_number: Optional[str] = None
         self._fw_version: Optional[str] = None
         self._next_identity_read = 0.0
+        self._identity_connection = 0
 
         # Device's self-describing SFR register directory (fetched once,
         # alongside identity).  Logged at debug and exposed in diagnostics.
         self._sfr_file: Optional[str] = None
+        self._sfr_attempted = False
+        self._next_sfr_read = 0.0
 
         # ── Diagnostics ──────────────────────────────────────────────────
         self._last_error: Optional[str] = None
@@ -341,6 +364,79 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         """The device's SFR register directory text, or None if unread."""
         return self._sfr_file
 
+    def _status_fresh(self, observed: Optional[float]) -> bool:
+        age = self._age(observed)
+        return not self._stopping and not self._user_disconnected and age is not None and age < _STATUS_FRESHNESS
+
+    @property
+    def detector_temperature_status(self) -> dict:
+        value = self._last_temperature
+        fresh = self._status_fresh(self._temperature_observed)
+        state = None
+        if fresh and value is not None and math.isfinite(value):
+            state = "low" if value < -20 else "high" if value > 45 else "normal"
+        return {
+            "status": state, "source": "calculated",
+            "temperature_c": value,
+            "temperature_age_seconds": self._age(self._temperature_observed),
+            "freshness_limit_seconds": _STATUS_FRESHNESS,
+            "lower_limit_c": -20, "upper_limit_c": 45,
+        }
+
+    @property
+    def accumulated_dose_fresh(self) -> bool:
+        return self._status_fresh(self._dose_observed)
+
+    def radiation_quality(self, key: str) -> dict:
+        """Quality follows the accepted pair, never a rejected candidate."""
+        error = self._last_dose_rate_error if key == "dose_rate" else self._last_count_rate_error
+        temperature = self._last_temperature if self._status_fresh(self._temperature_observed) else None
+        result = measurement_quality(error, 30.0 if key == "dose_rate" else 50.0, temperature)
+        if not self.measurement_available:
+            result.update(quality="unknown", quality_reasons=["measurement_unavailable"])
+        return {
+            "uncertainty_percent": error,
+            **result,
+            "measurement_flags": self._last_measurement_flags,
+            "real_time_flags": self._last_real_time_flags,
+        }
+
+    def _schedule_status_expiry(self) -> None:
+        if self._status_expiry_handle is not None:
+            self._status_expiry_handle.cancel()
+            self._status_expiry_handle = None
+        if self._stopping or self._user_disconnected:
+            return
+        deadlines = [stamp + _STATUS_FRESHNESS - time.monotonic()
+                     for stamp in (self._temperature_observed, self._dose_observed)
+                     if stamp is not None and self._status_fresh(stamp)]
+        if deadlines:
+            self._status_expiry_handle = asyncio.get_running_loop().call_later(
+                max(0.001, min(deadlines)), self._expire_status
+            )
+
+    def _expire_status(self) -> None:
+        self._status_expiry_handle = None
+        if self._stopping or self._user_disconnected:
+            return
+        self.async_update_listeners()
+        self._schedule_status_expiry()
+
+    def _accept_temperature(self, value: Optional[float]) -> None:
+        observed = getattr(self._client, "temperature_observed_monotonic", None)
+        if value is None or not math.isfinite(value):
+            return
+        # Keep a display cache even on clients without timestamp metadata,
+        # but only actual observations establish calculated quality/status.
+        if observed is None:
+            if self._temperature_observed is None:
+                self._last_temperature = value
+            return
+        if self._temperature_observed is None or observed > self._temperature_observed:
+            self._last_temperature = value
+            self._temperature_observed = observed
+            self._schedule_status_expiry()
+
     @property
     def spectrum_entity_attributes(self) -> dict:
         """Return stable scalar metadata without copying the histogram."""
@@ -391,6 +487,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 if self._last_measurement_time is not None else None,
                 "measurement_type": self._last_measurement_type,
                 "measurement_flags": self._last_measurement_flags,
+                "dose_rate_quality": self.radiation_quality("dose_rate"),
+                "count_rate_quality": self.radiation_quality("count_rate"),
                 "sample_progress": dict(self._last_sample_progress),
                 "last_sample_rejection": self._last_sample_rejection,
                 "consecutive_polls_without_sample": self._consecutive_no_sample,
@@ -400,6 +498,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 "last_poll_age_seconds": self._age(self._last_data_buf_received),
                 "recent_samples": list(self._sample_history),
             },
+            "temperature_status": self.detector_temperature_status,
+            "device_events": list(self._device_events),
             "bluetooth": {
                 "advertisement_source_at_connect": self._connection_source,
                 "advertisement_rssi_at_connect": self._connection_rssi,
@@ -409,6 +509,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 and not self._maintenance_task.done(),
                 "phase": self._maintenance_phase,
                 "errors": dict(self._optional_errors),
+                "register_directory_attempted": self._sfr_attempted,
             },
             "recent_phases": list(self._phase_history),
         }
@@ -416,7 +517,14 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     @property
     def transport_status(self) -> dict:
         """Expose the client's bounded transport diagnostics for downloads."""
-        return self._client.transport_diagnostics
+        return {
+            **self._client.transport_diagnostics,
+            "configuration_storage": {
+                "checked": self._configuration_store_loaded,
+                "saved": self._stored_configuration is not None,
+                "error": self._configuration_storage_error,
+            },
+        }
 
     async def async_shutdown(self) -> None:
         """Stop polling and tear down the BLE connection.
@@ -426,6 +534,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         """
         self._stopping = True
         self._cancel_measurement_expiry()
+        self._schedule_status_expiry()
         await super().async_shutdown()
         await self._cancel_maintenance()
         await self._client.disconnect()
@@ -439,6 +548,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         """
         self._user_disconnected = True
         self._cancel_measurement_expiry()
+        self._schedule_status_expiry()
         # Update the switch and invalidate the sample before slow teardown.
         self.async_update_listeners()
         await self._cancel_maintenance()
@@ -456,6 +566,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         # OFF cancels expiry. ON restores only the remaining lifetime of an
         # existing sample, so a failed reconnect cannot strand it as available.
         self._schedule_measurement_expiry()
+        self._schedule_status_expiry()
         self._next_spectrum_read = 0.0
         await self.async_request_refresh()
 
@@ -536,12 +647,27 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             if data.battery is not None:
                 self._last_battery = data.battery
             if data.accumulated_dose is not None:
-                self._last_accumulated_dose = data.accumulated_dose
+                if data.accumulated_dose_time is None and self._dose_observed is None:
+                    self._last_accumulated_dose = data.accumulated_dose
+                if self._rare_connection != self._connection_count:
+                    self._rare_record_time = None
+                    self._rare_connection = self._connection_count
+                if data.accumulated_dose_time is not None and (
+                    self._rare_record_time is None or data.accumulated_dose_time > self._rare_record_time
+                ):
+                    self._rare_record_time = data.accumulated_dose_time
+                    self._last_accumulated_dose = data.accumulated_dose
+                    self._dose_observed = now
+                    self._schedule_status_expiry()
             if data.dose_counter is not None:
                 self._last_dose_counter = data.dose_counter
             if data.temperature is not None:
-                self._last_temperature = data.temperature
+                self._accept_temperature(data.temperature)
                 self._next_temperature_read = now + _TEMPERATURE_INTERVAL
+            for event in data.data_buf_status.get("device_events", []):
+                stamped = {**event, "connection": self._connection_count}
+                if stamped not in self._device_events:
+                    self._device_events.append(stamped)
 
             # Empty buffers, repeated timestamps and filtered samples must
             # never reset freshness. Keep both values from one accepted record.
@@ -606,6 +732,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     )
                     self._last_measurement_type = data.measurement_type
                     self._last_measurement_flags = data.measurement_flags
+                    self._last_dose_rate_error = data.dose_rate_error_percent
+                    self._last_count_rate_error = data.count_rate_error_percent
+                    self._last_real_time_flags = data.real_time_flags
                     self._last_measurement_connection = self._connection_count
                     self._last_fresh_monotonic = now
                     self._schedule_measurement_expiry()
@@ -645,6 +774,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 measurement_time=self._last_measurement_time,
                 measurement_type=self._last_measurement_type,
                 measurement_flags=self._last_measurement_flags,
+                dose_rate_error_percent=self._last_dose_rate_error,
+                count_rate_error_percent=self._last_count_rate_error,
+                real_time_flags=self._last_real_time_flags,
             )
             _LOGGER.debug(
                 "Radiation ready: fresh=%s age=%.3fs type=%s timestamp=%s "
@@ -685,10 +817,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             return
         now = time.monotonic()
         if not (
-            (self._serial_number is None and now >= self._next_identity_read)
+            ((self._serial_number is None or self._identity_connection != self._connection_count) and now >= self._next_identity_read)
             or now >= self._next_settings_read
             or now >= self._next_diagnostics_read
             or now >= self._next_temperature_read
+            or (self._fw_version is not None and not self._sfr_attempted)
             or (
                 getattr(self._client, "configuration_retry_due", False)
                 and now >= self._next_configuration_read
@@ -721,16 +854,18 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     async def _async_run_maintenance(self) -> None:
         """Run due operations sequentially, yielding to primary polls."""
         operations = (
-            ("configuration", "_next_configuration_read", 300.0,
-             self._refresh_protocol_configuration, None),
             ("identity", "_next_identity_read", _IDENTITY_RETRY_INTERVAL,
              self._fetch_device_identity, None),
+            ("configuration", "_next_configuration_read", 300.0,
+             self._refresh_protocol_configuration, None),
             ("settings", "_next_settings_read", _SETTINGS_INTERVAL,
              self._client.get_settings, "_last_settings"),
             ("health", "_next_diagnostics_read", _DIAGNOSTICS_INTERVAL,
              self._client.get_diagnostics, "_last_diagnostics"),
             ("temperature", "_next_temperature_read", _TEMPERATURE_INTERVAL,
              self._client.get_temperature, "_last_temperature"),
+            ("register_directory", "_next_sfr_read", 0.0,
+             self._fetch_register_directory, None),
             ("spectrum", "_next_spectrum_read", self._spectrum_interval,
              self._client.get_spectrum, "_last_spectrum"),
         )
@@ -752,7 +887,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     self._client, "configuration_retry_due", False
                 ):
                     continue
-                if phase == "identity" and self._serial_number is not None:
+                if phase == "identity" and self._serial_number is not None and self._identity_connection == self._connection_count:
+                    continue
+                if phase == "register_directory" and (
+                    self._fw_version is None or self._sfr_attempted
+                ):
                     continue
                 if phase == "spectrum" and (
                     self._spectrum_interval <= 0 or self._automatic_spectrum_paused
@@ -768,7 +907,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     result = await operation()
                     if self._stopping or self._user_disconnected:
                         return
-                    if cache_attribute is not None and result is not None:
+                    if phase == "temperature":
+                        self._accept_temperature(result)
+                    elif cache_attribute is not None and result is not None:
                         setattr(self, cache_attribute, result)
                     self._optional_errors.pop(phase, None)
                     if phase == "spectrum":
@@ -796,6 +937,37 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     async def _refresh_protocol_configuration(self) -> None:
         """Schema retries share maintenance backoff and primary-poll priority."""
         await self._client.refresh_record_configuration()
+        await self._async_save_configuration()
+
+    async def _async_restore_configuration(self) -> None:
+        """Read private storage once, after a successful identity exchange."""
+        if self._configuration_store_loaded:
+            return
+        self._configuration_store_loaded = True
+        try:
+            snapshot = await self._configuration_store.async_load()
+            if snapshot is not None:
+                if self._client.restore_configuration_snapshot(snapshot, self._serial_number):
+                    self._stored_configuration = snapshot
+                else:
+                    await self._configuration_store.async_remove()
+        except Exception:  # noqa: BLE001
+            self._configuration_storage_error = True
+            _LOGGER.warning("Could not restore protocol configuration cache; device discovery remains available")
+
+    async def _async_save_configuration(self) -> None:
+        """Persist validated metadata without making storage a BLE failure."""
+        snapshot = self._client.configuration_snapshot(self._serial_number)
+        if snapshot is None or snapshot == self._stored_configuration:
+            return
+        try:
+            await self._configuration_store.async_save(snapshot)
+        except Exception:  # noqa: BLE001
+            self._configuration_storage_error = True
+            _LOGGER.warning("Could not save protocol configuration cache; current connection can continue")
+        else:
+            self._stored_configuration = snapshot
+            self._configuration_storage_error = False
 
     def _publish_maintenance_cache(self) -> None:
         """Notify optional changes without rewriting radiation freshness/cadence."""
@@ -857,15 +1029,50 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     async def _fetch_device_identity(self) -> None:
         """Fetch serial number and firmware version, then update the registry.
 
-        Called once after the first successful BLE poll.  On failure (e.g.
-        intermittent BLE glitch) the values stay None and we retry after
-        the identity read cooldown.
+        Rechecked after reconnect, with the existing bounded retry cooldown.
+        Firmware-dependent metadata is invalidated before optional refreshes.
         """
         try:
-            self._serial_number = await self._client.get_serial_number()
+            connection = self._connection_count
+            previous_firmware = self._fw_version
+            previous_build = getattr(self._client, "firmware_build", None)
+            if self._serial_number is None:
+                self._serial_number = await self._client.get_serial_number()
             self._check_user_disconnected("after serial number")
             self._fw_version = await self._client.get_firmware_version()
             self._check_user_disconnected("after firmware version")
+            if self._fw_version == "unknown":
+                self._fw_version = previous_firmware
+                raise ValueError("Firmware version unavailable")
+            self._identity_connection = connection
+            if previous_firmware is not None and (
+                self._fw_version != previous_firmware
+                or getattr(self._client, "firmware_build", None) != previous_build
+            ):
+                # Recheck the stored identity/version once on a confirmed change.
+                self._configuration_store_loaded = False
+                self._stored_configuration = None
+                self._sfr_file = None
+                self._sfr_attempted = False
+                self._next_sfr_read = 0.0
+                self._optional_errors.pop("register_directory", None)
+                self._last_settings = RadiaCodeSettings()
+                self._last_diagnostics = RadiaCodeDiagnostics()
+                self._last_temperature = None
+                self._temperature_observed = None
+                self._dose_observed = None
+                self._last_spectrum = None
+                self._last_spectrum_acquired_at = None
+                self._automatic_spectrum_paused = False
+                self._spectrum_consecutive_failures = 0
+                self._spectrum_retry_delay = max(_SPECTRUM_RETRY_MIN, self._spectrum_interval)
+                self._next_spectrum_read = 0.0
+                self._last_spectrum_error = None
+                self._next_configuration_read = self._next_settings_read = 0.0
+                self._next_diagnostics_read = self._next_temperature_read = 0.0
+                self._schedule_status_expiry()
+                self._publish_maintenance_cache()
+            await self._async_restore_configuration()
             _LOGGER.debug(
                 "Device identity: serial=%s  firmware=%s",
                 self._serial_number,
@@ -877,37 +1084,6 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             _LOGGER.debug("Failed to fetch serial/firmware (will retry after cooldown)")
             self._serial_number = None  # ensure we retry
             raise
-
-        # Read the device's self-describing SFR register directory — an
-        # ASCII listing of every register with address, size, type, and
-        # signedness.  One-time read; failure is non-fatal (the listing is
-        # informational). A failed transfer releases its connection; no
-        # partial listing is accepted.
-        if self._sfr_file is None:
-            try:
-                self._sfr_file = await self._client.get_sfr_file()
-                self._optional_errors.pop("register_directory", None)
-                if self._sfr_file:
-                    _LOGGER.info(
-                        "Read device SFR register directory: %d bytes, %d entries "
-                        "(full listing at debug level and in diagnostics download)",
-                        len(self._sfr_file),
-                        len(self._sfr_file.splitlines()),
-                    )
-                    _LOGGER.debug(
-                        "Device SFR register directory:\n%s", self._sfr_file
-                    )
-                else:
-                    # Some firmware (observed: RC-103 FW 4.14) returns an
-                    # empty SFR_FILE over BLE even though the read succeeds.
-                    _LOGGER.debug(
-                        "Device returned an empty SFR register directory "
-                        "(not provided over BLE on this firmware)"
-                    )
-            except Exception as err:  # noqa: BLE001
-                self._optional_errors["register_directory"] = str(err)
-                _LOGGER.debug("SFR directory read failed (non-fatal): %s", err)
-        self._check_user_disconnected("after register directory")
 
         # Push the serial number and firmware version into the HA device
         # registry so they appear on the device info card.
@@ -925,6 +1101,28 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 serial_number=self._serial_number,
                 sw_version=self._fw_version,
             )
+
+    async def _fetch_register_directory(self) -> None:
+        """Attempt this diagnostic-only bulk download once per firmware/load.
+
+        Mark before awaiting: failure or cancellation must not let a reconnect
+        re-arm the same optional download and repeatedly tear down the link.
+        Firmware checks stay small and run independently on every reconnect.
+        """
+        if self._sfr_attempted or self._fw_version is None:
+            return
+        self._sfr_attempted = True
+        self._sfr_file = await self._client.get_sfr_file()
+        self._check_user_disconnected("after register directory")
+        if self._sfr_file:
+            _LOGGER.info(
+                "Read device SFR register directory: %d bytes, %d entries "
+                "(full listing at debug level and in diagnostics download)",
+                len(self._sfr_file), len(self._sfr_file.splitlines()),
+            )
+            _LOGGER.debug("Device SFR register directory:\n%s", self._sfr_file)
+        else:
+            _LOGGER.debug("Device returned an empty SFR register directory")
 
     def _check_user_disconnected(self, context: str = "") -> None:
         """Raise UpdateFailed if the user has disabled the BLE connection.

@@ -1,0 +1,114 @@
+{
+  "source_repository_commit": "3a208390b146f3a0aa3caa80b6cdcd2840bce20c",
+  "profiles": [
+    {
+      "model": "RC-101",
+      "version": "4.15",
+      "build": "Oct 15 2026 10:17:27",
+      "container_sha256": "26c58f69a18998db1ced08d5f4fa1069418daac1c55aacbffc9f9e92aaa21ef4",
+      "configuration_sha256": "ad04354ce287eafdef88d0455fe97facc229804f51bc5b96e596ddfc996489e8",
+      "layout_sha256": "93b0d82d0e457ba7c96961d2e62d717593efd656f9d4d5166c61fae380b8d834"
+    },
+    {
+      "model": "RC-102",
+      "version": "4.15",
+      "build": "Oct 15 2026 10:17:49",
+      "container_sha256": "474d0326011dfdec7a7111c985c7bde9ebc5772acf665fb1be9be4414c20859e",
+      "configuration_sha256": "01688ca1008c2885d2159c202a7e117c0d3b34de76b452f02d0d249d4bd5b931",
+      "layout_sha256": "93b0d82d0e457ba7c96961d2e62d717593efd656f9d4d5166c61fae380b8d834"
+    },
+    {
+      "model": "RC-103",
+      "version": "4.15",
+      "build": "Oct 15 2026 10:18:10",
+      "container_sha256": "d7e7562301703fef7c268f5db52e8a6c0f42c8e284d2394d9fe5e649689fde39",
+      "configuration_sha256": "d891be85f9463eeef02223858fa816acbb5a8fa8e38684d3b77234c8be18563b",
+      "layout_sha256": "93b0d82d0e457ba7c96961d2e62d717593efd656f9d4d5166c61fae380b8d834"
+    },
+    {
+      "model": "RC-103G",
+      "version": "4.15",
+      "build": "Oct 15 2026 10:18:33",
+      "container_sha256": "42cb4b33ecdecaeaca1dd89f26e62302007fb21a62564e734c4416632bba5a97",
+      "configuration_sha256": "de436b0f800aff4b6efefee4baf43818c9ee1412b8138abe14e60ec93d1b7960",
+      "layout_sha256": "93b0d82d0e457ba7c96961d2e62d717593efd656f9d4d5166c61fae380b8d834"
+    },
+    {
+      "model": "RC-110",
+      "version": "4.15",
+      "build": "Oct 15 2026 10:18:57",
+      "container_sha256": "707a530ef087a6342d01b3f0cf6b04776b98d90f05dce1c8de0f9dbf32ff5ffc",
+      "configuration_sha256": "60e859527f072d9c1fa563ee28579df3b3bc6e4bcb1d31824e3d0f90b0482188",
+      "layout_sha256": "93b0d82d0e457ba7c96961d2e62d717593efd656f9d4d5166c61fae380b8d834"
+    }
+  ],
+  "reference": {
+    "label": "rc103-4.14-reference",
+    "container_sha256": "551b0d2d5290a017cda9395f0b5d8b339a5c8736e1b28cb95386d959d011a015",
+    "container_bytes": 130132,
+    "container_crc32": "efc84c86",
+    "header": {
+      "marker": "Phyton",
+      "header_size": 52,
+      "date_time": 1525105325,
+      "date": "2025-07-07 08:21:26",
+      "buffer_size": 32768,
+      "serial": "00000000000000000000000000000000",
+      "version": "4.14",
+      "version_low": 14,
+      "version_high": 4,
+      "compressed": 1,
+      "reserved": 0,
+      "header_crc32": "9d6b2b55",
+      "file_count": 0,
+      "firmware_header_size": 0
+    },
+    "independent_payload_crcs": [
+      {
+        "address": "0x8010000",
+        "bytes": 30464,
+        "crc": "0x74e65990"
+      },
+      {
+        "address": "0x8017700",
+        "bytes": 19968,
+        "crc": "0x7d756f92"
+      },
+      {
+        "address": "0x801c500",
+        "bytes": 16128,
+        "crc": "0x8f4231f0"
+      },
+      {
+        "address": "0x8020400",
+        "bytes": 27648,
+        "crc": "0x635951b0"
+      },
+      {
+        "address": "0x8027000",
+        "bytes": 27904,
+        "crc": "0xbb0ddbfa"
+      },
+      {
+        "address": "0x802dd00",
+        "bytes": 28160,
+        "crc": "0x68ee9e4"
+      },
+      {
+        "address": "0x8034b00",
+        "bytes": 19968,
+        "crc": "0xd3c8305e"
+      },
+      {
+        "address": "0x8039900",
+        "bytes": 12544,
+        "crc": "0x55f3e1ed"
+      }
+    ],
+    "image_sha256": "96c11b9f61b59f67429c379190a2013d6f55cf2a37982beaac820bbd31a2336d",
+    "configuration_address": "0x802f9f0",
+    "configuration_bytes": 3256,
+    "configuration_sha256": "850c9c2687e2997f8ebf2b2b76116243314b692a841d273f583ee6db8b57ad34"
+  },
+  "live_415_capture": false
+}
