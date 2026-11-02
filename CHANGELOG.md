@@ -10,6 +10,7 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 ## [Unreleased]
 
 ### Changed
+- Require ongoing review of README references for relevance to the current build, with source-verification and attribution guidance in agent/contributor instructions and the PR checklist; remove obsolete comparison-only references.
 - Add an external-reference bibliography to the README covering manufacturer resources, protocol research, Bluetooth/proxy references, dashboards, and release tooling.
 - Reorganize installation, compatibility, usage, troubleshooting, architecture, and contributor documentation; retain dated field evidence and archive the superseded initial specification.
 - Add repository instructions, issue/PR templates, and automated local-documentation link checks.
