@@ -32,13 +32,13 @@ _LOGGER = logging.getLogger(__name__)
 BUTTON_DESCRIPTIONS: tuple[ButtonEntityDescription, ...] = (
     ButtonEntityDescription(
         key=BUTTON_DOSE_RESET,
-        name="Dose Reset",
+        name="Reset Accumulated Dose",
         icon="mdi:restart",
         entity_category=EntityCategory.CONFIG,
     ),
     ButtonEntityDescription(
         key=BUTTON_SPECTRUM_RESET,
-        name="Spectrum Reset",
+        name="Reset Spectrum",
         icon="mdi:chart-histogram",
         entity_category=EntityCategory.CONFIG,
     ),

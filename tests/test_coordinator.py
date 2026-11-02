@@ -167,6 +167,7 @@ def make_coordinator(coordinator_module, protocol, clock):
             get_settings=AsyncMock(return_value=protocol.RadiaCodeSettings(sound_on=True)),
             get_diagnostics=AsyncMock(return_value=protocol.RadiaCodeDiagnostics(sipm_bias_mv=27000)),
             get_temperature=AsyncMock(return_value=25.0),
+            get_accumulated_dose=AsyncMock(return_value=None),
             get_spectrum=AsyncMock(return_value=protocol.Spectrum(
                 duration_s=60, a0=-2.0, a1=3.0, a2=0.001, counts=[1] * 1024,
             )),
@@ -245,11 +246,11 @@ def test_optional_reads_use_elapsed_minutes(make_coordinator, clock, poll_interv
             snapshot = await refresh_and_settle(coordinator)
             assert snapshot.settings is first.settings
             assert snapshot.diagnostics is first.diagnostics
-        for name in ("get_settings", "get_diagnostics", "get_temperature"):
+        for name in ("get_settings", "get_diagnostics", "get_temperature", "get_accumulated_dose"):
             assert getattr(coordinator._client, name).await_count == 1
         clock.now = 1060
         await refresh_and_settle(coordinator)
-        for name in ("get_settings", "get_diagnostics", "get_temperature"):
+        for name in ("get_settings", "get_diagnostics", "get_temperature", "get_accumulated_dose"):
             assert getattr(coordinator._client, name).await_count == 2
         assert coordinator._client.get_data.await_count == 22
         await coordinator.async_shutdown()

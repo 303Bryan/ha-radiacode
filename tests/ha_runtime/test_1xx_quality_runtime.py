@@ -94,3 +94,50 @@ async def test_calculated_count_and_dose_alarm_states_publish(runtime):
     finally:
         for entity in entities:
             await entity.async_remove(force_remove=True)
+
+
+@pytest.mark.asyncio
+async def test_register_dose_refreshes_alarm_and_sensor_independently_of_rates(runtime):
+    from unittest.mock import AsyncMock
+    from custom_components.radiacode.sensor import RadiaCodeSensor, SENSOR_DESCRIPTIONS
+    hass, c, client, dose_rate, _ = runtime
+    c._schedule_maintenance = lambda: None
+    c._last_settings = RadiaCodeSettings(ds_alarm_level1=40, ds_alarm_level2=120)
+    await c.async_refresh()
+    lease = c._last_fresh_monotonic
+    platform = EntityPlatform(hass=hass, logger=logging.getLogger(__name__),
+        domain="sensor", platform_name="radiacode", platform=None,
+        scan_interval=timedelta(seconds=30), entity_namespace=None)
+    entities = [RadiaCodeRadiationAlarmSensor(c, c.config_entry, "accumulated_dose"),
+        RadiaCodeSensor(c, c.config_entry, next(d for d in SENSOR_DESCRIPTIONS if d.key == "accumulated_dose"))]
+    try:
+        for entity, name in zip(entities, ("dose_alarm_register", "accumulated_dose_register")):
+            entity.entity_id = f"sensor.test_{name}"
+            entity.add_to_platform_start(hass, platform, None)
+            await entity.add_to_platform_finish()
+            assert hass.states.get(entity.entity_id).state == "unavailable"
+        client.get_accumulated_dose = AsyncMock(return_value=1.2)
+        await c._refresh_accumulated_dose()
+        c._publish_maintenance_cache()
+        assert hass.states.get(entities[0].entity_id).state == "L2 Alarm"
+        assert hass.states.get(entities[1].entity_id).state == "1.2"
+        assert hass.states.get(entities[0].entity_id).attributes["measurement_source"] == "dose_register"
+        assert c._last_fresh_monotonic == lease
+        # Sparse dose records never require a dose/count-rate refresh to publish.
+        c._last_fresh_monotonic -= 61
+        c._cancel_measurement_expiry()
+        c._expire_measurement()
+        assert hass.states.get(dose_rate.entity_id).state == "unavailable"
+        assert hass.states.get(entities[0].entity_id).state == "L2 Alarm"
+        c._dose_observed -= 181
+        c._status_expiry_handle.cancel()
+        c._expire_status()
+        for entity in entities:
+            assert hass.states.get(entity.entity_id).state == "unavailable"
+        await c._refresh_accumulated_dose()
+        c._publish_maintenance_cache()
+        assert hass.states.get(entities[0].entity_id).state == "L2 Alarm"
+        assert hass.states.get(dose_rate.entity_id).state == "unavailable"
+    finally:
+        for entity in entities:
+            await entity.async_remove(force_remove=True)

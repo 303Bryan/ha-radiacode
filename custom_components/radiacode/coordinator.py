@@ -107,6 +107,7 @@ _SETTINGS_INTERVAL = 60.0
 _DIAGNOSTICS_INTERVAL = 60.0
 _IDENTITY_RETRY_INTERVAL = 60.0
 _TEMPERATURE_INTERVAL = 60.0
+_ACCUMULATED_DOSE_INTERVAL = 60.0
 _STATUS_FRESHNESS = 180.0
 _SPECTRUM_RETRY_MIN = 300.0
 _SPECTRUM_RETRY_MAX = 3600.0
@@ -177,6 +178,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._rare_record_time: Optional[datetime] = None
         self._rare_connection = 0
         self._dose_observed: Optional[float] = None
+        self._dose_source: Optional[str] = None
         self._status_expiry_handle: Optional[asyncio.TimerHandle] = None
         self._device_events: deque[dict] = deque(maxlen=10)
 
@@ -224,6 +226,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._last_diagnostics: RadiaCodeDiagnostics = RadiaCodeDiagnostics()
         self._next_diagnostics_read = 0.0
         self._next_temperature_read = 0.0
+        self._next_accumulated_dose_read = 0.0
         self._next_configuration_read = 0.0
 
         # Gamma spectrum; read on its own slower cadence (options-driven)
@@ -387,6 +390,16 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     def accumulated_dose_fresh(self) -> bool:
         return self._status_fresh(self._dose_observed)
 
+    @property
+    def accumulated_dose_status(self) -> dict:
+        """Expose the since-reset dose observation independently of live rates."""
+        return {
+            "measurement_source": self._dose_source,
+            "measurement_age_seconds": self._age(self._dose_observed),
+            "freshness_limit_seconds": _STATUS_FRESHNESS,
+            "fresh": self.accumulated_dose_fresh,
+        }
+
     def radiation_quality(self, key: str) -> dict:
         """Quality follows the accepted pair, never a rejected candidate."""
         error = self._last_dose_rate_error if key == "dose_rate" else self._last_count_rate_error
@@ -499,6 +512,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 "recent_samples": list(self._sample_history),
             },
             "temperature_status": self.detector_temperature_status,
+            "accumulated_dose": self.accumulated_dose_status,
             "device_events": list(self._device_events),
             "bluetooth": {
                 "advertisement_source_at_connect": self._connection_source,
@@ -658,6 +672,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     self._rare_record_time = data.accumulated_dose_time
                     self._last_accumulated_dose = data.accumulated_dose
                     self._dose_observed = now
+                    self._dose_source = "rare_data"
+                    self._next_accumulated_dose_read = now + _ACCUMULATED_DOSE_INTERVAL
                     self._schedule_status_expiry()
             if data.dose_counter is not None:
                 self._last_dose_counter = data.dose_counter
@@ -821,6 +837,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             or now >= self._next_settings_read
             or now >= self._next_diagnostics_read
             or now >= self._next_temperature_read
+            or now >= self._next_accumulated_dose_read
             or (self._fw_version is not None and not self._sfr_attempted)
             or (
                 getattr(self._client, "configuration_retry_due", False)
@@ -864,6 +881,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
              self._client.get_diagnostics, "_last_diagnostics"),
             ("temperature", "_next_temperature_read", _TEMPERATURE_INTERVAL,
              self._client.get_temperature, "_last_temperature"),
+            ("accumulated_dose", "_next_accumulated_dose_read", _ACCUMULATED_DOSE_INTERVAL,
+             self._refresh_accumulated_dose, None),
             ("register_directory", "_next_sfr_read", 0.0,
              self._fetch_register_directory, None),
             ("spectrum", "_next_spectrum_read", self._spectrum_interval,
@@ -934,6 +953,26 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         finally:
             self._maintenance_phase = None
 
+    async def _refresh_accumulated_dose(self) -> None:
+        """Read since-reset dose when RareData has not refreshed it recently.
+
+        A successful register read is a new observation even when the value is
+        unchanged. It never renews the independent dose/count-rate sample lease.
+        Use the start time so an older in-flight read cannot replace a newer
+        stream observation or a successful dose reset.
+        """
+        observed = time.monotonic()
+        value = await self._client.get_accumulated_dose()
+        if self._stopping or self._user_disconnected:
+            return
+        if value is None or not math.isfinite(value) or value < 0:
+            raise ValueError("Invalid accumulated dose register value")
+        if self._dose_observed is None or observed >= self._dose_observed:
+            self._last_accumulated_dose = value
+            self._dose_observed = observed
+            self._dose_source = "dose_register"
+            self._schedule_status_expiry()
+
     async def _refresh_protocol_configuration(self) -> None:
         """Schema retries share maintenance backoff and primary-poll priority."""
         await self._client.refresh_record_configuration()
@@ -979,7 +1018,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             self.data = replace(
                 self.data,
                 sensors=replace(
-                    self.data.sensors, temperature=self._last_temperature
+                    self.data.sensors, temperature=self._last_temperature,
+                    accumulated_dose=self._last_accumulated_dose
                 ),
                 settings=self._last_settings,
                 diagnostics=self._last_diagnostics,
@@ -1061,6 +1101,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 self._last_temperature = None
                 self._temperature_observed = None
                 self._dose_observed = None
+                self._dose_source = None
+                self._next_accumulated_dose_read = 0.0
                 self._last_spectrum = None
                 self._last_spectrum_acquired_at = None
                 self._automatic_spectrum_paused = False
@@ -1319,6 +1361,10 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             raise UpdateFailed("Device rejected the accumulated dose reset")
 
         self._last_accumulated_dose = 0.0
+        self._dose_observed = time.monotonic()
+        self._dose_source = "dose_reset"
+        self._next_accumulated_dose_read = 0.0
+        self._schedule_status_expiry()
         if self.data is not None:
             self.data = replace(
                 self.data, sensors=replace(self.data.sensors, accumulated_dose=0.0)

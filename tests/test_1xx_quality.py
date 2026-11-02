@@ -292,6 +292,7 @@ def test_temperature_and_dose_alarms_have_independent_expiry(make_coordinator, p
 ])
 def test_calculated_alarm_entities_use_correct_units(sensor_module, protocol, kind, expected, value):
     coordinator = SimpleNamespace(measurement_available=True, accumulated_dose_fresh=True,
+        accumulated_dose_status={},
         data=SimpleNamespace(sensors=SimpleNamespace(**{kind:value}), settings=protocol.RadiaCodeSettings(
             cr_alarm_level1=200, cr_alarm_level2=600, ds_alarm_level1=40, ds_alarm_level2=120)))
     entry = SimpleNamespace(data={"address":"AA", "name":"RC-103"})

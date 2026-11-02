@@ -1,0 +1,47 @@
+# Dashboard card: Sensors followed by a dedicated Alarms section.
+# Add a Manual card and paste this YAML. Replace radiacode_device with your
+# device's entity-ID prefix; use the entity picker to verify each existing ID.
+# Existing installations keep radiation_alarm and dose_alarm_l1/l2 IDs after
+# their display names change. Fresh installations may use dose_rate_alarm and
+# accumulated_dose_alarm_l1/l2 instead. User-assigned IDs are never rewritten.
+# No custom frontend cards are required. This does not change the device page.
+type: vertical-stack
+cards:
+  - type: entities
+    title: Sensors
+    show_header_toggle: false
+    entities:
+      - entity: sensor.radiacode_device_dose_rate
+        name: Dose Rate
+      - entity: sensor.radiacode_device_count_rate
+        name: Count Rate
+      - entity: sensor.radiacode_device_accumulated_dose
+        name: Accumulated Dose
+  - type: entities
+    title: Alarms
+    show_header_toggle: false
+    entities:
+      - type: section
+        label: Accumulated Dose Alarm
+      - entity: sensor.radiacode_device_accumulated_dose_alarm
+        name: Accumulated Dose Alarm
+      - entity: number.radiacode_device_dose_alarm_l1
+        name: Accumulated Dose Alarm L1
+      - entity: number.radiacode_device_dose_alarm_l2
+        name: Accumulated Dose Alarm L2
+      - type: section
+        label: Count Rate Alarm
+      - entity: sensor.radiacode_device_count_rate_alarm
+        name: Count Rate Alarm
+      - entity: number.radiacode_device_count_rate_alarm_l1
+        name: Count Rate Alarm L1
+      - entity: number.radiacode_device_count_rate_alarm_l2
+        name: Count Rate Alarm L2
+      - type: section
+        label: Dose Rate Alarm
+      - entity: sensor.radiacode_device_radiation_alarm
+        name: Dose Rate Alarm
+      - entity: number.radiacode_device_dose_rate_alarm_l1
+        name: Dose Rate Alarm L1
+      - entity: number.radiacode_device_dose_rate_alarm_l2
+        name: Dose Rate Alarm L2

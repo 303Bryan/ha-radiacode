@@ -57,6 +57,7 @@ async def control_runtime(tmp_path):
     coordinator._next_settings_read = float("inf")
     coordinator._next_diagnostics_read = float("inf")
     coordinator._next_temperature_read = float("inf")
+    coordinator._next_accumulated_dose_read = float("inf")
     coordinator._last_settings = RadiaCodeSettings(
         display_brightness=3, display_direction=0, sound_on=False,
     )
@@ -198,3 +199,29 @@ async def test_controls_require_active_allowed_ble(control_runtime, reason):
     # The integration's connection toggle remains usable for reconnection.
     assert entities["connection"].available
     assert hass.states.get(entities["connection"].entity_id).state != "unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key,raw,expected,name", [
+    ("ds_alarm_level1", 999999999, 9999999.99, "Accumulated Dose Alarm L1"),
+    ("ds_alarm_level2", 999999999, 9999999.99, "Accumulated Dose Alarm L2"),
+    ("dr_alarm_level1", 40, .4, "Dose Rate Alarm L1"),
+    ("dr_alarm_level2", 120, 1.2, "Dose Rate Alarm L2"),
+    ("cr_alarm_level1", 200, 20, "Count Rate Alarm L1"),
+    ("cr_alarm_level2", 600, 60, "Count Rate Alarm L2"),
+])
+async def test_alarm_controls_accept_device_defaults_and_keep_ids(control_runtime, key, raw, expected, name):
+    from dataclasses import replace
+    hass, c, client, entities = control_runtime
+    description = next(d for d in NUMBER_DESCRIPTIONS if d.key == key)
+    entity = RadiaCodeNumber(c, c.config_entry, description)
+    c._last_settings = replace(c._last_settings, **{key: raw})
+    await c.async_refresh()
+    c._publish_maintenance_cache()
+    assert entity.name == name
+    assert entity.unique_id.endswith(f"-{key}")
+    assert entity.native_value == expected
+    assert entity.native_min_value <= expected <= entity.native_max_value
+    c.async_write_setting = AsyncMock()
+    await entity.async_set_native_value(expected)
+    c.async_write_setting.assert_awaited_once_with(description.vsfr_id, raw)
