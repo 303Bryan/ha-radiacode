@@ -771,9 +771,8 @@ class RadiaCodeBLEClient:
     async def get_accumulated_dose(self) -> float:
         """Read resettable dose in µSv, using the single-register command.
 
-        DS_uR (called DS_urem on newer firmware) is rejected by batch reads
-        on supported firmware. The single-register response is validated by
-        the existing parser; failed reads must not become a zero observation.
+        DS_uR (called DS_urem on newer firmware) may reject both individual
+        and batch reads. Never treat a status-only response as a dose value.
         This is separate from the non-resettable group-4 Dose Counter.
         """
         return float(await self._read_vsfr(VSFR.DS_uR)) / 100.0
@@ -1455,14 +1454,14 @@ class RadiaCodeBLEClient:
     async def _read_vsfr(self, vsfr_id: int) -> int | float:
         """Read a single VSFR register via RD_VIRT_SFR (0x0824).
 
-        Used as a fallback when the batch read marks a register as
-        invalid.  DR_uR_h and DS_uR consistently fail in batch reads
-        on current firmware but work fine with individual reads.
-
         Returns the decoded value (int or float depending on
         ``_VSFR_FORMATS``).  Raises on communication or protocol errors.
         """
         payload = await self._execute(
             CMD.RD_VIRT_SFR, struct.pack("<I", int(vsfr_id))
         )
-        return parse_vsfr_read_response(payload, vsfr_id)
+        try:
+            return parse_vsfr_read_response(payload, vsfr_id)
+        except ValueError as err:
+            self._record_payload_error(err, payload)
+            raise

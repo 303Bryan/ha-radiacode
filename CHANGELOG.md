@@ -19,6 +19,26 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.11.2b2] — 2026-11-02
+
+Beta follow-up for the failed accumulated-dose fallback and delayed measurement recovery observed while testing 2b1.
+
+### Fixed
+- Revalidate firmware promptly on each new connection after a successful identity check. Retain the one-minute cooldown across reconnects only when identity actually fails.
+- Defer automatic spectrum acquisition until a fresh paired measurement has been accepted on the current connection, preventing optional bulk work from interrupting initial recovery.
+- Decode a status-only register rejection as an error, never a zero dose; require the exact successful reply length and record payload failures in transport diagnostics.
+
+### Changed
+- Retain the last observed Accumulated Dose and calculated alarm for at most 30 minutes, covering the approximately 28-minute dose-record gaps in the supplied capture. Both now also require fresh live dose/count measurements. Their observation timestamp and age remain unchanged between actual dose records, successful reads, or resets. This is a bounded cached total, not a continuously updated dose estimate.
+- Pause the fallback dose-register read after three consecutive failures, including across reconnects. Reload or a confirmed firmware/build change retries it. Regular RareData observations continue while the register read is paused.
+- Preserve alarm names, entity identities, existing device thresholds, live-rate freshness, and spectrum/configuration retry limits.
+
+### Testing and limits
+- Regressions cover sparse 28-minute dose updates, independent 30-minute expiry, status-only/malformed replies, paused reads, live-stream expiry, rapid reconnects, and retained identity-failure backoff. Home Assistant runtime tests verify entity availability with these rules.
+- The RC-103/4.15 capture establishes failed register reads, not a supported replacement query. Initial dose availability still requires an actual dose observation. Physical beta-2 validation remains pending; this beta does not claim to eliminate BLE/proxy transfer failures. See [the evidence and acceptance plan](docs/alarm-recovery-beta2-2026-11-02.md).
+
+---
+
 ## [2026.11.2b1] — 2026-11-02
 
 Beta for consistent alarm naming and accumulated-dose availability with sparse device status records.

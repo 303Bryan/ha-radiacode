@@ -324,6 +324,38 @@ def test_optional_failures_keep_cache_and_reconnect_without_early_retry(
     asyncio.run(scenario())
 
 
+def test_successful_identity_does_not_delay_two_reconnects(make_coordinator, clock, protocol):
+    async def scenario():
+        c = make_coordinator()
+        client = c._client
+        await refresh_and_settle(c)
+        assert client.get_firmware_version.await_count == 1
+        for generation in (1, 2):
+            clock.now += 5
+            client.is_connected = False
+            # Mimic the real client's schema gate until this connection's
+            # firmware identity is confirmed. Cached rates can still be valid.
+            client.get_data.side_effect = None
+            client.get_data.return_value = readings(protocol)
+            c._next_spectrum_read = 0
+            before = client.get_spectrum.await_count
+            await refresh_and_settle(c)
+            assert c.connection_count == generation
+            assert client.get_firmware_version.await_count == 1 + generation
+            assert c._identity_connection == generation
+            assert client.get_spectrum.await_count == before
+            clock.now += 5
+            client.get_data.return_value = readings(protocol, dose_rate=.12, count_rate=3,
+                measurement_time=datetime(2026, 1, 1) + timedelta(seconds=clock.now),
+                measurement_type="RealTimeData")
+            await refresh_and_settle(c)
+            assert c.measurement_available
+            assert client.get_spectrum.await_count == before + 1
+            assert client.get_firmware_version.await_count == 1 + generation
+        await c.async_shutdown()
+    asyncio.run(scenario())
+
+
 def test_identity_failure_uses_cooldown_across_reconnect(make_coordinator, clock):
     async def scenario():
         coordinator = make_coordinator(spectrum_interval=0)
@@ -385,7 +417,8 @@ def test_initial_empty_buffer_does_not_claim_radiation_available(make_coordinato
         assert coordinator.data is None
         assert coordinator.last_update_success is False
         assert coordinator.last_error == "Waiting for a fresh radiation measurement"
-        assert coordinator._last_spectrum is not None
+        assert coordinator._last_spectrum is None
+        coordinator._client.get_spectrum.assert_not_awaited()
         assert coordinator.runtime_status["freshness"]["age_seconds"] is None
         await coordinator.async_shutdown()
 

@@ -1,5 +1,7 @@
 # Alarm availability beta — 2026-11-02
 
+**Follow-up:** Physical beta-1 testing found the register fallback unsuccessful. The [beta-2 review](alarm-recovery-beta2-2026-11-02.md) supersedes the proposed availability behavior below; this report preserves the original test plan.
+
 ## Supplied evidence
 
 The user reports the detector remained stationary near AIR-1. The supplied diagnostics report Home Assistant 2026.10.4, integration 2026.11.1, RC-103 firmware 4.15 (Oct 15 2026 build), and default integration options. No live Home Assistant configuration was changed during this review.

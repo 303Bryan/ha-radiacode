@@ -502,7 +502,7 @@ def parse_vsfr_read_response(payload: bytes, vsfr_id: int) -> int | float:
     """Parse a RD_VIRT_SFR (individual register read) response.
 
     After the 4-byte echo header (already stripped by parse_response_body):
-      [uint32_le retcode] [uint32_le raw_value]
+      [uint32_le retcode] [uint32_le raw_value, only on success]
 
     The raw uint32 value is reinterpreted through ``_VSFR_FORMATS``
     (e.g. TEMP_degC is stored as a float in the uint32 bit pattern).
@@ -510,13 +510,18 @@ def parse_vsfr_read_response(payload: bytes, vsfr_id: int) -> int | float:
     Raises ValueError if the response is too short or the device
     returned a non-success retcode.
     """
-    if len(payload) < 8:
+    if len(payload) < 4:
         raise ValueError(
-            f"VSFR read response too short: {len(payload)} bytes, need 8"
+            f"VSFR read response too short: {len(payload)} bytes, need status"
         )
-    retcode, raw = struct.unpack_from("<II", payload, 0)
+    (retcode,) = struct.unpack_from("<I", payload, 0)
     if retcode != 1:
         raise ValueError(f"VSFR read failed: retcode={retcode}")
+    if len(payload) != 8:
+        raise ValueError(
+            f"VSFR read response invalid length: {len(payload)} bytes, expected 8"
+        )
+    (raw,) = struct.unpack_from("<I", payload, 4)
     fmt = _VSFR_FORMATS.get(vsfr_id, "I")
     (value,) = struct.unpack(f"<{fmt}", struct.pack("<I", raw))
     return value
