@@ -86,7 +86,11 @@ async def test_calculated_count_and_dose_alarm_states_publish(runtime):
             state = hass.states.get(entity.entity_id)
             assert state.state == "L2 Alarm"
             assert state.attributes["source"] == "calculated"
-        c._dose_observed -= 181
+        c._dose_observed -= 1680
+        c._publish_maintenance_cache()
+        assert hass.states.get(entities[1].entity_id).state == "L2 Alarm"
+        assert hass.states.get(entities[1].entity_id).attributes["measurement_age_seconds"] >= 1680
+        c._dose_observed -= 121
         c._status_expiry_handle.cancel()
         c._expire_status()
         assert hass.states.get(entities[1].entity_id).state == "unavailable"
@@ -97,7 +101,7 @@ async def test_calculated_count_and_dose_alarm_states_publish(runtime):
 
 
 @pytest.mark.asyncio
-async def test_register_dose_refreshes_alarm_and_sensor_independently_of_rates(runtime):
+async def test_dose_observation_never_extends_rates_and_requires_live_measurements(runtime):
     from unittest.mock import AsyncMock
     from custom_components.radiacode.sensor import RadiaCodeSensor, SENSOR_DESCRIPTIONS
     hass, c, client, dose_rate, _ = runtime
@@ -123,20 +127,20 @@ async def test_register_dose_refreshes_alarm_and_sensor_independently_of_rates(r
         assert hass.states.get(entities[1].entity_id).state == "1.2"
         assert hass.states.get(entities[0].entity_id).attributes["measurement_source"] == "dose_register"
         assert c._last_fresh_monotonic == lease
-        # Sparse dose records never require a dose/count-rate refresh to publish.
+        # A dose observation cannot hide a real live-stream outage.
         c._last_fresh_monotonic -= 61
         c._cancel_measurement_expiry()
         c._expire_measurement()
         assert hass.states.get(dose_rate.entity_id).state == "unavailable"
-        assert hass.states.get(entities[0].entity_id).state == "L2 Alarm"
-        c._dose_observed -= 181
+        assert hass.states.get(entities[0].entity_id).state == "unavailable"
+        c._dose_observed -= 1801
         c._status_expiry_handle.cancel()
         c._expire_status()
         for entity in entities:
             assert hass.states.get(entity.entity_id).state == "unavailable"
         await c._refresh_accumulated_dose()
         c._publish_maintenance_cache()
-        assert hass.states.get(entities[0].entity_id).state == "L2 Alarm"
+        assert hass.states.get(entities[0].entity_id).state == "unavailable"
         assert hass.states.get(dose_rate.entity_id).state == "unavailable"
     finally:
         for entity in entities:

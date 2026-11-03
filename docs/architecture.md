@@ -32,7 +32,9 @@ Turning off BLE Connection cancels maintenance and releases the link. Unload and
 
 Primary acquisition publishes dose/count values as a pair from one accepted sample. It prefers valid live records; raw/database records are fallbacks. Replayed or regressed timestamps, empty buffers, and suppressed outliers do not renew freshness. Device-relative timestamps and HA receipt time serve different purposes.
 
-An independent timer expires radiation availability after `max(60 seconds, 3 × poll interval)`. Cached readings can bridge a brief reconnect but cannot renew themselves. User-disabled Bluetooth makes measurements unavailable immediately. Temperature status and accumulated-dose evidence have separate 180-second freshness rules. Accumulated Dose and its alarm share the same observation. Advancing RareData defers a fallback individual dose-register read for 60 seconds; a successful unchanged register value is a new observation. Failed reads retain the one-minute cooldown and cannot extend freshness. A successful reset establishes a bounded zero observation, and an older in-flight read cannot replace it. Dose observations never renew the live paired-rate lease.
+An independent timer expires radiation availability after `max(60 seconds, 3 × poll interval)`. Cached readings can bridge a brief reconnect but cannot renew themselves. User-disabled Bluetooth makes measurements unavailable immediately. Temperature observations expire after 180 seconds. Accumulated Dose and its alarm share a separate, bounded 30-minute observation limit, selected to cover the approximately 28-minute maximum dose-record gap in the beta-1 field capture. Both also require the live paired-rate lease. Live traffic never changes the dose observation timestamp: these entities report the last observed total, not a continuously sampled or integrated estimate.
+
+Advancing RareData defers a fallback individual dose-register read for 60 seconds; a successful unchanged register value is a new observation. This register is not readable on all firmware. Three consecutive failures pause its automatic reads until reload or a confirmed firmware/build change; reconnects, dose resets, and RareData do not reset that budget. A status-only rejection is never decoded as zero. A successful reset establishes a bounded zero observation, and an older in-flight read cannot replace it. Dose observations never renew the live paired-rate lease. Independent timers publish both dose-age and live-lease expiry.
 
 A reading more than 50× above baseline is held for confirmation. Changing this policy, unit conversions, or sample selection requires targeted regression coverage and field evidence.
 
@@ -40,7 +42,7 @@ Calculated quality and alarm states are Home Assistant interpretations. Opaque d
 
 ## Optional work and spectra
 
-Settings, identity, temperature, accumulated dose, device diagnostics, configuration, register-directory, and spectrum operations run as bounded maintenance around primary acquisition. Preserve primary-poll priority.
+Settings, identity, temperature, accumulated dose, device diagnostics, configuration, register-directory, and spectrum operations run as bounded maintenance around primary acquisition. Preserve primary-poll priority. Automatic spectrum reads additionally wait for an accepted live sample on the current connection, so a reconnect can restore measurements before another bulk transfer.
 
 Incomplete spectra are rejected. The previous complete histogram and acquisition timestamp remain available; failed transfers do not create a fresh spectrum. Automatic spectrum acquisition backs off and pauses after three consecutive failures. A successful manual current-spectrum read clears the pause; an accumulated-spectrum read does not replace the current snapshot. A configured spectrum interval of zero still disables automatic acquisition.
 
@@ -50,7 +52,7 @@ Configuration discovery is limited to three automatic attempts with a retry inte
 
 Complete, validated device configuration is authoritative. Bundled profiles apply only to exact known model, version, and application-build identities. A version number alone cannot select a new record width or unit. Unknown or malformed declared layouts stop decoding rather than guessing offsets.
 
-Firmware is rechecked after reconnect. Confirmed firmware/build changes invalidate dependent metadata. Persisted configuration requires matching device identity, firmware/build, parser version, and integrity checks. Home Assistant `Store` owns the private cache; the integration deletes it when its config entry is removed. Storage failure must not interrupt ordinary BLE polling.
+Firmware is rechecked after every reconnect. Successful identity checks are cached only for that connection; the 60-second retry cooldown applies to failures and survives reconnects. Confirmed firmware/build changes invalidate dependent metadata. Persisted configuration requires matching device identity, firmware/build, parser version, and integrity checks. Home Assistant `Store` owns the private cache; the integration deletes it when its config entry is removed. Storage failure must not interrupt ordinary BLE polling.
 
 Diagnostics retain allowlisted configuration-source and profile labels while redacting identifiers and arbitrary names. Keep identity-bearing device captures private; commit only reviewed, sanitized fixtures with provenance. Public vendor configuration fixtures are distinct from private device captures.
 

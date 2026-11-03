@@ -99,6 +99,12 @@ Connection establishment has a 30-second total deadline around connector retries
 
 ## Accumulated Dose Alarm becomes unavailable every three minutes
 
-In versions before 2026.11.2b1, this alarm could expire while live dose/count readings continued because the periodic dose records were sparse. The beta adds a bounded individual dose-register read and gives the numeric Accumulated Dose sensor the same freshness rule as its alarm. Both still become unavailable after 180 seconds without a successful observation.
+Beta 2026.11.2b1 still expired after 180 seconds because the supplied RC-103/4.15 capture contained no successful fallback register read and dose records were up to 28 minutes apart. Beta 2026.11.2b2 retains the last observed total for at most 30 minutes while live radiation measurements remain fresh. It does not estimate dose between observations. Dose entities still expire on a live-stream outage or at the dose-age limit.
 
-Inspect `measurement_source`, `measurement_age_seconds`, and `fresh` on the accumulated-dose entities. Downloaded diagnostics include the same information under `runtime.accumulated_dose`, plus optional read errors under `runtime.maintenance.errors`. Export histories for Accumulated Dose, its alarm, Dose Rate, Count Rate, and BLE Connected together to distinguish a missing dose observation from a wider stream outage. See the [beta field review](alarm-availability-beta-2026-11-02.md).
+Inspect `measurement_source`, `measurement_age_seconds`, `freshness_limit_seconds`, `fresh`, and `register_read_paused` on the accumulated-dose entities. Three failed fallback reads pause that operation until reload or a confirmed firmware change; normal dose records continue to update the entities. Initial availability still requires an actual dose record or successful register read/reset. A rejected register does not imply zero dose.
+
+Downloaded diagnostics include these fields under `runtime.accumulated_dose`, plus read errors under `runtime.maintenance.errors`. Export histories for Accumulated Dose, its alarm, Dose Rate, Count Rate, and BLE Connected together. See the [beta-2 field review](alarm-recovery-beta2-2026-11-02.md).
+
+## Measurements stop briefly after repeated reconnects
+
+Beta 2026.11.2b1 applied an identity-check cooldown even after a successful check. Two reconnects within that minute could leave complete measurement buffers undecoded while awaiting firmware validation. Beta 2026.11.2b2 checks each new connection promptly after prior success, retains cooldowns for actual failures, and waits for measurements to resume before attempting an automatic spectrum read. It does not change BLE transport deadlines or guarantee that a proxy will complete every transfer.

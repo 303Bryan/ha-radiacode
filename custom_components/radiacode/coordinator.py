@@ -108,6 +108,10 @@ _DIAGNOSTICS_INTERVAL = 60.0
 _IDENTITY_RETRY_INTERVAL = 60.0
 _TEMPERATURE_INTERVAL = 60.0
 _ACCUMULATED_DOSE_INTERVAL = 60.0
+# Field captures contain valid since-reset dose records up to 28 minutes apart.
+# Keep their age bounded, and require the independent live-rate lease as well.
+_ACCUMULATED_DOSE_FRESHNESS = 30 * 60.0
+_ACCUMULATED_DOSE_FAILURE_LIMIT = 3
 _STATUS_FRESHNESS = 180.0
 _SPECTRUM_RETRY_MIN = 300.0
 _SPECTRUM_RETRY_MAX = 3600.0
@@ -227,6 +231,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._next_diagnostics_read = 0.0
         self._next_temperature_read = 0.0
         self._next_accumulated_dose_read = 0.0
+        self._dose_read_failures = 0
         self._next_configuration_read = 0.0
 
         # Gamma spectrum; read on its own slower cadence (options-driven)
@@ -388,16 +393,24 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
 
     @property
     def accumulated_dose_fresh(self) -> bool:
-        return self._status_fresh(self._dose_observed)
+        age = self._age(self._dose_observed)
+        return (
+            self.measurement_available and age is not None
+            and age < _ACCUMULATED_DOSE_FRESHNESS
+        )
 
     @property
     def accumulated_dose_status(self) -> dict:
-        """Expose the since-reset dose observation independently of live rates."""
+        """Expose actual dose age; live traffic never renews this timestamp."""
         return {
             "measurement_source": self._dose_source,
             "measurement_age_seconds": self._age(self._dose_observed),
-            "freshness_limit_seconds": _STATUS_FRESHNESS,
+            "freshness_limit_seconds": _ACCUMULATED_DOSE_FRESHNESS,
+            "requires_live_measurements": True,
             "fresh": self.accumulated_dose_fresh,
+            "register_read_failures": self._dose_read_failures,
+            "register_read_failure_limit": _ACCUMULATED_DOSE_FAILURE_LIMIT,
+            "register_read_paused": self._dose_read_failures >= _ACCUMULATED_DOSE_FAILURE_LIMIT,
         }
 
     def radiation_quality(self, key: str) -> dict:
@@ -420,9 +433,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             self._status_expiry_handle = None
         if self._stopping or self._user_disconnected:
             return
-        deadlines = [stamp + _STATUS_FRESHNESS - time.monotonic()
-                     for stamp in (self._temperature_observed, self._dose_observed)
-                     if stamp is not None and self._status_fresh(stamp)]
+        now = time.monotonic()
+        deadlines = [stamp + limit - now for stamp, limit in (
+            (self._temperature_observed, _STATUS_FRESHNESS),
+            (self._dose_observed, _ACCUMULATED_DOSE_FRESHNESS),
+        ) if stamp is not None and stamp + limit > now]
         if deadlines:
             self._status_expiry_handle = asyncio.get_running_loop().call_later(
                 max(0.001, min(deadlines)), self._expire_status
@@ -837,7 +852,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             or now >= self._next_settings_read
             or now >= self._next_diagnostics_read
             or now >= self._next_temperature_read
-            or now >= self._next_accumulated_dose_read
+            or (self._dose_read_failures < _ACCUMULATED_DOSE_FAILURE_LIMIT
+                and now >= self._next_accumulated_dose_read)
             or (self._fw_version is not None and not self._sfr_attempted)
             or (
                 getattr(self._client, "configuration_retry_due", False)
@@ -912,8 +928,12 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     self._fw_version is None or self._sfr_attempted
                 ):
                     continue
+                if phase == "accumulated_dose" and self._dose_read_failures >= _ACCUMULATED_DOSE_FAILURE_LIMIT:
+                    continue
                 if phase == "spectrum" and (
                     self._spectrum_interval <= 0 or self._automatic_spectrum_paused
+                    or not self.measurement_available
+                    or self._last_measurement_connection != self._connection_count
                 ):
                     continue
                 setattr(self, deadline, now + interval)
@@ -931,7 +951,13 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     elif cache_attribute is not None and result is not None:
                         setattr(self, cache_attribute, result)
                     self._optional_errors.pop(phase, None)
-                    if phase == "spectrum":
+                    if phase == "identity":
+                        # Success is cached per connection, not rate limited.
+                        # Only failed checks must retain the reconnect cooldown.
+                        self._next_identity_read = 0.0
+                    elif phase == "accumulated_dose":
+                        self._dose_read_failures = 0
+                    elif phase == "spectrum":
                         self._record_spectrum_success(result)
                 except asyncio.CancelledError:
                     error = "cancelled"
@@ -939,6 +965,15 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 except Exception as err:  # noqa: BLE001
                     error = str(err)
                     self._optional_errors[phase] = error
+                    if phase == "accumulated_dose":
+                        self._dose_read_failures += 1
+                        if self._dose_read_failures == _ACCUMULATED_DOSE_FAILURE_LIMIT:
+                            _LOGGER.warning(
+                                "Accumulated-dose register reads paused after %d failures; "
+                                "using bounded RareData observations. Reload or a confirmed "
+                                "firmware change retries the register. Last error: %s",
+                                self._dose_read_failures, error,
+                            )
                     if phase == "spectrum":
                         self._record_spectrum_failure(error)
                     else:
@@ -1103,6 +1138,8 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 self._dose_observed = None
                 self._dose_source = None
                 self._next_accumulated_dose_read = 0.0
+                self._dose_read_failures = 0
+                self._optional_errors.pop("accumulated_dose", None)
                 self._last_spectrum = None
                 self._last_spectrum_acquired_at = None
                 self._automatic_spectrum_paused = False

@@ -17,6 +17,92 @@ from test_sensor import sensor_module  # noqa: F401
 BASE = dt.datetime(2026, 11, 2)
 
 
+def test_sparse_dose_records_survive_28_minute_gaps_but_expire_at_30_minutes(make_coordinator, protocol, clock):
+    """Synthetic timing replay; no captured identity or raw payload is embedded."""
+    async def scenario():
+        c = make_coordinator(spectrum_interval=0)
+        c._client.get_accumulated_dose.side_effect = ValueError("VSFR read failed: retcode=0")
+        dose_times = {0, 1680, 3360}
+        async def sample():
+            elapsed = clock.now - 1000
+            stamp = BASE + dt.timedelta(seconds=elapsed)
+            return readings(protocol, dose_rate=.12, count_rate=3,
+                measurement_time=stamp, measurement_type="RealTimeData",
+                accumulated_dose=.2 + elapsed / 10000 if elapsed in dose_times else None,
+                accumulated_dose_time=stamp if elapsed in dose_times else None)
+        c._client.get_data.side_effect = sample
+        try:
+            for elapsed in range(0, 5160, 5):
+                clock.now = 1000 + elapsed
+                await refresh_and_settle(c)
+                assert c.accumulated_dose_fresh
+                assert c._dose_observed == 1000 + max(t for t in dose_times if t <= elapsed)
+            assert c._client.get_accumulated_dose.await_count == 3
+            assert c.accumulated_dose_status["register_read_paused"]
+            clock.now = 6160
+            await refresh_and_settle(c)
+            updates = c.listener_updates
+            c._expire_status()
+            assert c.listener_updates > updates
+            assert not c.accumulated_dose_fresh
+            assert c.measurement_available
+        finally:
+            await c.async_shutdown()
+    asyncio.run(scenario())
+
+
+def test_dose_cache_cannot_outlive_live_measurement_lease(make_coordinator, protocol, clock):
+    async def scenario():
+        c = make_coordinator(spectrum_interval=0)
+        c._client.get_accumulated_dose.return_value = 1.2
+        try:
+            await refresh_and_settle(c)
+            c._client.get_data.side_effect = None
+            c._client.get_data.return_value = readings(protocol)
+            clock.now += 60
+            await refresh_and_settle(c)
+            assert not c.measurement_available
+            assert not c.accumulated_dose_fresh
+            assert c._dose_observed == clock.now  # even a successful read cannot mask this
+        finally:
+            await c.async_shutdown()
+    asyncio.run(scenario())
+
+
+def test_status_only_register_rejection_is_not_a_truncated_value(protocol):
+    # Public RC-102/4.14 evidence identifies a zero status word. The supplied
+    # 4.15 log establishes only the four-byte length, not its actual contents.
+    with pytest.raises(ValueError, match="retcode=0"):
+        protocol.parse_vsfr_read_response(struct.pack("<I", 0), protocol.VSFR.DS_uR)
+
+
+def test_dose_read_pause_survives_reconnect_but_firmware_change_retries(make_coordinator, clock):
+    async def scenario():
+        c = make_coordinator(spectrum_interval=0)
+        try:
+            for offset in (0, 60, 120):
+                clock.now = 1000 + offset
+                await refresh_and_settle(c)
+            assert c.accumulated_dose_status["register_read_paused"]
+            c._client.is_connected = False
+            clock.now += 5
+            await refresh_and_settle(c)
+            assert c._client.get_accumulated_dose.await_count == 3
+            assert c.accumulated_dose_status["register_read_paused"]
+            # A confirmed build/version change is the only in-session reset.
+            c._client.get_firmware_version.return_value = "4.15"
+            c._client.get_accumulated_dose.return_value = .4
+            c._client.is_connected = False
+            clock.now += 5
+            await refresh_and_settle(c)
+            assert c._client.get_accumulated_dose.await_count == 4
+            assert not c.accumulated_dose_status["register_read_paused"]
+            assert c._dose_read_failures == 0
+        finally:
+            await c.async_shutdown()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("native,expected", [(0, 0.0), (12345, 123.45), (999999999, 9999999.99)])
 def test_dose_register_uses_individual_read_and_native_units(client_module, native, expected):
     async def scenario():
@@ -29,7 +115,7 @@ def test_dose_register_uses_individual_read_and_native_units(client_module, nati
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("payload", [b"", struct.pack("<I", 1), struct.pack("<II", 0, 0)])
+@pytest.mark.parametrize("payload", [b"", struct.pack("<I", 0), struct.pack("<I", 1), struct.pack("<II", 0, 0), struct.pack("<III", 1, 10, 20)])
 def test_failed_dose_register_is_not_zero(client_module, payload):
     async def scenario():
         client, _ = attached_client(client_module)
@@ -82,7 +168,7 @@ def test_fresh_rare_dose_defers_read_but_replay_does_not(make_coordinator, proto
             clock.now += 1
             await refresh_and_settle(c)
             assert c.data.sensors.accumulated_dose == 2.5
-            assert c.accumulated_dose_fresh
+            assert not c.accumulated_dose_fresh
             # A dose read cannot keep the replayed dose/count rates alive.
             assert not c.measurement_available
             assert c._last_fresh_monotonic == 1000
@@ -93,7 +179,7 @@ def test_fresh_rare_dose_defers_read_but_replay_does_not(make_coordinator, proto
 
 
 @pytest.mark.parametrize("bad_value", [None, math.nan, math.inf, -1, TimeoutError("lost response")])
-def test_failed_register_reads_expire_dose_without_hiding_live_rates(make_coordinator, protocol, clock, bad_value):
+def test_failed_register_reads_pause_and_cannot_renew_dose(make_coordinator, protocol, clock, bad_value):
     async def scenario():
         c = make_coordinator(spectrum_interval=0)
         c._client.get_accumulated_dose.return_value = 1.2
@@ -110,15 +196,24 @@ def test_failed_register_reads_expire_dose_without_hiding_live_rates(make_coordi
                 assert c.data.sensors.accumulated_dose == 1.2
                 assert c._dose_observed == 1000
                 assert c.measurement_available
+            assert c.accumulated_dose_status["register_read_paused"]
+            clock.now = 2800
+            await refresh_and_settle(c)
             assert not c.accumulated_dose_fresh
             assert "accumulated_dose" in c.runtime_status["maintenance"]["errors"]
             c._client.get_accumulated_dose.side_effect = None
             c._client.get_accumulated_dose.return_value = 1.3
             clock.now += 60
             await refresh_and_settle(c)
+            assert not c.accumulated_dose_fresh
+            assert c._client.get_accumulated_dose.await_count == 4
+            # A new device dose record recovers without retrying a failed register.
+            c._client.get_data.side_effect = None
+            c._client.get_data.return_value = readings(protocol, dose_rate=.12, count_rate=3,
+                measurement_time=BASE, accumulated_dose=1.3, accumulated_dose_time=BASE)
+            await refresh_and_settle(c)
             assert c.accumulated_dose_fresh
             assert c.data.sensors.accumulated_dose == 1.3
-            assert "accumulated_dose" not in c.runtime_status["maintenance"]["errors"]
             await c.async_user_disconnect()
             assert not c.accumulated_dose_fresh
         finally:
