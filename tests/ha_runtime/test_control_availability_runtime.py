@@ -27,12 +27,14 @@ from custom_components.radiacode.switch import (
     RadiaCodeConnectionSwitch,
     RadiaCodeSwitch,
 )
+from runtime_helpers import setup_registries
 
 
 @pytest_asyncio.fixture
 async def control_runtime(tmp_path):
     """Use real HA publication with a controlled, already-connected BLE client."""
     hass = HomeAssistant(str(tmp_path))
+    await setup_registries(hass)
     entry = ConfigEntry(
         data={"address": "AA:BB:CC:DD:EE:FF", "name": "Test detector"},
         options={"poll_interval": 5, "spectrum_interval": 0},

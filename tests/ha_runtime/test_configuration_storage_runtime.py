@@ -128,7 +128,6 @@ async def test_entry_setup_unload_and_reload_reactivate_profile(runtime, monkeyp
 
     hass, original, _, _, _ = runtime
     entry = original.config_entry
-    # The fixture starts the actual HA registries without a config-entry manager.
     # Only platform routing is controlled; entry hooks and coordinators are real.
     previous_manager = hass.config_entries
     monkeypatch.setattr(hass, "config_entries", SimpleNamespace(

@@ -20,6 +20,7 @@ These reports describe specific builds and captures. A statement that acceptance
 
 | Date | Report |
 | --- | --- |
+| 2026-11-06 | [Sparse dose and automatic spectrum recovery: 2026.11.2b3](dose-spectrum-beta3-2026-11-06.md) |
 | 2026-11-02 | [Dose and reconnect recovery: 2026.11.2b2](alarm-recovery-beta2-2026-11-02.md) |
 | 2026-11-02 | [Alarm availability beta: 2026.11.2b1](alarm-availability-beta-2026-11-02.md) |
 | 2026-11-02 | [Stable field assessment: 2026.11.1](stable-field-review-2026-11-02.md) |

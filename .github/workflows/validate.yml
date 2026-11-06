@@ -53,6 +53,8 @@ jobs:
             requirements: tests/ha_runtime/requirements-ha-runtime-2026.10.1.txt
           - ha: "2026.10.4"
             requirements: tests/ha_runtime/requirements-ha-runtime-2026.10.4.txt
+          - ha: "2026.11.0"
+            requirements: tests/ha_runtime/requirements-ha-runtime-2026.11.txt
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
