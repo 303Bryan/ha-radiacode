@@ -39,17 +39,14 @@ from custom_components.radiacode.sensor import (
     RadiaCodeSpectrumSensor,
 )
 from custom_components.radiacode.diagnostics import async_get_config_entry_diagnostics
+from runtime_helpers import setup_registries
 
 
 @pytest_asyncio.fixture
 async def runtime(tmp_path, monkeypatch):
     """Use real coordinator/entity lifecycles without starting Bluetooth."""
     hass = HomeAssistant(str(tmp_path))
-    # Enum sensors consult the registry during platform setup. Load the same
-    # registries HA initializes before integrations, with empty test storage.
-    dr.async_setup(hass)
-    await dr.async_load(hass, load_empty=True)
-    await er.async_load(hass, load_empty=True)
+    await setup_registries(hass)
     entry = ConfigEntry(
         data={"address": "AA:BB:CC:DD:EE:FF", "name": "Test detector"},
         options={"poll_interval": 5, "spectrum_interval": 60},
