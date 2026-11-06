@@ -90,11 +90,27 @@ async def test_calculated_count_and_dose_alarm_states_publish(runtime):
         c._publish_maintenance_cache()
         assert hass.states.get(entities[1].entity_id).state == "L2 Alarm"
         assert hass.states.get(entities[1].entity_id).attributes["measurement_age_seconds"] >= 1680
-        c._dose_observed -= 121
-        c._status_expiry_handle.cancel()
-        c._expire_status()
-        assert hass.states.get(entities[1].entity_id).state == "unavailable"
+        c._dose_observed -= 1921
+        c._publish_maintenance_cache()
+        assert hass.states.get(entities[1].entity_id).state == "L2 Alarm"
+        assert hass.states.get(entities[1].entity_id).attributes["measurement_age_seconds"] >= 3600
         assert hass.states.get(entities[0].entity_id).state == "L2 Alarm"
+        # Expiry must publish to both alarms, and fresh rates alone must not
+        # revive the old dose total after continuity has been lost.
+        c._last_fresh_monotonic -= 61
+        c._cancel_measurement_expiry()
+        c._expire_measurement()
+        assert hass.states.get(entities[1].entity_id).state == "unavailable"
+        client.get_data.return_value = replace(original, count_rate=60,
+            measurement_time=original.measurement_time + timedelta(seconds=65))
+        await c.async_refresh()
+        assert hass.states.get(entities[0].entity_id).state == "L2 Alarm"
+        assert hass.states.get(entities[1].entity_id).state == "unavailable"
+        client.get_data.return_value = replace(client.get_data.return_value,
+            accumulated_dose=1.3,
+            accumulated_dose_time=original.measurement_time + timedelta(seconds=70))
+        await c.async_refresh()
+        assert hass.states.get(entities[1].entity_id).state == "L2 Alarm"
     finally:
         for entity in entities:
             await entity.async_remove(force_remove=True)
@@ -134,8 +150,7 @@ async def test_dose_observation_never_extends_rates_and_requires_live_measuremen
         assert hass.states.get(dose_rate.entity_id).state == "unavailable"
         assert hass.states.get(entities[0].entity_id).state == "unavailable"
         c._dose_observed -= 1801
-        c._status_expiry_handle.cancel()
-        c._expire_status()
+        c._publish_maintenance_cache()
         for entity in entities:
             assert hass.states.get(entity.entity_id).state == "unavailable"
         await c._refresh_accumulated_dose()

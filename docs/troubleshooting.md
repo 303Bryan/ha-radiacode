@@ -46,7 +46,9 @@ Check diagnostics for measurement age and command failures, then check:
 
 ### Spectrum stays unchanged through a Bluetooth proxy
 
-An incomplete spectrum read keeps the last complete snapshot; check diagnostics for snapshot age and declared/received bytes. The integration releases the affected connection and backs off automatic retries. After three consecutive failures, it pauses automatic spectrum acquisition so repeated large transfers stop interrupting radiation monitoring. The Spectrum entity shows `acquired_at` and `automatic_paused`; diagnostics also show `consecutive_failures` and `last_error`. `retry_in_seconds` is empty while paused. After addressing the connection problem, a successful manual **current-spectrum** action resumes automatic acquisition. Resetting the current spectrum or reloading the integration also starts a new bounded series of attempts. An accumulated-spectrum read does not resume current-spectrum acquisition.
+An incomplete spectrum read keeps the last complete snapshot; check diagnostics for snapshot age and declared/received bytes. The integration releases the affected connection and backs off automatic retries. After three consecutive failures, normal polling pauses and a single recovery attempt is scheduled after at least 30 minutes. Another failed probe waits up to one hour; probes continue at that bounded cadence. Recovery also requires 60 seconds of healthy accepted live measurements on the current connection, and primary polling keeps priority.
+
+The Spectrum entity shows `acquired_at`, `automatic_paused`, and `automatic_recovery_pending`. Diagnostics add `consecutive_failures`, `last_error`, and `retry_in_seconds`, including during a pause. A zero countdown means eligible once the live-stream conditions are met, not a guaranteed immediate read. A complete automatic or manual **current-spectrum** read clears the pause and restores the configured cadence. Resetting the current spectrum or reloading the integration starts a new series. An accumulated-spectrum action does not resume current-spectrum acquisition. Interval 0 still disables all automatic reads, including recovery probes.
 
 Spectra, configuration and the register directory have a 30-second transfer deadline once response packets start arriving; ordinary commands and bulk reads without a first reply have ten seconds. A two-second packet stall still fails the transfer. If notification bytes were dropped, a longer timeout cannot recover them.
 
@@ -97,13 +99,13 @@ Device controls use the active Bluetooth link independently of radiation freshne
 
 Connection establishment has a 30-second total deadline around connector retries, followed by separately bounded cleanup when necessary. Device initialization commands and the coordinator's single retry have their own deadlines; 30 seconds is not a bound on the complete poll/recovery cycle. See the [October 9 connectivity review](connectivity-review-2026-10-09.md) for the supplied evidence and next hardware test.
 
-## Accumulated Dose Alarm becomes unavailable every three minutes
+## Accumulated Dose or its alarm becomes unavailable
 
-Beta 2026.11.2b1 still expired after 180 seconds because the supplied RC-103/4.15 capture contained no successful fallback register read and dose records were up to 28 minutes apart. Beta 2026.11.2b2 retains the last observed total for at most 30 minutes while live radiation measurements remain fresh. It does not estimate dose between observations. Dose entities still expire on a live-stream outage or at the dose-age limit.
+Beta 2026.11.2b3 removes the separate 30-minute dose-age timeout. The longer beta-2 capture showed valid counter observations up to 50 minutes apart while live rates remained healthy. Accumulated Dose and its calculated alarm now retain the last observed total as long as live monitoring continues. They do not estimate increases between observations.
 
-Inspect `measurement_source`, `measurement_age_seconds`, `freshness_limit_seconds`, `fresh`, and `register_read_paused` on the accumulated-dose entities. Three failed fallback reads pause that operation until reload or a confirmed firmware change; normal dose records continue to update the entities. Initial availability still requires an actual dose record or successful register read/reset. A rejected register does not imply zero dose.
+A real live-stream outage or a user BLE disconnect requires a new dose observation before the counter and alarm recover. Fresh rates alone cannot revalidate an old total after that interruption. Initial startup also requires an actual dose record or successful register read/reset; on firmware that rejects dose reads this can take tens of minutes. Do not reset the detector just to refresh its availability unless you intend to clear its accumulated dose.
 
-Downloaded diagnostics include these fields under `runtime.accumulated_dose`, plus read errors under `runtime.maintenance.errors`. Export histories for Accumulated Dose, its alarm, Dose Rate, Count Rate, and BLE Connected together. See the [beta-2 field review](alarm-recovery-beta2-2026-11-02.md).
+Inspect `measurement_source`, `measurement_age_seconds`, `availability_basis`, `observation_required`, `fresh`, and `register_read_paused` on the dose entities. The existing `fresh` attribute describes usable counter state under this continuity policy; it does not mean a new counter observation arrived. `freshness_limit_seconds` is now empty because there is no separate counter-age deadline. Three failed fallback register reads still pause that operation until reload or a confirmed firmware change. Normal dose records keep updating the entities; a rejected read never implies zero dose.
 
 ## Measurements stop briefly after repeated reconnects
 

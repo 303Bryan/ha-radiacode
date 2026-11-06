@@ -25,7 +25,7 @@ def test_repeated_spectrum_failures_pause_automatic_reads(make_coordinator, cloc
             raise TimeoutError("missing notification packets")
         client.get_spectrum.side_effect = failed_bulk_transfer
 
-        for when, failures, delay in ((1060, 1, 300), (1360, 2, 600), (1960, 3, None)):
+        for when, failures, delay in ((1060, 1, 300), (1360, 2, 600), (1960, 3, 1800)):
             clock.now = when
             await refresh_and_settle(coordinator)
             status = coordinator.spectrum_status
@@ -47,6 +47,123 @@ def test_repeated_spectrum_failures_pause_automatic_reads(make_coordinator, cloc
         assert coordinator.connection_count == 3
         await coordinator.async_shutdown()
 
+    asyncio.run(scenario())
+
+
+def test_timed_probes_recover_automatically_with_capped_backoff(make_coordinator, clock, protocol, utc_clock):
+    """Synthetic three-hour run with real polling cadence and retired links."""
+    async def scenario():
+        c = make_coordinator()
+        cached = (await refresh_and_settle(c)).spectrum
+        acquired = c.spectrum_status["acquired_at"]
+        attempts = []
+        recovered = protocol.Spectrum(600, 0, 3, 0, [2] * 1024)
+        async def transfer():
+            attempts.append(clock.now)
+            if len(attempts) <= 5:
+                c._client.is_connected = False
+                raise TimeoutError("incomplete spectrum")
+            return recovered
+        c._client.get_spectrum.side_effect = transfer
+        try:
+            for when in range(1005, 11021, 5):
+                clock.now = when
+                utc_clock.now += timedelta(seconds=5)
+                await refresh_and_settle(c)
+                assert c.measurement_available
+                assert c._last_fresh_monotonic == clock.now
+                if when < 10960:
+                    assert c.data.spectrum is cached
+                    assert c.spectrum_status["acquired_at"] == acquired
+                if 1960 <= when < 10960:
+                    assert c.spectrum_status["automatic_paused"]
+                    assert c.spectrum_status["automatic_recovery_pending"]
+                    assert 0 < c.spectrum_status["retry_in_seconds"] <= 3600
+            assert attempts == [1060, 1360, 1960, 3760, 7360, 10960, 11020]
+            assert c.data.spectrum is recovered
+            assert c.spectrum_status["acquired_at"] != acquired
+            assert not c.spectrum_status["automatic_paused"]
+            assert not c.spectrum_status["automatic_recovery_pending"]
+            assert c.spectrum_status["consecutive_failures"] == 0
+            assert c.spectrum_status["retry_in_seconds"] == 60
+        finally:
+            await c.async_shutdown()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("interruption", ["stale", "reconnect", "user_toggle"])
+def test_due_probe_waits_for_continuous_current_connection_samples(make_coordinator, clock, interruption):
+    async def scenario():
+        c = make_coordinator()
+        await refresh_and_settle(c)
+        for _ in range(3):
+            c._record_spectrum_failure("incomplete")
+        deadline = c._next_spectrum_read
+        clock.now += 5
+        if interruption == "user_toggle":
+            await c.async_user_disconnect()
+            await c.async_user_reconnect()
+            assert c._next_spectrum_read == deadline
+        # The deadline alone must not trigger a bulk read on a newly recovered link.
+        clock.now = deadline
+        if interruption == "reconnect":
+            c._client.is_connected = False
+        await refresh_and_settle(c)
+        assert c.measurement_available
+        assert c.spectrum_status["retry_in_seconds"] == 0
+        for offset in range(5, 60, 5):
+            clock.now = deadline + offset
+            await refresh_and_settle(c)
+            assert c._client.get_spectrum.await_count == 1
+        clock.now = deadline + 60
+        await refresh_and_settle(c)
+        assert c._client.get_spectrum.await_count == 2
+        assert not c.spectrum_status["automatic_paused"]
+        await c.async_shutdown()
+    asyncio.run(scenario())
+
+
+def test_disabled_automatic_spectrum_never_probes(make_coordinator, clock):
+    async def scenario():
+        c = make_coordinator(spectrum_interval=0)
+        for _ in range(3):
+            c._record_spectrum_failure("manual failure")
+        clock.now += 10000
+        for _ in range(20):
+            await refresh_and_settle(c)
+            clock.now += 5
+        c._client.get_spectrum.assert_not_awaited()
+        assert c.spectrum_status["retry_in_seconds"] is None
+        assert not c.spectrum_status["automatic_recovery_pending"]
+        await c.async_shutdown()
+    asyncio.run(scenario())
+
+
+def test_cancelled_probe_retains_backoff_and_cached_spectrum(make_coordinator, clock):
+    async def scenario():
+        c = make_coordinator()
+        cached = (await refresh_and_settle(c)).spectrum
+        for _ in range(3):
+            c._record_spectrum_failure("incomplete")
+        entered = asyncio.Event()
+        async def blocked():
+            entered.set()
+            await asyncio.Event().wait()
+        c._client.get_spectrum.side_effect = blocked
+        for when in range(1005, 2800, 5):
+            clock.now = when
+            await refresh_and_settle(c)
+        clock.now = 2800
+        await c.async_refresh()
+        await asyncio.wait_for(entered.wait(), 1)
+        await c.async_user_disconnect()
+        assert c.spectrum_status["consecutive_failures"] == 4
+        assert c.spectrum_status["retry_in_seconds"] == 3600
+        assert c.data.spectrum is cached
+        await c.async_user_reconnect()
+        await refresh_and_settle(c)
+        assert c._client.get_spectrum.await_count == 2
+        await c.async_shutdown()
     asyncio.run(scenario())
 
 
@@ -177,6 +294,7 @@ def test_acquisition_time_is_host_utc_current_read_completion_only(
         coordinator = make_coordinator(spectrum_interval=0)
         assert coordinator.spectrum_entity_attributes == {
             "acquired_at": None, "automatic_paused": False,
+            "automatic_recovery_pending": False,
         }
         assert coordinator.spectrum_status["acquired_at"] is None
         await refresh_and_settle(coordinator)
@@ -194,6 +312,7 @@ def test_acquisition_time_is_host_utc_current_read_completion_only(
         assert coordinator._last_spectrum_acquired_at == started_at + timedelta(seconds=9)
         assert coordinator.spectrum_entity_attributes == {
             "acquired_at": utc_clock.now.isoformat(), "automatic_paused": False,
+            "automatic_recovery_pending": False,
         }
         assert coordinator.spectrum_status["acquired_at"] == utc_clock.now.isoformat()
         acquired_at = coordinator.spectrum_status["acquired_at"]
@@ -229,6 +348,7 @@ def test_manual_current_failure_publishes_pause_after_transport_disconnect(
         assert coordinator.listener_updates == before + 1
         assert coordinator.spectrum_entity_attributes == {
             "acquired_at": None, "automatic_paused": True,
+            "automatic_recovery_pending": False,
         }
         assert coordinator.data.spectrum is None
         assert coordinator._last_fresh_monotonic == fresh_before
@@ -264,6 +384,7 @@ def test_confirmed_reset_clears_time_but_failed_reset_preserves_it(
         assert coordinator._last_spectrum_acquired_at is None
         assert coordinator.spectrum_entity_attributes == {
             "acquired_at": None, "automatic_paused": False,
+            "automatic_recovery_pending": False,
         }
         await coordinator.async_shutdown()
 

@@ -19,6 +19,25 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.11.2b3] — 2026-11-06
+
+Beta for sparse accumulated-dose availability and automatic spectrum recovery after the longer beta-2 field run.
+
+### Fixed
+- Keep Accumulated Dose and Accumulated Dose Alarm available across sparse counter updates while live dose/count measurements remain continuous. Remove the separate 30-minute expiry; preserve the last actual total, source, and observation age. After a real live-stream outage or a user BLE disconnect, require new dose evidence before recovering these entities.
+- Replace the indefinite spectrum pause with timed single recovery attempts: after three failures wait at least 30 minutes, increasing to at most one hour after further failures. Wait for 60 seconds of healthy live measurements on the current connection before probing. A complete current spectrum restores the configured cadence automatically.
+- Preserve spectrum retry deadlines across reconnects and BLE toggles, count cancelled automatic transfers against the retry budget, and keep interval 0 disabled. Failed reads retain the last complete histogram and acquisition time.
+
+### Diagnostics
+- Expose dose availability basis and whether a new observation is required; retain actual observation age. The legacy `fresh` attribute follows the continuity policy and `freshness_limit_seconds` is empty.
+- Expose `automatic_recovery_pending` on Spectrum and keep the diagnostic retry countdown visible during recovery pauses.
+
+### Testing and limits
+- Add synthetic multi-hour dose and spectrum regressions, delayed expiry, outage/recovery, in-flight read, reconnect, cancellation, and disabled-polling coverage. Test actual HA entity publication and add Home Assistant 2026.11.0 to the existing runtime matrix.
+- This beta still requires physical testing with automatic spectrum enabled. Initial dose availability can wait tens of minutes for a real record on firmware that rejects register reads. The alarm uses the last observed total; BLE/proxy packet loss is not claimed fixed. See [field evidence and the acceptance plan](docs/dose-spectrum-beta3-2026-11-06.md).
+
+---
+
 ## [2026.11.2b2] — 2026-11-02
 
 Beta follow-up for the failed accumulated-dose fallback and delayed measurement recovery observed while testing 2b1.
