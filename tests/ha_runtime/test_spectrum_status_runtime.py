@@ -21,6 +21,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from custom_components.radiacode import coordinator as coordinator_module
 from custom_components.radiacode.coordinator import RadiaCodeCoordinator
 from custom_components.radiacode.radiacode_ble.protocol import (
     RadiaCodeData,
@@ -131,9 +132,18 @@ def assert_primary_unchanged(hass, coordinator, dose, receipt, timer):
 
 @pytest.mark.asyncio
 async def test_automatic_pause_and_manual_recovery_publish_only_changed_metadata(
-    spectrum_runtime,
+    spectrum_runtime, monkeypatch,
 ):
     hass, coordinator, client, dose, spectrum, counts = spectrum_runtime
+    # Establish the stable live stream now required even for the first retry.
+    # This test then forces deadlines to isolate metadata publication; the
+    # automatic-recovery tests exercise the actual retry schedule separately.
+    clock = SimpleNamespace(now=coordinator._last_fresh_monotonic)
+    monkeypatch.setattr(coordinator_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    for _ in range(12):
+        clock.now += 5
+        await coordinator.async_refresh()
+        await settle_maintenance(coordinator)
     cached = await coordinator.async_get_spectrum()
     original = hass.states.get(spectrum.entity_id)
     acquired_at = original.attributes["acquired_at"]
