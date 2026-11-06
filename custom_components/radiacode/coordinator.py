@@ -110,10 +110,11 @@ _TEMPERATURE_INTERVAL = 60.0
 _ACCUMULATED_DOSE_INTERVAL = 60.0
 _ACCUMULATED_DOSE_FAILURE_LIMIT = 3
 _STATUS_FRESHNESS = 180.0
-_SPECTRUM_RETRY_MIN = 300.0
-_SPECTRUM_RETRY_MAX = 3600.0
+_SPECTRUM_RETRY_MIN = 60.0
+_SPECTRUM_RETRY_STEP_MIN = 300.0
+_SPECTRUM_RETRY_MAX = 900.0
 _SPECTRUM_FAILURE_LIMIT = 3
-_SPECTRUM_RECOVERY_MIN = 1800.0
+_SPECTRUM_RECOVERY_MIN = 600.0
 _SPECTRUM_RECOVERY_STABLE = 60.0
 _PHASE_HISTORY_LIMIT = 20
 
@@ -570,6 +571,11 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         }
 
     @property
+    def bluetooth_connection_attributes(self) -> dict:
+        """Expose confirmed live routing separately from discovery metadata."""
+        return self._client.connection_route
+
+    @property
     def transport_status(self) -> dict:
         """Expose the client's bounded transport diagnostics for downloads."""
         return {
@@ -911,7 +917,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             and self.measurement_available
             and self._last_measurement_connection == self._connection_count
             and (
-                not self._automatic_spectrum_paused
+                self._spectrum_consecutive_failures == 0
                 or (self._live_connection_since is not None
                     and now - self._live_connection_since >= _SPECTRUM_RECOVERY_STABLE)
             )
@@ -1130,7 +1136,9 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             self._spectrum_retry_delay = max(
                 _SPECTRUM_RECOVERY_MIN, self._spectrum_retry_delay
             )
-        self._spectrum_retry_delay = min(_SPECTRUM_RETRY_MAX, self._spectrum_retry_delay)
+        # Respect slower user-selected cadences as well as the recovery cap.
+        ceiling = max(_SPECTRUM_RETRY_MAX, self._spectrum_interval)
+        self._spectrum_retry_delay = min(ceiling, self._spectrum_retry_delay)
         self._next_spectrum_read = time.monotonic() + self._spectrum_retry_delay
         _LOGGER.warning(
             "Spectrum read failed (%d consecutive); retaining previous snapshot. "
@@ -1140,7 +1148,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             self._automatic_spectrum_paused, self._spectrum_interval > 0, error,
         )
         self._spectrum_retry_delay = min(
-            _SPECTRUM_RETRY_MAX, self._spectrum_retry_delay * 2
+            ceiling, max(_SPECTRUM_RETRY_STEP_MIN, self._spectrum_retry_delay * 2)
         )
 
     async def _fetch_device_identity(self) -> None:

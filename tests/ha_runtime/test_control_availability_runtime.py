@@ -16,6 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from custom_components.radiacode.binary_sensor import RadiaCodeConnectivitySensor
 from custom_components.radiacode.button import BUTTON_DESCRIPTIONS, RadiaCodeButton
 from custom_components.radiacode.coordinator import RadiaCodeCoordinator
 from custom_components.radiacode.number import NUMBER_DESCRIPTIONS, RadiaCodeNumber
@@ -45,6 +46,10 @@ async def control_runtime(tmp_path):
     coordinator = RadiaCodeCoordinator(hass, entry)
     client = SimpleNamespace(
         is_connected=True,
+        connection_route={"active_connection_source": "selected-source",
+                          "active_connection_source_name": "Selected proxy",
+                          "connection_source_evidence": "ha_connected_scanner",
+                          "connection_route_id": 1},
         get_data=AsyncMock(return_value=RadiaCodeData(
             dose_rate=0.12, count_rate=12.0, accumulated_dose=None,
             battery=None, temperature=None,
@@ -70,12 +75,13 @@ async def control_runtime(tmp_path):
         "dose_reset": RadiaCodeButton(coordinator, entry, BUTTON_DESCRIPTIONS[0]),
         "spectrum_reset": RadiaCodeButton(coordinator, entry, BUTTON_DESCRIPTIONS[1]),
         "connection": RadiaCodeConnectionSwitch(coordinator, entry),
+        "connectivity": RadiaCodeConnectivitySensor(coordinator, entry),
         "dose": RadiaCodeSensor(coordinator, entry, SENSOR_DESCRIPTIONS[0]),
     }
     domains = {
         "number": "number", "select": "select", "switch": "switch",
         "dose_reset": "button", "spectrum_reset": "button",
-        "connection": "switch", "dose": "sensor",
+        "connection": "switch", "dose": "sensor", "connectivity": "binary_sensor",
     }
     platforms = {
         domain: EntityPlatform(
@@ -227,3 +233,24 @@ async def test_alarm_controls_accept_device_defaults_and_keep_ids(control_runtim
     c.async_write_setting = AsyncMock()
     await entity.async_set_native_value(expected)
     c.async_write_setting.assert_awaited_once_with(description.vsfr_id, raw)
+
+
+@pytest.mark.asyncio
+async def test_connected_proxy_attributes_publish_and_clear(control_runtime):
+    hass, coordinator, client, entities = control_runtime
+    await coordinator.async_refresh()
+    entity = entities["connectivity"]
+    state = hass.states.get(entity.entity_id)
+    assert state.state == "on"
+    assert state.attributes["active_connection_source_name"] == "Selected proxy"
+    assert state.attributes["connection_route_id"] == 1
+    # The transport clears its live route on disconnect; publication must also.
+    client.is_connected = False
+    client.connection_route = {"active_connection_source": None,
+                               "active_connection_source_name": None,
+                               "connection_route_id": None,
+                               "connection_source_evidence": "disconnected"}
+    coordinator.async_update_listeners()
+    state = hass.states.get(entity.entity_id)
+    assert state.state == "off"
+    assert state.attributes["active_connection_source_name"] is None

@@ -28,6 +28,8 @@ TO_REDACT = {
     "connection_request_source",
     "connection_request_source_name",
     "connection_request_scanner_source",
+    "active_connection_source",
+    "active_connection_source_name",
 }
 
 _CONFIGURATION_SOURCES = {"device", "storage", "firmware_profile"}

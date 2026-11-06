@@ -358,10 +358,22 @@ async def test_downloadable_diagnostics_serialize_and_redact_sources(runtime):
             "connection_request_scanner_source": "22:33:44:55:66:77",
         },
         "recent_commands": [{"target": "SPECTRUM", "received_body_bytes": 1254}],
+        "recent_spectrum_commands": [{
+            "active_connection_source": "33:44:55:66:77:88",
+            "active_connection_source_name": "Actual private proxy",
+            "connection_route_id": 2, "connection_source_evidence": "ha_connected_scanner",
+            "missing_body_bytes": 20, "last_notification_bytes": 16,
+        }],
+        "transport": {"active_connection_source": "33:44:55:66:77:88",
+                      "active_connection_source_name": "Actual private proxy"},
     }
     hass.data["radiacode"] = {coordinator._entry_id: coordinator}
     result = await async_get_config_entry_diagnostics(hass, coordinator.config_entry)
     serialized = json.dumps(result)
+    assert "Actual private proxy" not in serialized
+    assert "33:44:55:66:77:88" not in serialized
+    assert result["transport"]["recent_spectrum_commands"][0]["connection_route_id"] == 2
+    assert result["transport"]["recent_spectrum_commands"][0]["missing_body_bytes"] == 20
     assert "Private proxy name" not in serialized
     assert "11:22:33:44:55:66" not in serialized
     assert "22:33:44:55:66:77" not in serialized

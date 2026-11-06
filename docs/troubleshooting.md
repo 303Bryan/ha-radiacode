@@ -16,6 +16,12 @@ For the best results with BT proxies:
 - If the sensor becomes unavailable, check measurement freshness and transfer diagnostics as well as Bluetooth signal and proxy capacity
 
 
+## Identify the connected proxy
+
+Open the detector's **BLE Connected** entity and expand its attributes. `active_connection_source_name` and `active_connection_source` describe the confirmed connected scanner/backend. `connection_source_evidence` explains the observation; unknown means the installed backend did not expose a supported route field. These live attributes clear on disconnect. The transport section in diagnostics retains the last established route as historical evidence.
+
+Cross-check **Settings → Devices & services → Bluetooth → Connections**. The strongest advertisement and the connection request are discovery evidence, not proof of the proxy HA ultimately selected. A numeric `connection_route_id` identifies a route only within this integration session; it is not a permanent proxy identity.
+
 ## Known Limitations
 
 - **Large Bluetooth transfers** — weak links or busy proxies can stall spectrum/configuration transfers. The integration rejects incomplete responses, reconnects for subsequent polls, and backs off failed automatic spectrum reads. A stale data-buffer drain failure aborts initialization instead of continuing on a damaged stream; records sent during an interrupted read may be lost.
@@ -46,7 +52,7 @@ Check diagnostics for measurement age and command failures, then check:
 
 ### Spectrum stays unchanged through a Bluetooth proxy
 
-An incomplete spectrum read keeps the last complete snapshot; check diagnostics for snapshot age and declared/received bytes. The integration releases the affected connection and backs off automatic retries. After three consecutive failures, normal polling pauses and a single recovery attempt is scheduled after at least 30 minutes. Another failed probe waits up to one hour; probes continue at that bounded cadence. Recovery also requires 60 seconds of healthy accepted live measurements on the current connection, and primary polling keeps priority.
+An incomplete spectrum read keeps the last complete snapshot; check diagnostics for snapshot age and declared/received bytes. The integration releases the affected connection and backs off automatic retries. With the default one-minute spectrum interval, retries wait 1, 5, 10, then 15 minutes after consecutive failures, remaining at 15 minutes thereafter. Slower configured intervals remain a minimum. After three failures, the normal cadence is marked paused while single recovery attempts continue. Every retry requires 60 seconds of healthy accepted live measurements on the current connection, and primary polling keeps priority.
 
 The Spectrum entity shows `acquired_at`, `automatic_paused`, and `automatic_recovery_pending`. Diagnostics add `consecutive_failures`, `last_error`, and `retry_in_seconds`, including during a pause. A zero countdown means eligible once the live-stream conditions are met, not a guaranteed immediate read. A complete automatic or manual **current-spectrum** read clears the pause and restores the configured cadence. Resetting the current spectrum or reloading the integration starts a new series. An accumulated-spectrum action does not resume current-spectrum acquisition. Interval 0 still disables all automatic reads, including recovery probes.
 
@@ -75,7 +81,7 @@ logger:
 
 Debug logs include per-poll timings, BLE notification reassembly details, and decoded record distributions. Capture the shortest useful failure window, then disable temporary logging. Review logs for Bluetooth addresses, serial numbers, device/proxy names, and other identifying information before posting them. Downloadable diagnostics redact identifiers; raw debug logs can still contain them.
 
-The command summaries identify the virtual string/register target, response sizes, notification count and size distribution, first-byte latency, maximum gap, lock wait, connection generation and failure category. Radiation logs identify the selected sample type/time, opaque flags and device-versus-receipt progression. Optional-operation errors remain separate from the primary polling result. Histories are bounded; routine logs do not print full spectra or configuration contents.
+The command summaries identify the virtual string/register target, response sizes, notification count and size distribution, first-byte latency, maximum gap, lock wait, connection generation and failure category. They also include the confirmed connected source/name, a session-local `connection_route_id`, and the size of the last nonempty notification. `recent_spectrum_commands` retains the last 20 current/accumulated spectrum attempts separately from ordinary commands. Downloaded diagnostics redact names/addresses but preserve route IDs and transfer measurements. Radiation logs identify the selected sample type/time, opaque flags and device-versus-receipt progression. Optional-operation errors remain separate from the primary polling result. Histories are bounded; routine logs do not print full spectra or configuration contents.
 
 On the proxy, look for notification-forwarding failures, dropped BLE events, TCP congestion and poor reception. An advertisement's source/RSSI can differ from the connected proxy and can be stale while connected. Record both the proxy project version and ESPHome build version; they are separate versions. [ESPHome's proxy documentation](https://esphome.io/components/bluetooth_proxy/) explains reception and shared-radio constraints.
 

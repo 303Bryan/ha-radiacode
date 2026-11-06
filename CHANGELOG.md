@@ -19,6 +19,24 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.11.2b4] — 2026-11-06
+
+Beta for faster spectrum recovery and confirmed Bluetooth route visibility after the overnight beta-3 run.
+
+### Changed
+- At the default spectrum interval, retry failed automatic reads after 1, 5, 10, then 15 minutes, capped at 15 minutes instead of an hour. Respect slower configured intervals. Require a minute of healthy live measurements on the current connection before every retry, including the first.
+- Preserve strict complete-frame validation, failed-stream retirement, primary polling priority, prior snapshot age, retry deadlines across reconnects/toggles, and disabled automatic collection.
+
+### Diagnostics
+- Show the confirmed connected proxy source/name on BLE Connected when the backend exposes it. Clear live route attributes on disconnect and keep requested/advertisement sources separate. Home Assistant still chooses the route.
+- Record the selected backend, route evidence, and session-local route ID. Retain the last 20 spectrum transfer summaries separately from primary polls, with the route at command start and last notification size. Downloadable diagnostics redact proxy identities.
+
+### Testing and limits
+- Add missing-middle-packet, route-selection, unknown-backend, disconnect, bounded-history, retry-cadence, stable-stream gating, and actual HA entity/redaction regressions.
+- The prior run completed 10 of 35 spectrum reads; 16 of 25 incomplete reads contained short notifications while missing whole 20-byte chunks. This supports investigating notification loss, not merely increasing deadlines. The loss location remains unconfirmed; this beta changes recovery and observability, not detector firmware or proxy settings. See [evidence and the acceptance plan](docs/spectrum-route-beta4-2026-11-06.md).
+
+---
+
 ## [2026.11.2b3] — 2026-11-06
 
 Beta for sparse accumulated-dose availability and automatic spectrum recovery after the longer beta-2 field run.
