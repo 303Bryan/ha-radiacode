@@ -34,7 +34,7 @@ async def test_failed_then_successful_probe_publishes_recovery_state(runtime, mo
     paused = hass.states.get(spectrum.entity_id)
     assert paused.attributes["automatic_paused"]
     assert paused.attributes["automatic_recovery_pending"]
-    assert c.spectrum_status["retry_in_seconds"] == 1800
+    assert c.spectrum_status["retry_in_seconds"] == 600
     client.get_spectrum.side_effect = TimeoutError("probe incomplete")
     for failed in (True, False):
         deadline = c._next_spectrum_read
@@ -53,7 +53,7 @@ async def test_failed_then_successful_probe_publishes_recovery_state(runtime, mo
         assert hass.states.get(dose.entity_id).state == "0.12"
         if failed:
             assert state.attributes["acquired_at"] == acquired
-            assert c.spectrum_status["retry_in_seconds"] == 3600
+            assert c.spectrum_status["retry_in_seconds"] == 900
             client.get_spectrum.side_effect = None
         else:
             assert c.spectrum_status["retry_in_seconds"] == 60

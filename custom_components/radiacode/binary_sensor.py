@@ -86,6 +86,7 @@ class RadiaCodeConnectivitySensor(
         """Expose connection diagnostics as entity attributes."""
         attrs: dict[str, Any] = {
             "connection_count": self.coordinator.connection_count,
+            **self.coordinator.bluetooth_connection_attributes,
         }
         last_err = self.coordinator.last_error
         if last_err is not None:

@@ -55,7 +55,7 @@ async def connection_runtime(monkeypatch):
 
     device = BLEDevice("AA:BB:CC:DD:EE:FF", "Test detector", {"source": "test-proxy"})
     scanner = types.SimpleNamespace(
-        adapter_idx=None, source="test-proxy", name="Test proxy", _clients=set(),
+        adapter_idx=None, source="selected-proxy", name="Selected proxy", _clients=set(),
         _add_connecting=lambda address: None,
         _finished_connecting=lambda address, connected: None,
     )
@@ -143,6 +143,13 @@ async def test_tracked_cache_client_survives_ha_constructor_interception(connect
     assert isinstance(owner._client, module.BleakClientWithServiceCache)
     assert owner._client in scanner._clients
     assert owner.is_connected
+    assert owner.connection_route == {
+        "active_connection_source": "selected-proxy",
+        "active_connection_source_name": "Selected proxy",
+        "connection_source_evidence": "ha_connected_scanner",
+        "connection_route_id": 1,
+    }
+    assert owner.transport_diagnostics["transport"]["connection_request_source"] == "test-proxy"
     assert len(transports) == 1
     assert transports[0].notify_callback is not None
     owner._execute_locked.assert_awaited()
@@ -150,6 +157,8 @@ async def test_tracked_cache_client_survives_ha_constructor_interception(connect
     assert transports[0].disconnect_count == 1
     assert not scanner._clients
     assert not owner.is_connected
+    assert owner.connection_route["active_connection_source"] is None
+    assert owner.connection_route["connection_source_evidence"] == "disconnected"
 
 
 @pytest.mark.asyncio

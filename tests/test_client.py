@@ -2060,3 +2060,110 @@ def test_record_schema_discovery_does_not_poison_observed_spectrum_encoding(
         await client.disconnect()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("route_kind", ["scanner", "esphome", "unknown", "broken"])
+def test_connected_route_is_selected_backend_not_requested_device(client_module, monkeypatch, route_kind):
+    async def scenario():
+        client = client_module.RadiaCodeBLEClient()
+        transport = FakeBLETransport(client_module)
+        if route_kind == "scanner":
+            transport._connected_scanner = types.SimpleNamespace(source="selected-source", name="Selected proxy")
+        elif route_kind == "esphome":
+            backend_type = type("BleakClientESPHome", (), {"__module__": "bleak_esphome.backend.client"})
+            transport._backend = backend_type()
+            transport._backend._source = "selected-source"
+            transport._backend._source_name = "Selected proxy"
+        elif route_kind == "broken":
+            class BrokenScanner:
+                @property
+                def source(self):
+                    raise RuntimeError("backend changed")
+            transport._connected_scanner = BrokenScanner()
+        device = supply_connection(monkeypatch, client_module, transport)
+        device.details = {"source": "requested-source", "source_name": "Requested proxy"}
+        await client.connect(device)
+        assert client.is_connected
+        route = client.connection_route
+        known = route_kind in ("scanner", "esphome")
+        assert route["active_connection_source"] == ("selected-source" if known else None)
+        assert route["active_connection_source_name"] == ("Selected proxy" if known else None)
+        assert route["connection_source_evidence"] == {
+            "scanner": "ha_connected_scanner", "esphome": "esphome_connected_backend",
+        }.get(route_kind, "unknown")
+        assert client.transport_diagnostics["transport"]["connection_request_source"] == "requested-source"
+        await client._read_vs(client_module.VS.SPECTRUM)
+        await client.disconnect()
+        assert client.connection_route["active_connection_source"] is None
+        assert client.connection_route["connection_source_evidence"] == "disconnected"
+        # Retained command metadata describes the route during that command.
+        assert client.transport_diagnostics["recent_spectrum_commands"][-1]["active_connection_source"] == route["active_connection_source"]
+        # A later unsupported backend must not inherit the old route.
+        fresh = FakeBLETransport(client_module)
+        device = supply_connection(monkeypatch, client_module, fresh)
+        await client.connect(device)
+        assert client.connection_route["active_connection_source"] is None
+        await client.disconnect()
+    asyncio.run(scenario())
+
+
+def test_spectrum_history_survives_primary_polls_is_bounded_and_copied(client_module):
+    async def scenario():
+        client, _ = attached_client(client_module)
+        for _ in range(25):
+            await client._read_vs(client_module.VS.SPECTRUM)
+        history = client.transport_diagnostics["recent_spectrum_commands"]
+        assert len(history) == 20
+        for _ in range(25):
+            await client._read_vs(client_module.VS.DATA_BUF)
+        assert all(c["virtual_string"] == "DATA_BUF" for c in client.transport_diagnostics["recent_commands"])
+        assert client.transport_diagnostics["recent_spectrum_commands"] == history
+        history[0]["notification_sizes"]["private mutation"] = 1
+        assert "private mutation" not in client.transport_diagnostics["recent_spectrum_commands"][0]["notification_sizes"]
+    asyncio.run(scenario())
+
+
+def test_missing_middle_packet_records_short_tail_and_retired_route(client_module):
+    async def scenario():
+        # Synthetic complete 96-byte wire frame with one missing 20-byte
+        # middle notification. A short final packet cannot repair the frame.
+        def missing_middle(transport, request):
+            raw = b"x" * 80
+            body = request[4:8] + struct.pack("<II", 1, len(raw)) + raw
+            frame = struct.pack("<i", len(body)) + body
+            for offset in (0, 40, 60, 80):
+                transport.notify(frame[offset:offset + 20])
+        client, transport = attached_client(client_module, missing_middle)
+        client._transport_metadata = {
+            "active_connection_source": "selected-source",
+            "active_connection_source_name": "Selected proxy",
+            "connection_source_evidence": "ha_connected_scanner",
+        }
+        with pytest.raises(TimeoutError, match="Incomplete response"):
+            await client._read_vs(client_module.VS.SPECTRUM)
+        assert not client.is_connected
+        assert transport.disconnect_count == 1
+        stats = client.transport_diagnostics["recent_spectrum_commands"][-1]
+        assert stats["outcome"] == "error"
+        assert stats["missing_body_bytes"] == 20
+        assert stats["last_notification_bytes"] == 16
+        assert stats["active_connection_source"] == "selected-source"
+        assert client.connection_route["active_connection_source"] is None
+    asyncio.run(scenario())
+
+
+def test_route_ids_reuse_known_sources_and_bound_identity_memory(client_module):
+    client, transport = attached_client(client_module)
+    transport._connected_scanner = types.SimpleNamespace(source="first", name="First")
+    client._capture_connection_route()
+    first = client.connection_route["connection_route_id"]
+    client._capture_connection_route()
+    assert client.connection_route["connection_route_id"] == first
+    for i in range(8):
+        transport._connected_scanner.source = f"other-{i}"
+        client._capture_connection_route()
+    assert len(client._route_ids) == 8
+    transport._connected_scanner.source = "first"
+    client._capture_connection_route()
+    assert client.connection_route["connection_route_id"] > first
+    assert len(client._route_ids) == 8

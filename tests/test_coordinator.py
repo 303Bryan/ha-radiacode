@@ -605,21 +605,24 @@ def test_spectrum_failures_back_off_and_recover_without_losing_cached_snapshot(
         assert (await refresh_and_settle(coordinator)).spectrum is cached
         assert coordinator.last_update_success is True
         assert coordinator.last_error is None
+        assert coordinator.spectrum_status["retry_in_seconds"] == 60
+        for when in range(1065, 1120, 5):
+            clock.now = when
+            await refresh_and_settle(coordinator)
+            assert client.get_spectrum.await_count == 2
+        clock.now = 1120
+        await refresh_and_settle(coordinator)
         assert coordinator.spectrum_status["retry_in_seconds"] == 300
-        clock.now = 1359
-        await refresh_and_settle(coordinator)
-        assert client.get_spectrum.await_count == 2
-        clock.now = 1360
-        await refresh_and_settle(coordinator)
-        assert coordinator.spectrum_status["retry_in_seconds"] == 600
         recovered = protocol.Spectrum(duration_s=120, a0=0, a1=3, a2=0, counts=[2] * 1024)
         client.get_spectrum.side_effect = None
         client.get_spectrum.return_value = recovered
-        clock.now = 1960
-        assert (await refresh_and_settle(coordinator)).spectrum is recovered
+        for when in range(1125, 1425, 5):
+            clock.now = when
+            await refresh_and_settle(coordinator)
+        assert coordinator.data.spectrum is recovered
         assert coordinator.spectrum_status["last_error"] is None
         assert coordinator.spectrum_status["retry_in_seconds"] == 60
-        assert coordinator._spectrum_retry_delay == 300
+        assert coordinator._spectrum_retry_delay == 60
         await coordinator.async_shutdown()
 
     asyncio.run(scenario())

@@ -193,7 +193,10 @@ class RadiaCodeBLEClient:
         self._last_notification: Optional[float] = None
         self._command_stats: Optional[dict] = None
         self._command_history: deque[dict] = deque(maxlen=_COMMAND_HISTORY_LIMIT)
+        self._spectrum_command_history: deque[dict] = deque(maxlen=_COMMAND_HISTORY_LIMIT)
         self._transport_metadata: dict = {}
+        self._route_ids: dict[str, int] = {}
+        self._next_route_id = 0
         self._initialization_steps: list[dict] = []
         self._last_disconnect_reason: Optional[str] = None
 
@@ -395,7 +398,11 @@ class RadiaCodeBLEClient:
             "mtu_size": mtu if isinstance(mtu, int) else None,
             "service_count": len(service_uuids),
             "active_connection_source": None,
+            "active_connection_source_name": None,
+            "connection_route_id": None,
+            "connection_source_evidence": "unknown",
         }
+        self._capture_connection_route()
         # BLEDevice.details is public, but its contents vary by backend.
         # Record only known scalar source fields, never arbitrary backend state.
         details = getattr(ble_device, "details", None)
@@ -609,6 +616,64 @@ class RadiaCodeBLEClient:
         return self._spectrum_format_source
 
     @property
+    def connection_route(self) -> dict:
+        """Describe the live route, never an advertisement or a retired link."""
+        if not self.is_connected:
+            return {
+                "active_connection_source": None,
+                "active_connection_source_name": None,
+                "connection_route_id": None,
+                "connection_source_evidence": "disconnected",
+            }
+        return {key: self._transport_metadata.get(key) for key in (
+            "active_connection_source", "active_connection_source_name",
+            "connection_source_evidence", "connection_route_id",
+        )}
+
+    def _capture_connection_route(self) -> None:
+        """Snapshot the selected backend after HA has finished routing.
+
+        Bleak has no portable public route accessor. These optional fields are
+        read-only metadata from HA's connected scanner / ESPHome backend, not
+        the requested BLEDevice (HA may select a different adapter). Unknown
+        layouts must never prevent a connection or guess an active source.
+        """
+        try:
+            backend = getattr(self._client, "_backend", None)
+            if backend is not None:
+                self._transport_metadata["selected_backend"] = (
+                    f"{type(backend).__module__}.{type(backend).__name__}"
+                )
+            scanner = getattr(self._client, "_connected_scanner", None)
+            source = getattr(scanner, "source", None)
+            name = getattr(scanner, "name", None)
+            evidence = "ha_connected_scanner"
+            if not isinstance(source, str) or not source:
+                # Older wrappers may not retain a scanner. Only accept the
+                # ESPHome backend's own source, never generic device details.
+                if backend is None or not type(backend).__module__.startswith("bleak_esphome."):
+                    return
+                source = getattr(backend, "_source", None)
+                name = getattr(backend, "_source_name", None)
+                evidence = "esphome_connected_backend"
+            if isinstance(source, str) and source:
+                if source not in self._route_ids:
+                    # Session-local labels permit redacted route comparisons.
+                    # Bound retained identities, without deriving a public hash.
+                    if len(self._route_ids) >= 8:
+                        self._route_ids.pop(next(iter(self._route_ids)))
+                    self._next_route_id += 1
+                    self._route_ids[source] = self._next_route_id
+                self._transport_metadata.update({
+                    "active_connection_source": source[:120],
+                    "active_connection_source_name": name[:120] if isinstance(name, str) else None,
+                    "connection_source_evidence": evidence,
+                    "connection_route_id": self._route_ids[source],
+                })
+        except Exception:  # noqa: BLE001 - optional backend metadata only
+            _LOGGER.debug("Connected route metadata unavailable", exc_info=True)
+
+    @property
     def transport_diagnostics(self) -> dict:
         """Return bounded command summaries suitable for HA diagnostics."""
         return {
@@ -625,6 +690,7 @@ class RadiaCodeBLEClient:
             "last_disconnect_reason": self._last_disconnect_reason,
             "initialization_steps": [dict(step) for step in self._initialization_steps],
             "recent_commands": deepcopy(list(self._command_history)),
+            "recent_spectrum_commands": deepcopy(list(self._spectrum_command_history)),
             "spectrum_format_source": self._spectrum_format_source,
             "configuration": {
                 "loaded": self._configuration_loaded,
@@ -1156,6 +1222,7 @@ class RadiaCodeBLEClient:
         if not data:
             return
         if stats is not None:
+            stats["last_notification_bytes"] = len(data)
             if stats["first_byte_s"] is None:
                 stats["first_byte_s"] = round(now - stats["_started"], 4)
             if self._last_notification is not None:
@@ -1259,6 +1326,7 @@ class RadiaCodeBLEClient:
             "command": f"0x{cmd:04x}", "command_name": command_name,
             "virtual_string": target, "sequence": seq,
             "connection_generation": self._connection_generation,
+            **self.connection_route,
             "lock_wait_s": round(self._command_lock_wait_s, 4),
             "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "request_bytes": len(packet), "completed_write_chunks": 0,
@@ -1268,6 +1336,7 @@ class RadiaCodeBLEClient:
             "write_mode_effective": None,
             "response_body_limit": self._response_body_limit,
             "notification_count": 0, "notification_sizes": {},
+            "last_notification_bytes": None,
             "declared_body_bytes": None, "received_body_bytes": 0,
             "missing_body_bytes": None, "first_byte_s": None,
             "max_notification_gap_s": 0.0, "deadline_s": _CMD_TIMEOUT,
@@ -1396,6 +1465,8 @@ class RadiaCodeBLEClient:
                 if self._last_notification is not None else None
             )
             self._command_history.append(stats)
+            if target in ("SPECTRUM", "SPEC_ACCUM"):
+                self._spectrum_command_history.append(stats)
             self._command_stats = None
             _LOGGER.debug("BLE command summary %s", stats)
 
