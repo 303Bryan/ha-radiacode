@@ -56,5 +56,19 @@ async def test_failed_then_successful_probe_publishes_recovery_state(runtime, mo
             assert c.spectrum_status["retry_in_seconds"] == 900
             client.get_spectrum.side_effect = None
         else:
-            assert c.spectrum_status["retry_in_seconds"] == 60
+            assert c.spectrum_status["retry_in_seconds"] == 300
+            assert c.spectrum_status["recovery_confirmation_pending"]
             assert c.spectrum_status["consecutive_failures"] == 0
+
+    confirmation = c._next_spectrum_read
+    before = client.get_spectrum.await_count
+    for when in range(int(clock.now) + 5, int(confirmation), 5):
+        clock.now = when
+        await poll()
+        assert client.get_spectrum.await_count == before
+    clock.now = confirmation
+    await poll()
+    assert client.get_spectrum.await_count == before + 1
+    assert not c.spectrum_status["recovery_confirmation_pending"]
+    assert c.spectrum_status["retry_in_seconds"] == 60
+    assert hass.states.get(dose.entity_id).state == "0.12"
