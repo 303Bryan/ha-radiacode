@@ -333,8 +333,8 @@ def test_successful_identity_does_not_delay_two_reconnects(make_coordinator, clo
         for generation in (1, 2):
             clock.now += 5
             client.is_connected = False
-            # Mimic the real client's schema gate until this connection's
-            # firmware identity is confirmed. Cached rates can still be valid.
+            # A verified connection may initially contain no paired sample.
+            # Spectrum must still wait for an accepted reading.
             client.get_data.side_effect = None
             client.get_data.return_value = readings(protocol)
             c._next_spectrum_read = 0
@@ -367,12 +367,14 @@ def test_identity_failure_uses_cooldown_across_reconnect(make_coordinator, clock
 
         client.get_serial_number.side_effect = fail_and_drop
         await refresh_and_settle(coordinator)
-        assert coordinator.data.sensors.dose_rate == 0.12
+        client.get_data.assert_not_awaited()
+        assert not coordinator.measurement_available
         assert coordinator.runtime_status["maintenance"]["errors"]["identity"] == "serial unavailable"
         clock.now = 1005
         await refresh_and_settle(coordinator)
         client.connect.assert_awaited_once()
         assert client.get_serial_number.await_count == 1
+        client.get_data.assert_not_awaited()
         clock.now = 1060
         await refresh_and_settle(coordinator)
         assert client.get_serial_number.await_count == 2
@@ -574,7 +576,7 @@ def test_cancel_before_worker_start_and_user_reconnect_have_no_orphan_task(make_
         await coordinator.async_refresh()
         worker = coordinator._maintenance_task
         # The worker is deliberately non-eager and has not issued any command.
-        coordinator._client.get_serial_number.assert_not_awaited()
+        coordinator._client.get_settings.assert_not_awaited()
         await coordinator.async_user_disconnect()
         assert worker.cancelled()
         assert coordinator._maintenance_task is None
@@ -621,7 +623,7 @@ def test_spectrum_failures_back_off_and_recover_without_losing_cached_snapshot(
             await refresh_and_settle(coordinator)
         assert coordinator.data.spectrum is recovered
         assert coordinator.spectrum_status["last_error"] is None
-        assert coordinator.spectrum_status["retry_in_seconds"] == 60
+        assert coordinator.spectrum_status["retry_in_seconds"] == 300
         assert coordinator._spectrum_retry_delay == 60
         await coordinator.async_shutdown()
 
@@ -831,4 +833,54 @@ def test_configuration_retries_are_optional_and_back_off_across_polls(
         finally:
             await coordinator.async_shutdown()
 
+    asyncio.run(scenario())
+
+
+def test_firmware_precedes_live_buffer_on_startup_and_poll_retry(make_coordinator, clock, coordinator_module, monkeypatch):
+    async def scenario():
+        c = make_coordinator(spectrum_interval=0)
+        client = c._client
+        events = []
+        measurement = client.get_data.side_effect
+
+        async def read_version():
+            events.append("version")
+            return "4.14"
+
+        async def read_live():
+            events.append("live")
+            if events == ["version", "live", "live"]:
+                raise OSError("interrupted poll")
+            assert c._identity_connection == c.connection_count
+            return await measurement()
+
+        client.get_data.side_effect = read_live
+        client.get_firmware_version.side_effect = read_version
+        client.is_connected = False
+        monkeypatch.setattr(coordinator_module, "_RETRY_DELAY", 0)
+        await refresh_and_settle(c)
+        clock.now += 5
+        await refresh_and_settle(c)
+        assert events == ["version", "live", "live", "version", "live"]
+        assert c.measurement_available
+        await c.async_shutdown()
+    asyncio.run(scenario())
+
+
+def test_missing_advertisement_reported_initially_and_on_retry(make_coordinator, coordinator_module, monkeypatch):
+    async def scenario():
+        c = make_coordinator()
+        client = c._client
+        monkeypatch.setattr(coordinator_module, "_RETRY_DELAY", 0)
+        coordinator_module.bluetooth.async_ble_device_from_address.return_value = None
+        client.is_connected = False
+        await c.async_refresh()
+        assert "connectable Bluetooth advertisement" in c.last_error
+        client.connect.assert_not_awaited()
+        client.is_connected = True
+        client.get_data.side_effect = OSError("transfer interrupted")
+        await c.async_refresh()
+        assert "advertisement" in c.last_error and "retry" in c.last_error
+        client.connect.assert_not_awaited()
+        await c.async_shutdown()
     asyncio.run(scenario())

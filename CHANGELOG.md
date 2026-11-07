@@ -19,6 +19,15 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.11.2b5] — 2026-11-07
+
+- Publish the first recovered current spectrum immediately. Wait at least five minutes, or the configured interval if longer, before confirming recovery. Two complete reads separated by this interval restore normal polling. An incomplete confirmation keeps the last complete histogram and starts retries at the longer interval.
+- Verify firmware on each connection after the stale-buffer drain and before the first live measurement read. Failed verification retains the existing 60-second cooldown across reconnects.
+- Distinguish waiting for a connectable advertisement from a BLE connection establishment timeout. Timeout messages include elapsed time and the configured limit.
+- For overnight testing, compare gaps between fresh paired readings, reconnects, and time between complete spectra. Diagnostics expose `recovery_confirmation_pending` and the retry countdown. Physical testing of this beta is pending.
+
+---
+
 ## [2026.11.2b4] — 2026-11-06
 
 Beta for faster spectrum recovery and confirmed Bluetooth route visibility after the overnight beta-3 run.
