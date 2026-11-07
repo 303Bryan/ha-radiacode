@@ -268,7 +268,7 @@ def test_stuck_establishment_deadline_cleans_partially_created_transport(
 
         monkeypatch.setattr(client_module, "establish_connection", establish)
         started = asyncio.get_running_loop().time()
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(asyncio.TimeoutError, match="BLE connection establishment timed out.*limit"):
             await client.connect(device)
         elapsed = asyncio.get_running_loop().time() - started
         assert client_module._CONNECT_TIMEOUT <= elapsed < 0.3

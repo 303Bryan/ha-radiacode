@@ -538,6 +538,13 @@ class RadiaCodeBLEClient:
             return await operation
         except BaseException as err:
             outcome = type(err).__name__
+            if step == "establish_connection" and isinstance(err, asyncio.TimeoutError):
+                elapsed = asyncio.get_running_loop().time() - started
+                detail = f": {err}" if str(err) else ""
+                raise asyncio.TimeoutError(
+                    f"BLE connection establishment timed out after {elapsed:.1f}s "
+                    f"(limit {_CONNECT_TIMEOUT:g}s){detail}"
+                ) from err
             raise
         finally:
             elapsed = asyncio.get_running_loop().time() - started

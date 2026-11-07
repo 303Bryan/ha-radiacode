@@ -87,6 +87,7 @@ async def test_dose_counter_publishes_separately_and_survives_dose_reset(tmp_pat
         write_vsfr=AsyncMock(return_value=True), disconnect=AsyncMock(),
     )
     coordinator._client = client
+    coordinator._serial_number = "TEST-DEVICE"  # Already verified on this connection.
     # This test isolates stream publication and reset from optional register I/O.
     coordinator._schedule_maintenance = lambda: None
     platform = EntityPlatform(

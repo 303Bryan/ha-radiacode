@@ -69,7 +69,7 @@ def test_timed_probes_recover_automatically_with_capped_backoff(make_coordinator
             return recovered
         c._client.get_spectrum.side_effect = transfer
         try:
-            for when in range(1005, 3890, 5):
+            for when in range(1005, 4130, 5):
                 clock.now = when
                 utc_clock.now += timedelta(seconds=5)
                 await refresh_and_settle(c)
@@ -78,11 +78,15 @@ def test_timed_probes_recover_automatically_with_capped_backoff(make_coordinator
                 if when < 3825:
                     assert c.data.spectrum is cached
                     assert c.spectrum_status["acquired_at"] == acquired
+                if 3825 <= when < 4125:
+                    assert c.spectrum_status["recovery_confirmation_pending"]
+                    assert c.data.spectrum is recovered
                 if 1425 <= when < 3825:
                     assert c.spectrum_status["automatic_paused"]
                     assert c.spectrum_status["automatic_recovery_pending"]
                     assert 0 < c.spectrum_status["retry_in_seconds"] <= 900
-            assert attempts == [1060, 1125, 1425, 2025, 2925, 3825, 3885]
+            assert not c.spectrum_status["recovery_confirmation_pending"]
+            assert attempts == [1060, 1125, 1425, 2025, 2925, 3825, 4125]
             assert c.data.spectrum is recovered
             assert c.spectrum_status["acquired_at"] != acquired
             assert not c.spectrum_status["automatic_paused"]
@@ -215,10 +219,11 @@ def test_only_successful_current_spectrum_read_resumes_automatic_reads(
         assert status["acquired_at"] != acquired_at
         assert status["consecutive_failures"] == 0
         assert status["last_error"] is None
-        assert status["retry_in_seconds"] == 60
+        assert status["retry_in_seconds"] == 300
         before = client.get_spectrum.await_count
-        clock.now += 60
-        await refresh_and_settle(coordinator)
+        for _ in range(60):
+            clock.now += 5
+            await refresh_and_settle(coordinator)
         assert client.get_spectrum.await_count == before + 1
         await coordinator.async_shutdown()
 
@@ -432,3 +437,27 @@ def test_recovery_is_bounded_and_respects_slower_user_cadence(make_coordinator, 
         c._record_spectrum_failure("incomplete")
         assert c.spectrum_status["retry_in_seconds"] == delay
         clock.now += delay
+
+
+@pytest.mark.parametrize("interval,expected", [(60, 300), (600, 600)])
+def test_early_manual_success_and_failed_confirmation_preserve_pacing(make_coordinator, coordinator_module, clock, interval, expected):
+    async def scenario():
+        c = make_coordinator(spectrum_interval=interval)
+        await refresh_and_settle(c)
+        c._record_spectrum_failure("interrupted")
+        await c.async_get_spectrum()
+        deadline = c._next_spectrum_read
+        assert c.spectrum_status["retry_in_seconds"] == expected
+        clock.now += 10
+        await c.async_get_spectrum()
+        assert c.spectrum_status["recovery_confirmation_pending"]
+        assert c._next_spectrum_read == deadline
+        clock.now = deadline
+        c._client.get_spectrum.side_effect = TimeoutError("incomplete confirmation")
+        with pytest.raises(coordinator_module.UpdateFailed, match="incomplete confirmation"):
+            await c.async_get_spectrum()
+        assert not c.spectrum_status["recovery_confirmation_pending"]
+        assert c.spectrum_status["retry_in_seconds"] == expected
+        assert c.data.spectrum is not None
+        await c.async_shutdown()
+    asyncio.run(scenario())

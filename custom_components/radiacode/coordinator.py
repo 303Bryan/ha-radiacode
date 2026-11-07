@@ -3,7 +3,7 @@
 Primary poll cycle (every 5 seconds by default):
   1. If already connected, skip BLE device lookup and poll directly.
   2. If not connected, locate the BLE device via HA's Bluetooth manager
-     and connect + run the device init sequence.
+     and connect, drain stale data and verify firmware before reading live data.
   3. get_data() → fetches data_buf, decodes records.
   4. On error → disconnect and retry once (same poll cycle) before giving up.
   5. Merge results with cached RareData values (battery, accumulated_dose appear
@@ -11,7 +11,7 @@ Primary poll cycle (every 5 seconds by default):
      poll cycles where no RareData is present).
   6. Return the radiation snapshot to HA before starting optional maintenance.
 
-One managed background task reads identity, settings, health, temperature and
+One managed background task reads settings, health, temperature and
 spectrum on independent elapsed-time cadences. Maintenance updates cached
 fields/listeners without resetting the primary timer or radiation availability.
 Repeated/empty buffers only retain a paired radiation sample for a bounded grace
@@ -106,6 +106,7 @@ _RETRY_DELAY = 2.0
 _SETTINGS_INTERVAL = 60.0
 _DIAGNOSTICS_INTERVAL = 60.0
 _IDENTITY_RETRY_INTERVAL = 60.0
+_WAIT_ADVERTISEMENT = "Waiting for a connectable Bluetooth advertisement from RadiaCode"
 _TEMPERATURE_INTERVAL = 60.0
 _ACCUMULATED_DOSE_INTERVAL = 60.0
 _ACCUMULATED_DOSE_FAILURE_LIMIT = 3
@@ -162,6 +163,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._next_spectrum_read = 0.0
         self._spectrum_retry_delay = max(_SPECTRUM_RETRY_MIN, self._spectrum_interval)
         self._last_spectrum_error: Optional[str] = None
+        self._spectrum_confirmation_due: Optional[float] = None
         self._spectrum_consecutive_failures = 0
         self._automatic_spectrum_paused = False
         self._address: str = entry.data[CONF_ADDRESS]
@@ -508,6 +510,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             **self.spectrum_entity_attributes,
             "consecutive_failures": self._spectrum_consecutive_failures,
             "failure_limit": _SPECTRUM_FAILURE_LIMIT,
+            "recovery_confirmation_pending": self._spectrum_confirmation_due is not None,
             "format_version": self._client.spectrum_format_version,
             "format_source": getattr(self._client, "spectrum_format_source", None),
             "last_error": self._last_spectrum_error,
@@ -690,9 +693,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     self.hass, self._address, connectable=True
                 )
                 if ble_device is None:
-                    raise UpdateFailed(
-                        "RadiaCode not found — is the device on and in range?"
-                    )
+                    raise UpdateFailed(_WAIT_ADVERTISEMENT)
 
             data = await self._poll_with_retry(ble_device)
             self._check_user_disconnected("after radiation poll")
@@ -817,7 +818,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             })
             self._using_cached_measurement = not fresh
             # Even an initial empty buffer is a complete transport response.
-            # Identity/spectrum discovery may proceed while radiation warms up.
+            # Optional maintenance may proceed while radiation warms up.
             self._schedule_maintenance()
             age = self._age(self._last_fresh_monotonic)
             if age is None:
@@ -885,8 +886,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             return
         now = time.monotonic()
         if not (
-            ((self._serial_number is None or self._identity_connection != self._connection_count) and now >= self._next_identity_read)
-            or now >= self._next_settings_read
+            now >= self._next_settings_read
             or now >= self._next_diagnostics_read
             or now >= self._next_temperature_read
             or (self._dose_read_failures < _ACCUMULATED_DOSE_FAILURE_LIMIT
@@ -917,7 +917,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             and self.measurement_available
             and self._last_measurement_connection == self._connection_count
             and (
-                self._spectrum_consecutive_failures == 0
+                (self._spectrum_consecutive_failures == 0 and self._spectrum_confirmation_due is None)
                 or (self._live_connection_since is not None
                     and now - self._live_connection_since >= _SPECTRUM_RECOVERY_STABLE)
             )
@@ -936,8 +936,6 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     async def _async_run_maintenance(self) -> None:
         """Run due operations sequentially, yielding to primary polls."""
         operations = (
-            ("identity", "_next_identity_read", _IDENTITY_RETRY_INTERVAL,
-             self._fetch_device_identity, None),
             ("configuration", "_next_configuration_read", 300.0,
              self._refresh_protocol_configuration, None),
             ("settings", "_next_settings_read", _SETTINGS_INTERVAL,
@@ -971,8 +969,6 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     self._client, "configuration_retry_due", False
                 ):
                     continue
-                if phase == "identity" and self._serial_number is not None and self._identity_connection == self._connection_count:
-                    continue
                 if phase == "register_directory" and (
                     self._fw_version is None or self._sfr_attempted
                 ):
@@ -996,11 +992,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     elif cache_attribute is not None and result is not None:
                         setattr(self, cache_attribute, result)
                     self._optional_errors.pop(phase, None)
-                    if phase == "identity":
-                        # Success is cached per connection, not rate limited.
-                        # Only failed checks must retain the reconnect cooldown.
-                        self._next_identity_read = 0.0
-                    elif phase == "accumulated_dose":
+                    if phase == "accumulated_dose":
                         self._dose_read_failures = 0
                     elif phase == "spectrum":
                         self._record_spectrum_success(result)
@@ -1116,20 +1108,32 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
     def _record_spectrum_success(self, spectrum: Spectrum) -> None:
         self._last_spectrum = spectrum
         self._last_spectrum_acquired_at = datetime.now(timezone.utc)
-        # A successful manual current-spectrum read also proves this path is
-        # usable again and resumes automatic reads at the configured cadence.
+        now = time.monotonic()
+        if self._spectrum_consecutive_failures and self._spectrum_interval > 0:
+            delay = max(_SPECTRUM_RETRY_STEP_MIN, self._spectrum_interval)
+            self._spectrum_confirmation_due = now + delay
+            _LOGGER.debug("Spectrum recovered; confirmation eligible in %.0fs", delay)
+        elif self._spectrum_confirmation_due is not None and now >= self._spectrum_confirmation_due:
+            self._spectrum_confirmation_due = None
+            _LOGGER.debug("Spectrum recovery confirmed; resuming configured interval")
         self._spectrum_consecutive_failures = 0
         self._automatic_spectrum_paused = False
         self._last_spectrum_error = None
         self._optional_errors.pop("spectrum", None)
-        self._last_spectrum_success = time.monotonic()
-        self._next_spectrum_read = time.monotonic() + self._spectrum_interval
+        self._last_spectrum_success = now
+        self._next_spectrum_read = (
+            self._spectrum_confirmation_due if self._spectrum_confirmation_due is not None
+            else now + self._spectrum_interval
+        )
         self._spectrum_retry_delay = max(
             _SPECTRUM_RETRY_MIN, self._spectrum_interval
         )
 
     def _record_spectrum_failure(self, error: str) -> None:
         self._last_spectrum_error = error
+        if self._spectrum_confirmation_due is not None:
+            self._spectrum_confirmation_due = None
+            self._spectrum_retry_delay = max(_SPECTRUM_RETRY_STEP_MIN, self._spectrum_interval)
         self._spectrum_consecutive_failures += 1
         if self._spectrum_consecutive_failures >= _SPECTRUM_FAILURE_LIMIT:
             self._automatic_spectrum_paused = True
@@ -1192,6 +1196,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 self._optional_errors.pop("accumulated_dose", None)
                 self._last_spectrum = None
                 self._last_spectrum_acquired_at = None
+                self._spectrum_confirmation_due = None
                 self._automatic_spectrum_paused = False
                 self._spectrum_consecutive_failures = 0
                 self._spectrum_retry_delay = max(_SPECTRUM_RETRY_MIN, self._spectrum_interval)
@@ -1267,6 +1272,33 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         if self._stopping:
             raise UpdateFailed("Radiacode integration is shutting down")
 
+    async def _read_verified_data(self) -> RadiaCodeData:
+        """Check identity once per connection before consuming the first live buffer."""
+        if self._serial_number is None or self._identity_connection != self._connection_count:
+            started = time.monotonic()
+            if started < self._next_identity_read:
+                raise UpdateFailed("Waiting to retry RadiaCode firmware verification")
+            error = None
+            try:
+                await self._fetch_device_identity()
+                self._optional_errors.pop("identity", None)
+                self._next_identity_read = 0.0
+            except asyncio.CancelledError:
+                error = "cancelled"
+                raise
+            except UpdateFailed as err:
+                error = str(err)
+                raise
+            except Exception as err:
+                error = str(err) or type(err).__name__
+                self._optional_errors["identity"] = error
+                self._next_identity_read = time.monotonic() + _IDENTITY_RETRY_INTERVAL
+                raise UpdateFailed(f"RadiaCode firmware verification failed: {error}") from err
+            finally:
+                self._record_phase("identity", started, error)
+        self._check_user_disconnected("before verified live read")
+        return await self._client.get_data()
+
     async def _poll_with_retry(
         self, ble_device: Optional[BLEDevice]
     ) -> RadiaCodeData:
@@ -1295,10 +1327,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         try:
             if not self._client.is_connected:
                 if ble_device is None:
-                    self._last_error = (
-                        f"RadiaCode {self._address} not found — "
-                        f"is the device on and in range?"
-                    )
+                    self._last_error = _WAIT_ADVERTISEMENT
                     raise UpdateFailed(self._last_error)
                 _LOGGER.debug("RadiaCode not connected, establishing connection")
                 self._remember_connection_source()
@@ -1317,7 +1346,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                     self._last_error = "BLE connection disabled by user"
                     raise UpdateFailed(self._last_error)
 
-            return await self._client.get_data()
+            return await self._read_verified_data()
 
         except UpdateFailed:
             raise
@@ -1361,10 +1390,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             self.hass, self._address, connectable=True
         )
         if ble_device is None:
-            self._last_error = (
-                f"RadiaCode {self._address} not found on retry — "
-                f"is the device on and in range?"
-            )
+            self._last_error = f"{_WAIT_ADVERTISEMENT} before retry"
             raise UpdateFailed(self._last_error)
 
         try:
@@ -1382,7 +1408,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
                 self._last_error = "BLE connection disabled by user"
                 raise UpdateFailed(self._last_error)
 
-            return await self._client.get_data()
+            return await self._read_verified_data()
 
         except UpdateFailed:
             raise
@@ -1399,7 +1425,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
             else:
                 self._last_error = (
                     f"Error communicating with RadiaCode {self._address} "
-                    f"(retry also failed): {retry_err}"
+                    f"(retry also failed): {str(retry_err) or type(retry_err).__name__}"
                 )
             raise UpdateFailed(self._last_error) from retry_err
 
@@ -1487,6 +1513,7 @@ class RadiaCodeCoordinator(DataUpdateCoordinator[RadiaCodeCoordinatorData]):
         self._last_spectrum_acquired_at = None
         self._last_spectrum_error = None
         self._last_spectrum_success = None
+        self._spectrum_confirmation_due = None
         self._optional_errors.pop("spectrum", None)
         self._next_spectrum_read = 0.0
         self._publish_maintenance_cache()
