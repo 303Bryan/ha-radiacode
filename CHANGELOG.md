@@ -19,6 +19,17 @@ New releases use [calendar versioning](docs/release-versioning.md) (`YYYY.MM.N`)
 
 ---
 
+## [2026.11.2] — 2026-11-07
+
+- **Accumulated dose and alarms.** Accumulated Dose and its alarm keep the last total reported by the detector while live dose-rate and count-rate readings continue. After a live-reading outage, both wait for a new dose observation.
+- **Consistent alarm names.** Accumulated Dose Alarm, Count Rate Alarm, and Dose Rate Alarm now use the same names across sensors and threshold controls. Existing automations can keep using the same entity IDs. The accumulated-dose threshold range now accommodates the detector’s factory default.
+- **Bluetooth reconnects.** The integration verifies firmware before the first live read on each connection. Diagnostics identify the active proxy when Home Assistant provides it, and reconnect messages distinguish waiting for a Bluetooth advertisement from a connection timeout.
+- **Automatic spectrum recovery.** When automatic collection is enabled, the integration retries incomplete transfers and publishes the first complete spectrum immediately. It waits at least five minutes, or your configured interval if longer, for a second complete read before resuming normal polling.
+
+**Known issue with Bluetooth proxies.** A spectrum transfer can arrive incomplete even while dose-rate and count-rate readings continue. The likely cause is a limitation somewhere along the Bluetooth proxy connection, though testing has not pinpointed where data is lost. Keeping the detector closer to the active proxy may help. Home Assistant keeps the last complete spectrum and its acquisition time visible while it retries.
+
+---
+
 ## [2026.11.2b5] — 2026-11-07
 
 - Publish the first recovered current spectrum immediately. Wait at least five minutes, or the configured interval if longer, before confirming recovery. Two complete reads separated by this interval restore normal polling. An incomplete confirmation keeps the last complete histogram and starts retries at the longer interval.
